@@ -8,6 +8,11 @@ chroot_mount
 
 read_list() { sed 's/#.*//' "$@" | tr -s ' \t\n' ' '; }   # inline comments allowed
 PKGS="$(read_list "$TOP/build/packages/base.list" "$TOP/build/packages/desktop.list")"
+# Optional dev CLI layer (default off: 1 GB RAM device).
+# Enable with BUILD_DEV=1; appends build/packages/dev.list.
+if [ "${BUILD_DEV:-0}" = "1" ]; then
+  PKGS="$PKGS $(read_list "$TOP/build/packages/dev.list")"
+fi
 
 # Moonlight's official repository (Cloudsmith), debian/trixie arm64.
 # Recover from an interrupted earlier run.
@@ -41,6 +46,11 @@ if [ -s "$WORK/backports-installed.txt" ]; then
   echo "Packages from backports:"; cat "$WORK/backports-installed.txt"
 fi
 in_chroot "apt-get clean"
+# Dev layer extras (BUILD_DEV=1 images only): shell hooks, docker stays off.
+if [ "${BUILD_DEV:-0}" = "1" ]; then
+  cp "$TOP/build/dev-tools-profile.sh" "$ROOTFS/etc/profile.d/dev-tools.sh"
+  in_chroot "systemctl disable docker.service docker.socket containerd.service" || true
+fi
 safe_rm -r "$ROOTFS"/var/lib/apt/lists/*
 mkdir -p "$ROOTFS/var/lib/apt/lists/partial"
 echo "Packages installed. Rootfs size: $(du -shx "$ROOTFS" | cut -f1)"
