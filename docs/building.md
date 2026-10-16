@@ -73,6 +73,4 @@ direnv, lazygit, kitty-terminfo, docker.io, nodejs, npm) plus guarded shell hook
 /etc/profile.d/dev-tools.sh. docker/containerd stay disabled by default;
 enable on the device with sudo systemctl enable --now docker.socket.
 Agent CLIs (opencode, codex) are intentionally not preinstalled: install manually
-per project, they churn fast and eat RAM. VLC ships in all images but is
-software-decode only (see docs/video-decode.md); Moonlight remains the only
-hardware-accelerated player.
+mpv is hardware-accelerated via the patched ffmpeg in build/04c-v4l2-ffmpeg.sh (see docs/video-decode.md).
