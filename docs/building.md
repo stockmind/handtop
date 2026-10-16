@@ -72,5 +72,5 @@ This appends build/packages/dev.list (jq, yq, fd, ripgrep, fzf, bat, gh, starshi
 direnv, lazygit, kitty-terminfo, docker.io, nodejs, npm) plus guarded shell hooks in
 /etc/profile.d/dev-tools.sh. docker/containerd stay disabled by default;
 enable on the device with sudo systemctl enable --now docker.socket.
-Agent CLIs (opencode, codex) are intentionally not preinstalled: install manually
+Agent CLIs (opencode, codex) are intentionally not preinstalled: install manually per project.
 mpv is hardware-accelerated via the patched ffmpeg in build/04c-v4l2-ffmpeg.sh (see docs/video-decode.md).
