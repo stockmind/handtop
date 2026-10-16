@@ -1,4 +1,4 @@
-# Optional dev CLI layer (BUILD_DEV=1). trixie-native arm64 only;
+# Dev CLI layer, bundled in every image. trixie-native arm64 only;
 # NOTE: docker/node are heavy on 1 GB RAM; docker stays disabled by default.
 jq
 yq

@@ -61,14 +61,9 @@ trusted only during the build and removed from the rootfs afterwards.
 - Input daemon key logging: `touch $XDG_RUNTIME_DIR/rg35xxh-inputd.debug` and restart the session.
 - Kernel serial console on the UART header, `ttyS0` at 115200 baud.
 
-## Dev image (BUILD_DEV=1)
+## Dev tools (bundled)
 
-Default images stay lean for 1 GB RAM. For a dev/media image:
-
-    sudo BUILD_DEV=1 bash build/build-rootfs.sh
-    sudo bash build/10-image.sh
-
-This appends build/packages/dev.list (jq, yq, fd, ripgrep, fzf, bat, gh, starship,
+Every image includes build/packages/dev.list (jq, yq, fd, ripgrep, fzf, bat, gh, starship,
 direnv, lazygit, kitty-terminfo, docker.io, nodejs, npm) plus guarded shell hooks in
 /etc/profile.d/dev-tools.sh. docker/containerd stay disabled by default;
 enable on the device with sudo systemctl enable --now docker.socket.

@@ -1,4 +1,4 @@
-# Handtop dev layer (BUILD_DEV=1 images only).
+# Handtop dev tools (bundled in every image).
 # Guarded so plain bash/foot logins pay nothing when tools are absent.
 command -v fdfind >/dev/null && alias fd=fdfind
 command -v batcat >/dev/null && alias bat=batcat
