@@ -38,7 +38,7 @@ grep -q "#define CONFIG_HEVC_V4L2REQUEST_HWACCEL 1" "$SRC/config_components.h" |
 chroot_mount
 in_chroot "ldconfig"
 in_chroot "ffmpeg -version" | head -1 | grep -q "${RPI_PIN:0:7}" || die "patched ffmpeg is not the installed one"
-in_chroot "mpv --hwdec=help" | grep -q "v4l2m2m-copy" || die "mpv misses v4l2m2m decoders"
+in_chroot "mpv --hwdec=help" | grep -q "drm (hevc-drm)" || die "mpv misses the drm hwaccel path"
 in_chroot "apt-get purge -y -qq $DEV_PKGS && apt-get autoremove -y -qq --purge && apt-get clean"
 safe_rm -r "$ROOTFS"/var/lib/apt/lists/\*
 mkdir -p "$ROOTFS/var/lib/apt/lists/partial"
