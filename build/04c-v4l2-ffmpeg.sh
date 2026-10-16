@@ -2,7 +2,8 @@
 # Patched ffmpeg with V4L2 request-API decode (Cedrus VPU) for mpv.
 # Debian trixie ships vanilla ffmpeg 7.1; upstream never merged the stateless
 # V4L2 decoders, so we cross-compile jc-kynesim/rpi-ffmpeg (7.1 branch, same
-# libavcodec ABI) and install to /usr/local, which shadows the system libs.
+# libavcodec ABI) and install over the system libs (--libdir=triplet dir).
+# This replaces dpkg-owned files; intentional on an appliance image.
 # mpv then decodes H.264/HEVC/VP8 on the VPU via --hwdec=drm (drmprime).
 # VLC/Firefox: no V4L2-request code path exists upstream; not solvable here.
 set -euo pipefail
@@ -27,16 +28,17 @@ git init -q "$SRC"
 
 export PKG_CONFIG_SYSROOT_DIR="$ROOTFS"
 export PKG_CONFIG_LIBDIR="$ROOTFS/usr/lib/aarch64-linux-gnu/pkgconfig:$ROOTFS/usr/share/pkgconfig"
-(cd "$SRC" && ./configure --arch=aarch64 --target-os=linux --enable-cross-compile --cross-prefix=aarch64-linux-gnu- --sysroot="$ROOTFS" --pkg-config=pkg-config --prefix=/usr/local --enable-shared --disable-static --disable-doc --disable-debug --enable-gpl --enable-neon --enable-libdrm --enable-libudev --enable-v4l2-request > "$WORK/ffmpeg-config.log" 2>&1)
+(cd "$SRC" && ./configure --arch=aarch64 --target-os=linux --enable-cross-compile --cross-prefix=aarch64-linux-gnu- --sysroot="$ROOTFS" --pkg-config=pkg-config --prefix=/usr --libdir=/usr/lib/aarch64-linux-gnu --enable-shared --disable-static --disable-doc --disable-debug --enable-gpl --enable-neon --enable-libdrm --enable-libudev --enable-v4l2-request > "$WORK/ffmpeg-config.log" 2>&1)
 (cd "$SRC" && make -j"$(nproc)" > "$WORK/ffmpeg-build.log" 2>&1)
 (cd "$SRC" && make DESTDIR="$ROOTFS" install >> "$WORK/ffmpeg-build.log" 2>&1)
 
-file "$ROOTFS/usr/local/bin/ffmpeg" | grep -q "ARM aarch64" || die "ffmpeg is not arm64"
+file "$ROOTFS/usr/bin/ffmpeg" | grep -q "ARM aarch64" || die "ffmpeg is not arm64"
+grep -q "#define CONFIG_HEVC_V4L2REQUEST_HWACCEL 1" "$SRC/config_components.h" || die "v4l2request hwaccel not compiled in"
 
 chroot_mount
 in_chroot "ldconfig"
-in_chroot "ffmpeg -hide_banner -h decoder=hevc" | grep -q "v4l2request" || die "v4l2request hwaccel missing"
-in_chroot "ldd /usr/bin/mpv" | grep "libavcodec" | grep -q "/usr/local/lib" || die "mpv misses patched libavcodec"
+in_chroot "ffmpeg -version" | head -1 | grep -q "${RPI_PIN:0:7}" || die "patched ffmpeg is not the installed one"
+in_chroot "mpv --hwdec=help" | grep -q "v4l2m2m-copy" || die "mpv misses v4l2m2m decoders"
 in_chroot "apt-get purge -y -qq $DEV_PKGS && apt-get autoremove -y -qq --purge && apt-get clean"
 safe_rm -r "$ROOTFS"/var/lib/apt/lists/\*
 mkdir -p "$ROOTFS/var/lib/apt/lists/partial"
