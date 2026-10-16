@@ -12,7 +12,8 @@
 | Memory | Decoder buffers come from CMA: `cma=256M` on the kernel command line (ROCKNIX default is 32 MB). Unused CMA stays available to normal programs. 1080p streaming uses ~140 MB. | `extlinux/extlinux.conf` |
 | Userspace | **Moonlight** ships its own FFmpeg with the `v4l2request` hwaccel (`h264_v4l2request`, `hevc_v4l2request`) and picks it automatically (Settings → video decoder: Automatic). | nothing to install |
 
-Not covered: Debian's FFmpeg (mpv, ffplay, vlc) has no v4l2request support, so those players are software-decode only (fine up to ~480p on this CPU); Firefox cannot use a V4L2 stateless decoder. Moonlight remains the only hardware-accelerated player.
+Players: Moonlight (bundled patched ffmpeg) and mpv: build/04c-v4l2-ffmpeg.sh cross-compiles rpi-ffmpeg 7.1 with --enable-v4l2-request to /usr/local, shadowing system libavcodec. Play with: mpv --hwdec=drm --vo=gpu <file>.
+Not covered: ffplay is software-decode only; VLC has no V4L2 code path at all (removed from the image); Firefox cannot use a V4L2 stateless decoder.
 
 ## Source
 

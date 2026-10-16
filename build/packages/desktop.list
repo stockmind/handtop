@@ -37,7 +37,6 @@ webext-ublock-origin-firefox   # ad blocking: less RAM/CPU per page
 imv
 qpdfview
 mpv
-vlc
 xarchiver
 # Themes / fonts
 adwaita-icon-theme
