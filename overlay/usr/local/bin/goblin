@@ -340,6 +340,8 @@ class GoblinApp(App):
         
         if not libs:
             self.notify("No libraries found", severity="warning")
+        list_view.index = 0    # otherwise the search box steals the dpad at start
+        list_view.focus()
     
     async def show_children(self, parent_id, parent_name, item_types, episodes_of=None):
         """List children of parent_id; one code path for libraries, series and seasons.
@@ -575,6 +577,7 @@ class GoblinApp(App):
                 skipped += 1
                 manifest[iid] = [fn]
                 continue
+            tmp = dest.with_suffix(dest.suffix + ".part")
             try:
                 if kind == "transcode":
                     url = self._transcode_url(iid)
@@ -582,7 +585,6 @@ class GoblinApp(App):
                     url = f"{self.jellyfin_url}/Items/{iid}/Download"
                 req = urllib.request.Request(
                     url, headers={"Authorization": f'MediaBrowser Token="{self.api_key}"'})
-                tmp = dest.with_suffix(dest.suffix + ".part")
                 with urllib.request.urlopen(req, timeout=600) as r, open(tmp, "wb") as fh:
                     shutil.copyfileobj(r, fh)
                 os.replace(tmp, dest)
@@ -590,6 +592,7 @@ class GoblinApp(App):
                 done += 1
             except Exception as e:
                 errors.append(f"{fn}: {e}")
+                tmp.unlink(missing_ok=True)     # no orphaned partials eating the SD card
         manifest[top_id] = [fn for _, fn, _ in todo]   # whole-series bookkeeping
         save_manifest(manifest)
         return done, skipped, errors
@@ -604,6 +607,13 @@ class GoblinApp(App):
         todo = self._download_targets(mi)
         if not todo:
             self.notify(f"Not downloadable ({mi.item_type})", severity="warning")
+            return
+        # SD card is small (~5 GB free): refuse up-front when it clearly won't fit.
+        free = shutil.disk_usage(str(OFFLINE_DIR.parent) if OFFLINE_DIR.parent.exists()
+                                 else str(OFFLINE_DIR)).free
+        need = max(mi.file_size or 0, 300 * 1024 * 1024)   # unknown size -> 300 MB floor
+        if free < need:
+            self.notify(f"Only {free // 1024 // 1024} MB free — won't fit", severity="error")
             return
         n_tc = sum(1 for _, _, k in todo if k == "transcode")
         self.notify(f"Downloading {len(todo)} file(s)" +
@@ -647,6 +657,10 @@ class GoblinApp(App):
     
     async def action_back_or_quit(self):
         if self.mode == "play":
+            box = self.query_one("#search-box", Input)
+            if box.value:                       # Back first clears the filter
+                box.value = ""
+                return
             if self.nav_stack:
                 self.nav_stack.pop()
             if self.nav_stack:
