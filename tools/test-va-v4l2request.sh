@@ -53,7 +53,12 @@ chromium)
 set -e
 $WENV
 pkill -f chromium || true; sleep 1
-LIBVA_DRIVER_NAME=v4l2_request setsid chromium --no-default-browser-check \
+# no-user-gesture-required: without it file:// video stays paused and every
+# screenshot shows the poster instead of decoded frames. LIBVA_V4L2_TRACE: the
+# driver logs device choice + per-buffer export/sync lines to stderr, which
+# confirms or kills the stale-backing theory (docs/video-decode.md).
+LIBVA_V4L2_TRACE=1 LIBVA_DRIVER_NAME=v4l2_request setsid chromium --no-default-browser-check \
+  --autoplay-policy=no-user-gesture-required \
   --ozone-platform=wayland \$flags "file://\$(find \$HOME/Downloads/media -iname '*1080*' \( -iname '*.mp4' -o -iname '*.mkv' \) | head -1)" \
   >/tmp/chrome-$variant.log 2>&1 &
 sleep 25
@@ -71,7 +76,9 @@ set -e
 $WENV
 command -v firefox_esr >/dev/null || command -v firefox-esr >/dev/null || { echo 'firefox-esr not installed: sudo apt-get install -y firefox-esr'; exit 1; }
 LIBVA_DRIVER_NAME=v4l2_request MOZ_DISABLE_RDD_SANDBOX=1 setsid firefox-esr --new-window "file://\$(find \$HOME/Downloads/media -iname '*1080*' \( -iname '*.mp4' -o -iname '*.mkv' \) | head -1)" >/tmp/firefox-va.log 2>&1 &
-echo 'cold start on 1 GB takes minutes; re-run "info"/grim when the window appears'
+echo 'cold start on 1 GB takes minutes; then grim (Print key works too). If the'
+echo 'video shows paused with controls, press Space; a green rectangle while'
+echo 'playing = same display bug as Chromium, a real picture = VA path works.'
 EOF
   ;;
 *)
