@@ -149,6 +149,9 @@ class Core:
         if self.mode == "keys":
             if name == "select":
                 return self._exit_keys()
+            if name == "start":  # straight to gamepad mode, like from desktop
+                out = [("key", KEYS_DPAD[d], False) for d in list(self.held) if d in DPAD]
+                return out + self._enter_gamepad()
             if name in DPAD:
                 return [("key", KEYS_DPAD[name], True)]
             code = KEYS_BUTTONS.get(name)

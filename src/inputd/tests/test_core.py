@@ -63,6 +63,16 @@ def test_keys_mode_navigation():
     assert c.mode == "desktop"
 
 
+def test_keys_mode_start_goes_to_gamepad():
+    c = Core()
+    c.button("select", True, 0)                       # desktop -> keys
+    c.button("down", True, 0.1)                       # leave an arrow held
+    out = c.button("start", True, 0.2)
+    assert ("key", "KEY_DOWN", False) in out          # held arrow released first
+    assert ("mode", "gamepad") in out
+    assert c.mode == "gamepad"
+
+
 def test_pointer_left_stick_deadzone_and_speed():
     c = Core()
     c.tick(0.0)

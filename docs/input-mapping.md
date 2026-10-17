@@ -43,7 +43,7 @@ Implemented by a custom input daemon that grabs the "H700 Gamepad" exclusively a
 - **On-screen keyboard:** custom, part of the input daemon, so the daemon always knows whether it is open. Left stick still moves the pointer while it is open.
 - **Copy/paste:** daemon checks the focused app. Terminals get Ctrl+Shift+C / Ctrl+Shift+V; other apps Ctrl+C / Ctrl+V (Ctrl+C in a terminal would kill the running program). Bash bracketed paste must stay enabled so an accidental R3 paste cannot execute a command. Hold-to-paste can be added later if accidental stick clicks are a problem.
 - **Gamepad mode:** virtual controller uses standard Xbox layout **by position** (bottom button = Xbox A). F is not forwarded (would open Xbox Game Bar on Windows). Rumble from Moonlight can be forwarded to the motor.
-- **Keypad mode (Select):** for terminal TUIs (e.g. the goblin media browser), which read the keyboard and never the virtual pad. D-pad = arrow keys (moves list cursors), A = Enter, B/Esc-path = Esc, X = Tab, Y = Space, L1/R1 = Esc/Enter, right stick still scrolls. Select returns to desktop mode. Mapping is fixed in code (`KEYS_BUTTONS`), not configurable yet.
+- **Keypad mode (Select):** for terminal TUIs (e.g. the goblin media browser), which read the keyboard and never the virtual pad. D-pad = arrow keys (moves list cursors), A = Enter, B/Esc-path = Esc, X = Tab, Y = Space, L1/R1 = Esc/Enter, right stick still scrolls. Select returns to desktop mode; Start switches straight to gamepad mode. Mapping is fixed in code (`KEYS_BUTTONS`), not configurable yet.
 - **Start in gamepad mode:** short tap is sent to the PC as Start; only a 1 s hold switches back.
 - Brightness moved off F-tap to avoid colliding with the F + Vol combo.
 
