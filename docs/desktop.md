@@ -124,3 +124,35 @@ Tested 2026-10-17 on the device: fresh profile per browser, 20 s of scrolling on
 
 Earlier rounds showed Firefox's rendering path (GPU/CPU WebRender, Wayland/X11), CPU governor, smooth scrolling and frame rate made no noticeable difference; full uBlock Origin alone took 110–270 MB in Firefox's extension process.
 
+
+## Goblin TUI (media browser, v0.1.4)
+
+`goblin` (unified menu/play/dashboard) drives Jellyfin with the D-pad. The
+2026-10-17 overhaul fixed the on-device navigation crash and added playlists
+and offline copies:
+
+* **Crash cause**: Jellyfin item ids are hex and often start with a digit;
+  Textual rejects those as widget ids (`BadIdentifier`) the moment a library
+  listed anything. MediaItem now prefixes `item-`. Back-navigation also used
+  `asyncio.run_coroutine_threadsafe(self._loop)` outside the app loop — gone,
+  handlers are plain async now.
+* **Playlists**: Enter plays the *filtered* list (whatever the search box
+  leaves visible) starting at the cursor; `s` shuffles it. Exit value is
+  `("PL", urls, shuffle)` and `__main__` hands mpv the whole list
+  (`--shuffle` when set). Music-video libraries work out of the box
+  (`CollectionType=musicvideos → MusicVideo`).
+* **Offline copies**: `f` saves the selected item (or every episode of a
+  series) under `~/Offline` via `/Items/{id}/Download` (direct copy; server
+  transcode to 720p mp4 only when `GOBLIN_DL_TRANSCODE=1` AND the original is
+  >1 GB or taller than 720p — measure your Wi-Fi vs aurora's transcoding first).
+  `x` removes the local copy only; the server file is never touched. Playing an
+  item that has a local copy uses it instead of streaming (✓ marks stored items).
+* **Layout**: dashboard stats are hidden in play mode (the 480-px screen goes
+  to the list); action bar = Play/Shuffle/Save/Remove.
+* **Season quirk** (Jellyfin 12.2): some season nodes hold no children — the
+  Episodes list falls back to `/Shows/{series}/Episodes?Season=N`.
+* **Headless test** (no device needed, runs against any Jellyfin):
+  `python3 tools/test-goblin-tui.py` with `JELLYFIN_URL`/`JELLYFIN_KEY` env —
+  covers library listing, movie/episode/music-video playlists, filter, shuffle,
+  escape-back, and a real download→play-local→remove round-trip. Verified on
+  textual 2.1.2 (Debian trixie, what ships) and 8.x.
