@@ -15,6 +15,13 @@
 # per-codec hw configs via av_hwdevice_get_type_name(), so
 # `--hwdec=v4l2request[-copy]` becomes usable with no mpv patch.
 #
+# One local patch rides on top (build/patches/ffmpeg-v4l2request-drm.patch):
+# the same stateless decoders are also registered under the `drm` device type and
+# accept the DRM device a render API hands them, so mpv's existing dmabuf (DRM
+# PRIME) interop renders those frames zero-copy via --hwdec=drm. Without it mpv
+# has no interop for the v4l2request hwdevice and only the copy path works, which
+# caps 1080p below real time. See docs/video-decode.md ("Zero-copy").
+#
 # Branch v4l2-request-n7.1.3 is rebased on FFmpeg n7.1.3 and reports
 # libavutil 59.39.100 / libavcodec 61.19.101: the same soname ABI as Debian's
 # ffmpeg 7.1.5 that this rootfs' mpv 0.40 was built against, so nothing else is
@@ -51,6 +58,13 @@ mkdir -p "$SRC"
 git init -q "$SRC"
 (cd "$SRC" && git remote add origin "$KWIBOO_URL" && git fetch -q --depth 1 origin "$KWIBOO_PIN" && git checkout -q FETCH_HEAD)
 [ "$(cd "$SRC" && git rev-parse HEAD)" = "$KWIBOO_PIN" ] || die "kwiboo-ffmpeg checkout mismatch"
+
+# Local patch: register the decoders under the DRM device type as well, and
+# accept the DRM device a render API's dmabuf interop hands over.
+FF_PATCH="$TOP/build/patches/ffmpeg-v4l2request-drm.patch"
+[ -f "$FF_PATCH" ] || die "missing patch: $FF_PATCH"
+(cd "$SRC" && git apply "$FF_PATCH") || die "failed to apply $FF_PATCH"
+grep -q "HWACCEL_DRM_V4L2REQUEST" "$SRC/libavcodec/hwconfig.h" || die "route A patch did not apply"
 
 export PKG_CONFIG_SYSROOT_DIR="$ROOTFS"
 export PKG_CONFIG_LIBDIR="$ROOTFS/usr/lib/aarch64-linux-gnu/pkgconfig:$ROOTFS/usr/share/pkgconfig"
@@ -96,6 +110,21 @@ in_chroot "ffmpeg -hide_banner -hwaccels" | grep -qw v4l2request || die "install
 in_chroot "ffmpeg -hide_banner -v error -init_hw_device v4l2request -f lavfi -i nullsrc=s=16x16:r=1:d=1 -f null -" >/dev/null \
   || die "cannot create the v4l2request hwdevice"
 [[ "$(in_chroot "mpv --hwdec=help")" == *"v4l2request"* ]] || die "mpv does not offer the v4l2request hwdec"
+# mpv builds its --hwdec list from libavcodec's hwconfigs, and libavcodec was
+# replaced a moment ago: refresh the loader cache and allow for a stale read
+# before failing. Dump diagnostics if it really is missing.
+drm_ok=0
+for _ in 1 2 3; do
+  in_chroot "ldconfig"
+  if in_chroot "mpv --hwdec=help" | grep -qw drm; then drm_ok=1; break; fi
+  sleep 1
+done
+if [ "$drm_ok" != 1 ]; then
+  ls -la "$ROOTFS/usr/lib/aarch64-linux-gnu/libavcodec.so.61"* >&2
+  in_chroot "ldconfig -p | grep libavcodec" >&2
+  in_chroot "mpv --hwdec=help" >&2 | head -20
+  die "mpv does not offer the drm hwdec (route A patch missing?)"
+fi
 in_chroot "apt-get purge -y -qq $DEV_PKGS && apt-get autoremove -y -qq --purge && apt-get clean"
 safe_rm -r "$ROOTFS"/var/lib/apt/lists/\*
 mkdir -p "$ROOTFS/var/lib/apt/lists/partial"

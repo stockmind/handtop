@@ -16,9 +16,12 @@ same hwaccel) both in Moonlight and in the system FFmpeg and mpv.
   (`v4l2-request-n7.1.3` — the V4L2 Request API patchset, upstream PR 20847,
   i.e. the same code Moonlight embeds) and installs it over the system libs. It
   registers the `v4l2request` hwdevice and the
-  `h264/hevc/av1/vp8/vp9/mpeg2video_v4l2request` hwaccels; mpv derives its
-  `--hwdec=v4l2request[-copy]` values from exactly those, so no mpv patch is
-  involved.
+  `h264/hevc/av1/vp8/vp9/mpeg2video_v4l2request` hwaccels, and — since
+  2026-10-17 — the same decoders again under the `drm` hwdevice
+  (`build/patches/ffmpeg-v4l2request-drm.patch`). mpv derives its
+  `--hwdec=v4l2request[-copy]` and `--hwdec=drm[-copy]` values from exactly
+  those; the `drm` registration is what makes zero-copy playback work, with an
+  unpatched mpv (see *Zero-copy* below).
 
 Measured on the device 2026-10-17 (kernel 7.2.0, `tools/check-video-decode.sh`):
 
@@ -36,32 +39,64 @@ $ mpv --hwdec=v4l2request-copy --frames=60 <540p HEVC>
 Using hardware decoding (v4l2request-copy).
 ```
 
-`--hwdec=v4l2request[-copy]` is offered for H.264, HEVC, MPEG-2, VP8, VP9 and
-AV1 (AV1/VP9 have no Cedrus support in this kernel, so they fall back).
+`--hwdec=v4l2request[-copy]` and `--hwdec=drm[-copy]` are offered for H.264,
+HEVC, MPEG-2, VP8, VP9 and AV1 (AV1/VP9 have no Cedrus support in this kernel,
+so they fall back).
 
-### Throughput, and why the copy variant
+### Throughput: zero-copy vs copy
 
-The zero-copy variant cannot be used: `--hwdec=v4l2request` yields dmabuf
-frames, mpv has no render-API interop for `AV_HWDEVICE_TYPE_V4L2REQUEST`, and
-`--vo=dmabuf-wayland` refuses those frames (`Cannot convert decoder/filter
-output to any format supported by the output`). mpv therefore silently falls
-back to software with it — the exact mechanism, and the two changes that would
-fix it, are in *Zero-copy* below. Playback uses `--hwdec=v4l2request-copy`, which
-downloads each frame to system memory for the VO to upload — a dmabuf → memory
-→ texture round trip that costs throughput on this device:
+Two paths reach the VPU, and since 2026-10-17 both work. **Zero-copy**
+(`--hwdec=drm`, or `--hwdec=v4l2request` with the patched mpv) hands the decoder's
+dmabufs straight to the VO's DRM PRIME interop; the **copy** variants download
+every frame to system memory for the VO to upload again. *Zero-copy* below has
+the two patches that make the zero-copy names appear; the default configuration
+has been switched to them.
 
-| Path (2026-10-17) | 540p HEVC | 1080p HEVC | 1080p H.264 |
+Measured 2026-10-17 on the device with `--no-audio --untimed` (the reference
+files are 24 fps, so ≥24 fps is real time). Absolute numbers move by tens of
+percent between harnesses — audio on, a different frame count — so read the
+ratios, not the digits:
+
+| Path | 540p HEVC | 1080p HEVC | 1080p H.264 |
 |---|---|---|---|
-| `v4l2request-copy`, `vo=null` (decode + download only) | 94 fps | 23 fps | 25 fps |
-| `v4l2request-copy`, `vo=gpu` (real playback path) | 45 fps | 15 fps | 16 fps |
-| software, `vo=null` | 145 fps | 48 fps | 55 fps |
-| software, `vo=gpu` | 174 fps (crashes) | 16 fps | – |
+| zero-copy, `vo=null` (decode only) | 233 fps | 99 fps | 51 fps |
+| copy, `vo=null` | 142 fps | 48 fps | 24 fps |
+| zero-copy, `vo=gpu` `--profile=fast` | 79 fps | 51 fps | 43 fps |
+| zero-copy, `vo=dmabuf-wayland` | 94 fps | 62 fps | 50 fps |
+| zero-copy, `vo=gpu` (default scaler) | 79 fps | 23 fps | 18 fps |
+| copy, `vo=gpu` (default scaler) | 78 fps | 18 fps | 18 fps |
 
-So the copy path is *slower* than software decoding at 540p, and at 1080p the
-GPU upload is the bottleneck (~15 fps) for both paths — 1080p HEVC/H.264 plays
-below real time in mpv on this device. Zero-copy would remove the round trip and
-is the next step if 1080p playback in mpv matters; Moonlight's zero-copy path
-already handles 1080p60.
+The download/upload round trip halves decode throughput at 1080p (99 → 48 fps
+HEVC, 51 → 24 fps H.264). At 540p the VPU is nowhere near the bottleneck and the
+copy costs little — which is why the first release, whose table used
+audio-enabled runs, only saw the copy path lose badly at 1080p.
+
+At 1080p the *renderer* was the other half of the problem: with the default
+(high-quality) scaler the `gpu` VO manages 23 fps at 1080p HEVC and 18 fps at
+1080p H.264, regardless of zero-copy or copy, because it is spending its time in
+the scaler rather than in the decoder. A bilinear scaler (`--profile=fast`)
+removes that limit. Ten-second playback runs, dropped frames from
+`--term-status-msg='... drop=${frame-drop-count}'`:
+
+| 10 s playback, zero-copy (`hwdec=drm`) | dropped frames |
+|---|---|
+| 540p HEVC, `vo=gpu` | 0 |
+| 540p HEVC episode (23:55, whole file), `vo=gpu` | 0 |
+| 1080p HEVC, `vo=gpu` default scaler | 23 |
+| 1080p HEVC, `vo=gpu --profile=fast` | 0 |
+| 1080p HEVC, `vo=dmabuf-wayland` | 0 |
+| 1080p H.264, `vo=gpu` default scaler | 35 |
+| 1080p H.264, `vo=gpu --profile=fast` | 0 |
+| 1080p H.264, `vo=dmabuf-wayland` | 0 |
+| 1080p H.264, `vo=gpu` **copy** path (`drm-copy`), for comparison | 149 |
+
+So `overlay/etc/mpv/mpv.conf` ships `hwdec=auto-safe` — zero-copy first, the copy
+variants behind it, software last — plus `profile=fast`. `auto-safe` picks the
+zero-copy method by itself (`mpv --hwdec=auto-safe -v` logs `Trying hardware
+decoding via hevc-drm`) and skips it when the VO has no usable interop.
+`vo=dmabuf-wayland` is faster still but renders video only — no OSD, no
+subtitles — so it remains an option rather than the default. The software path is
+unchanged and still the unstable one (next section).
 
 ### The Mesa crash on the software path (pre-existing)
 
@@ -92,108 +127,121 @@ no `v4l2request`), even though mpv — whose loader picks `/usr/lib` first — u
 the new one. `04c` now deletes it, and `tools/check-video-decode.sh` fails if
 `ffmpeg` does not resolve to `/usr/bin/ffmpeg`.
 
-## Zero-copy: why `--hwdec=v4l2request` cannot render, and what would fix it
+## Zero-copy: both routes now work
 
-Investigated 2026-10-17. Zero-copy is *not* missing on the FFmpeg side — our
-Kwiboo build already hands out dmabufs — it is missing on the mpv side, and the
-missing piece is small and well understood.
+The decoder was never the problem: FFmpeg's V4L2 request-API code already
+produces `AV_PIX_FMT_DRM_PRIME` dmabufs, exactly what a VO's DRM PRIME interop
+consumes. The problem was the *device type the decoders were registered under* —
+only `AV_HWDEVICE_TYPE_V4L2REQUEST`, while this device's only interop
+(`drmprime`, reachable from `vo=gpu` through EGL and from `vo=dmabuf-wayland`)
+declares `AV_HWDEVICE_TYPE_DRM`. mpv hands out interop function tables from
+`hwdec_get_hwcontext_fns()` for cuda/d3d11/dxva2/vaapi/vdpau/drmprime and nothing
+else, so `--hwdec=v4l2request` never received frames it could render and fell back
+to software, while `--vo=dmabuf-wayland` refused them outright.
 
-**FFmpeg already exports DRM PRIME (dmabuf) frames.** The hwaccel registration
-is a single macro:
+The interop is indifferent to where the dmabuf came from: `hwdec_drmprime.c` only
+duplicates the frame's object fds and imports them with
+`EGL_EXT_image_dma_buf_import` / `GL_EXT_EGL_image_storage`. Its own device fd is
+never used on this panfrost/EGL path, so the device mpv created for the interop
+does not have to be the same type as the decoder's. Two small patches make use of
+that. **Both are implemented; the image ships route A.**
+
+### Route A — FFmpeg side (shipped): `build/patches/ffmpeg-v4l2request-drm.patch`
+
+Applied by `build/04c-v4l2-ffmpeg.sh` right after the pinned Kwiboo checkout.
+Three parts:
+
+1. `libavcodec/hwconfig.h` gains `HWACCEL_DRM_V4L2REQUEST(codec)`: the same
+   `ff_<codec>_v4l2request_hwaccel`, registered a second time with
+   `AV_PIX_FMT_DRM_PRIME` but under `AV_HWDEVICE_TYPE_DRM`. h264dec, hevcdec,
+   av1dec, vp8, vp9 and mpeg12dec each add one line beside their existing
+   `HWACCEL_V4L2REQUEST(x)`.
+2. `libavcodec/v4l2_request.c` (`ff_v4l2_request_init()`) notices when the device
+   context the caller supplied is a `drm` device and swaps in a real
+   `AV_HWDEVICE_TYPE_V4L2REQUEST` device before calling
+   `ff_decode_get_hw_frames_ctx()`. mpv only ever passes the device it created for
+   the interop; the decoder needs one of its own type, and it is the *device's*
+   hw_type that decides what `av_hwframe_ctx_alloc()` produces.
+3. `libavcodec/decode.c` (`ff_get_format()`) picks the hw config whose **device
+   type matches the supplied device context** instead of simply the first config
+   with a matching pixel format. Without this the first `DRM_PRIME` match — the
+   `v4l2request`-typed entry — is chosen and `hwaccel_init()` rejects the DRM
+   device:
+
+   ```
+   hevc: Invalid setup for format drm_prime: does not match the type of the provided device context.
+   ```
+
+   and mpv falls back (that was this patch's first version: `--hwdec=drm` decoded
+   in software; the selection fix is what made it work).
+
+Consequence: **stock Debian mpv** — no mpv rebuild anywhere in the image build —
+offers `drm` and `drm-copy` in addition to `v4l2request`/`v4l2request-copy`, and
+zero-copy renders:
 
 ```
-libavcodec/hwconfig.h:
-#define HWACCEL_V4L2REQUEST(codec) \
-    HW_CONFIG_HWACCEL(1, 0, 0, DRM_PRIME, V4L2REQUEST, ff_ ## codec ## _v4l2request_hwaccel)
+$ mpv --hwdec=drm --vo=gpu -v <540p HEVC>
+[vo/gpu] Loading hwdec drivers for format: 'drm_prime'
+[vo/gpu] Loading hwdec driver 'drmprime'
+[vo/gpu/drmprime] Using EGL dmabuf interop via GL_EXT_EGL_image_storage
+[vd] Using hardware decoding (drm).
 ```
 
-`HW_CONFIG_HWACCEL(1, 0, 0, …)` requests a *device context* (`HW_DEVICE_CTX`),
-and the advertised hardware pixel format is `AV_PIX_FMT_DRM_PRIME`;
-`libavutil/hwcontext_v4l2request.c` allocates the decoder's buffers as V4L2
-request buffers and exports them as dmabufs
-(`frame->format = AV_PIX_FMT_DRM_PRIME`). Nothing on the decode path needs to
-change for zero-copy.
+The system FFmpeg CLI reaches the same decoder through the same device type. The
+node has to be given explicitly — the default `drm` device selection does not work
+on this SoC (`Device creation failed: -14`) — and `bench` then reports the same
+`cedrus` decode:
 
-**mpv 0.40 cannot bind that hwdevice to a renderer.** mpv derives its `--hwdec`
-values from FFmpeg's hw configs (`add_all_hwdec_methods()` in
-`video/decode/vd_lavc.c`), which is why `--hwdec=v4l2request` exists at all. For
-a *direct* (non-`-copy`) hwdec, mpv then needs a render-API interop that
-supplies a device of the same type:
-
-```c
-/* video/hwdec.c — hwdec_devices_get_by_imgfmt_and_type() */
-if (dev->hw_imgfmt == hw_imgfmt &&
-    (!hw_device_ctx || hw_device_ctx->type == device_type))
+```
+$ ffmpeg -hwaccel drm -hwaccel_device /dev/dri/renderD128 -i in.mp4 -f null -
 ```
 
-`hw_imgfmt` is `IMGFMT_DRMPRIME` for a `DRM_PRIME` hwdec, and mpv 0.40 *does*
-ship the DRM PRIME interop — the Debian package contains `drmprime` strings,
-links `libdrm`/`libgbm`/`libEGL` and warns `drmprime hwdec requires at least one
-dmabuf interop backend` — but that interop owns an `AV_HWDEVICE_TYPE_DRM`
-device, so it never matches `AV_HWDEVICE_TYPE_V4L2REQUEST`. mpv reports
-`Could not create device`, falls back to the `-copy` variant, and
-`--hwdec=v4l2request` alone ends up in software decoding. The
-`--vo=dmabuf-wayland` attempt then fails with `Cannot convert decoder/filter
-output to any format supported by the output` because it is handed `yuv420p`.
+`--hwdec=drm` also works under `--vo=dmabuf-wayland`, the fastest combination
+measured (62 fps at 1080p HEVC, 50 fps at 1080p H.264, 0 dropped frames over 10 s
+in both — video only).
 
-Measured on the device (2026-10-17, 540p HEVC, `--frames=120`):
+### Route B — mpv side (alternative, shipped as patch + helper)
 
-| Command | Result |
-|---|---|
-| `--hwdec=v4l2request --vo=gpu` | software fallback (`VO: [gpu] … yuv420p`), exit 139 (the Mesa crash above) |
-| `--hwdec=v4l2request --vo=dmabuf-wayland` | `[hwupload] failed to upload frame`, exit 2 |
-| `--hwdec=drm --vo=gpu` | `Unsupported hwdec: drm` (no codec offers the `drm` device type) |
-| `--hwdec=v4l2request-copy --vo=gpu` | `Using hardware decoding (v4l2request-copy)`, `nv12`, exit 0 |
+`build/patches/mpv-v4l2request-drmprime.patch`, ~20 lines in
+`video/decode/vd_lavc.c:get_hwdevice()`. When no interop offers a device of the
+decoder's type but the VO *does* already provide an interop for the frames' pixel
+format, it creates the device the decoder asks for
+(`av_hwdevice_ctx_create(AV_HWDEVICE_TYPE_V4L2REQUEST)`) rather than giving up.
+`--hwdec=v4l2request` is then zero-copy under its original name:
 
-**A newer mpv or FFmpeg does not change this.** mpv master's
-`hwdec_devices_get_by_imgfmt_and_type()` and `hwdec_create_dev()` are identical
-to 0.40's (checked 2026-10-17), and upstream FFmpeg still has no V4L2-request
-hwaccels at all: PR
-[#20847](https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/20847) ("Add V4L2 Request
-API hwaccels…") is still a **draft**, with the last review activity in November
-2025. Kwiboo's newer branches `v4l2-request-n8.0.1` / `v4l2-request-n8.1` exist,
-but they are FFmpeg 8.x — a soname bump (`libavcodec.so.62`), so they would
-force an mpv rebuild *and* still register the same `V4L2REQUEST` device type
-with the same `DRM_PRIME` pixel format. They do not unlock zero-copy on their
-own.
+```
+$ ~/mpv-patched --hwdec=v4l2request --vo=gpu -v <540p HEVC>
+[vo/gpu] Loading hwdec driver 'drmprime'
+[vo/gpu/drmprime] Using EGL dmabuf interop via GL_EXT_EGL_image_storage
+[vd] Using hardware decoding (v4l2request).
+```
 
-### Two routes that would work
+It needs mpv rebuilt; `tools/build-mpv-v4l2request.sh` reproduces it: clone the
+image rootfs, add a temporary `deb-src` line *in the clone only*, `apt-get
+build-dep mpv`, `apt-get source mpv`, `patch -p1`, `dpkg-buildpackage -us -uc -b`
+(about three minutes under qemu). Only the resulting `/usr/bin/mpv` is installed
+on a device; the libraries stay Debian's, and the clone is discarded so the real
+rootfs keeps the patched FFmpeg (a plain `apt-get build-dep mpv` would overwrite
+`libavcodec61`).
 
-**A. FFmpeg-side: register the decoders under the `drm` device type**
-(the LibreELEC/CoreELEC "v4l2-drmprime" design). CoreELEC-derived trees ship it
-as `packages/multimedia/ffmpeg/patches/v4l2-drmprime/ffmpeg-001-v4l2-drmprime.patch`,
-and the Armbian "v4l2request" package repository builds FFmpeg with *"v4l2request
-and v4l2drmprime patches"* for exactly this class of stateless decoder,
-recommending an mpv configured with `hwdec=drm`. With the decoders registered as
-`AV_HWDEVICE_TYPE_DRM` + `AV_PIX_FMT_DRM_PRIME`, **stock Debian mpv does
-zero-copy as-is**: `--hwdec=drm --gpu-hwdec-interop=drmprime` (GL interop) or
-`--hwdec=drm --vo=dmabuf-wayland` (direct scanout, no GL). RPi-Distro's
-`ffmpeg-7.1.2-rpi_28.patch` — the patchset we moved *away* from because it
-segfaulted on HEVC — is this design, and jc-kynesim's rpi-ffmpeg plus hsyysy's
-Allwinner-Cedrus fork of it are the same thing. This is FFmpeg-only work, which
-fits the existing `04c` build/gate pipeline, but the HEVC crash must be
-re-tested against a current patchset before trusting it.
+### Why route A is shipped
 
-**B. mpv-side: teach mpv's DRM PRIME interop about the `v4l2request` hwdevice**
-(keeps our proven decoder). In `video/hwdec.c`, allow the match when
-`hw_imgfmt == IMGFMT_DRMPRIME` even though the interop's own device is
-`AV_HWDEVICE_TYPE_DRM`; in `video/decode/vd_lavc.c`, let the *decoder's* device
-be created with `av_hwdevice_ctx_create(…, AV_HWDEVICE_TYPE_V4L2REQUEST, …)`
-while the interop keeps its DRM device for buffer→fd mapping (the interop only
-needs the dmabufs inside the frame). That is ~20 lines; it needs an mpv source
-build, but Debian's mpv already contains the interop, so the delta is small. It
-also unlocks `--vo=dmabuf-wayland` (no GL, direct scanout). This is a genuine mpv
-gap — mpv cannot render dmabufs from a stateless V4L2 decoder at all — so it is
-also the upstreamable fix.
+- It is one FFmpeg patch, so *every* consumer of `AV_PIX_FMT_DRM_PRIME` gains it:
+  stock mpv, the `ffmpeg` CLI, anything else a user installs. Route B fixes mpv
+  only.
+- The image build stays free of a distribution-package rebuild (route B would add
+  a ~3 minute qemu build that must be kept away from the rootfs's FFmpeg
+  libraries).
+- All four spellings keep working — `v4l2request`, `v4l2request-copy`, `drm`,
+  `drm-copy` — so existing configurations are not invalidated and the copy path
+  remains available as a fallback.
 
-**What it would buy:** removal of the dmabuf → system memory → texture round
-trip. Moonlight's own zero-copy path does 1080p60 at 59.9 fps / ~5.9 ms per
-frame on this device, while the mpv copy path manages ~15 fps at 1080p and
-software ~16 fps. Either route also sidesteps the Mesa crash, which has only
-ever been seen with `yuv420p` software frames.
-
-**Until then:** `--hwdec=v4l2request-copy` (the default) for mpv, and Moonlight
-for true zero-copy 1080p60 playback.
+Route B stays in the tree because it is the smaller change and preserves the
+upstream spelling; the device these measurements were taken on runs it (as
+`~/mpv-patched`). Neither route needs a newer FFmpeg (`v4l2-request-n8.x`) or a
+newer mpv — mpv master is byte-for-byte identical in the relevant helper — and
+Moonlight is unaffected either way: it embeds its own FFmpeg and never goes
+through mpv.
 
 ## How it works
 
