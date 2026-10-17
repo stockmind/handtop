@@ -39,6 +39,7 @@ imv
 qpdfview
 mpv
 bemenu                  # fast text app launcher (goblin-run); ~6x quicker than the icon drawer
+python3-textual          # modern TUI framework (goblin-tui); mouse support, neon styling
 xarchiver
 # Themes / fonts
 adwaita-icon-theme

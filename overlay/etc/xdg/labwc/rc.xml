@@ -40,6 +40,8 @@
     <keybind key="XF86MonBrightnessUp"><action name="Execute" command="brightnessctl set 10%+" /></keybind>
     <keybind key="XF86MonBrightnessDown"><action name="Execute" command="brightnessctl set 10%-" /></keybind>
     <keybind key="W-r"><action name="Execute" command="goblin-run" /></keybind>
+    <keybind key="W-m"><action name="Execute" command="goblin-tui menu" /></keybind>
+    <keybind key="W-p"><action name="Execute" command="goblin-tui play" /></keybind>
   </keyboard>
 
   <mouse>
