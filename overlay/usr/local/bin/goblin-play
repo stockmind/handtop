@@ -1,20 +1,8 @@
 #!/bin/sh
-# goblin-play — hierarchical Jellyfin media browser (textual-based).
-#
-# Navigate: Libraries → Shows/Movies → Seasons → Episodes
-# Controls: D-pad/arrows to browse, A/Enter to select, B/Esc to go back
-#
-# Configure via /etc/default/goblin-dash:
-#   DASH_JELLYFIN=http://server:8096
-#   DASH_API_KEY=your-api-key
-set -eu
-
-# Load config
+# goblin-play — launch Jellyfin browser mode of unified goblin TUI.
 if [ -f /etc/default/goblin-dash ]; then
     . /etc/default/goblin-dash
     export JELLYFIN_URL="${DASH_JELLYFIN:-}"
     export JELLYFIN_KEY="${DASH_API_KEY:-}"
 fi
-
-# Launch textual browser
-exec python3 /usr/local/lib/goblin-play-tui.py
+exec goblin play

@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Goblin Menu
-Comment=Modern neon launcher for handheld tools
-Exec=foot -e goblin-tui menu
-Icon=applications-system
-Terminal=false
-Categories=Xfce;Utility;
-Keywords=launcher;menu;tui;textual;neon;dashboard;media;

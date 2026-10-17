@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Goblin Menu
+Comment=Unified handheld TUI suite
+Exec=foot -e goblin menu
+Icon=applications-system
+Terminal=false
+Categories=Xfce;Utility;
+Keywords=launcher;menu;tui;textual;neon;dashboard;media;jellyfin;
