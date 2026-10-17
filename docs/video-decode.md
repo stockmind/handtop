@@ -243,6 +243,90 @@ newer mpv — mpv master is byte-for-byte identical in the relevant helper — a
 Moonlight is unaffected either way: it embeds its own FFmpeg and never goes
 through mpv.
 
+## Chromium and the VPU: the VA-API route (evaluated, not shipped)
+
+When the browser swap landed (v0.1.3) Chromium video was still CPU-decoded
+(~195 % of one core at 1080p24 on the 640×480 session). The question was whether
+VA-API could reach Cedrus: Chromium cannot speak the kernel's V4L2 stateless API
+itself, and Debian ships no VA driver for the VPU. Evaluated 2026-10-17 on the
+device; **rejected, nothing shipped.**
+
+**The backend builds — but not the one everyone links to.** The sunxi wiki's
+`bootlin/libva-v4l2-request` has not been touched since 2021 and no longer
+compiles: it targets the pre-mainline draft API (`V4L2_PIX_FMT_H264_SLICE_RAW`,
+`num_slices`, the old MPEG-2 controls — mainline renamed all of them), and its
+bundled `h264-ctrls.h`/`hevc-ctrls.h` now clash with the kernel's. The maintained
+fork is [sofus13/libva-v4l2_request](https://github.com/sofus13/libva-v4l2_request)
+(tag `1.3`, what the Asahi AUR package builds):
+
+```sh
+git clone -b master https://github.com/sofus13/libva-v4l2_request.git
+cd libva-v4l2_request && meson setup build --prefix=/usr && ninja -C build
+install -m755 build/src/v4l2_request_drv_video.so /usr/lib/aarch64-linux-gnu/dri/
+# packages: meson ninja-build libva-dev libdrm-dev (+ build-essential for gcc)
+```
+
+```sh
+$ LIBVA_DRIVER_NAME=v4l2_request vainfo --display drm --device /dev/dri/renderD128
+libva-v4l2request: detected 1 Request API decoder
+      VAProfileMPEG2Simple/Main, VAProfileH264ConstrainedBaseline/Main/High
+      VAProfileHEVCMain/Main10, VAProfileVP8Version0_3 : VAEntrypointVLD
+```
+
+— exactly Cedrus' codecs (no VP9/AV1, as in the kernel).
+
+**Chromium engages it and the VPU decodes.** With `LIBVA_DRIVER_NAME=v4l2_request`
+and no VA-specific flags, Chromium 155 builds `VaapiVideoDecoder` and hands the
+stream to `/dev/video0`:
+
+```
+[VERBOSE2:media/gpu/vaapi/vaapi_video_decoder.cc:136] VaapiVideoDecoder():
+libva-v4l2request: decoding h264 via /dev/video0 [cedrus] (media /dev/media0)
+libva-v4l2request: using CAPTURE format NV12 (1920x1088)
+```
+
+The numbers look like a working hardware path — 1080p24, native Wayland,
+`getVideoPlaybackQuality()` reported by the page and CPU sampled from inside the
+browser:
+
+| 1080p24 in Chromium | decoder | CPU (one core) | dropped frames |
+|---|---|---|---|
+| no VA driver (shipped) | software | 185–195 % | 0.3/s |
+| `v4l2request` VA driver | Cedrus VPU | **81 %** | 13 in the first 2 s, then **0 over 22 s** |
+
+HEVC decodes the same way (`decoding hevc via /dev/video0 [cedrus]`, 56 % of one
+core).
+
+**The picture is green.** In every screenshot the video area is a flat green
+rectangle — a YUV (0,0,0) surface that was decoded into and never written to the
+screen. `grim` photographs mpv's VPU-decoded output (`hwdec=drm`) and Chromium's
+*software*-decoded video correctly, so it is not a capture artefact; the green
+survives every flag combination:
+
+| Chromium + `LIBVA_DRIVER_NAME=v4l2_request` | decoder | CPU | screen |
+|---|---|---|---|
+| no VA-specific flags | Cedrus | 81 % | green |
+| `--enable-features=VaapiVideoDecoder,VaapiIgnoreDriverChecks,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL --use-angle=gl --ignore-gpu-blocklist` | Cedrus | 122 % | green |
+| `--use-angle=gles --ignore-gpu-blocklist` | Cedrus | 81 % | green |
+| `--disable-features=VaapiVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL` | software (VA-API dropped) | 185 % | correct |
+| `--ozone-platform=x11 --use-angle=gl` (XWayland) | software (`failed to find a suitable render node`) | 182 % | correct |
+
+That fourth row is the dead end: Chromium's Linux VA-API decoder only offers the
+GL/texture output path, so turning it off does not make Chromium copy frames out
+for display — it makes Chromium stop using VA-API. On that GL path panfrost's EGL
+accepts the driver's dmabufs without logging an error and then samples nothing, and
+Chromium reports no failure, so there is nothing to fall back on. The other VA-API
+consumer on the image cannot even cross-check the driver: `ffmpeg -hwaccel vaapi`
+fails earlier, at device setup (`Cannot allocate memory`; CMA is 256 MB, ~60 MB
+free), and Debian's mpv is built without VA-API (`Unsupported hwdec: vaapi`).
+
+**Verdict.** The VPU stays reachable through FFmpeg's own `v4l2request` hwaccel —
+route A, and therefore mpv, the `ffmpeg` CLI and Moonlight — while Chromium video
+stays software-decoded (it plays 1080p24 in real time at ~2 cores). Revisit if
+Chromium's dmabuf import on panfrost or the driver's DRM PRIME export is fixed;
+the backend is unmaintained upstream and unpackaged in Debian, so it would have
+to be built in the image either way.
+
 ## How it works
 
 | Piece | What | Where |
@@ -261,7 +345,9 @@ Players:
   `--hwdec=v4l2request-copy` (the default in `/etc/mpv/mpv.conf`) and
   `ffmpeg -hwaccel v4l2request`. Throughput caveats above.
 - Not covered: ffplay decodes in software only; VLC has no V4L2 code path at all
-  (removed from the image); browsers (Chromium) cannot use a V4L2 stateless decoder.
+  (removed from the image). Chromium is software-decoded as well: the VA-API
+  backend that would reach the VPU was built and measured, and it decodes but
+  never displays — see above.
 
 ## Source
 

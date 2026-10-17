@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Docs: Chromium's VA-API route to the VPU was built, measured and rejected. It works as far as the decoder — `VaapiVideoDecoder` drives `/dev/video0` (Cedrus), 81 % of one core at 1080p24 against 185–195 % in software, 0 dropped frames once past startup — but the picture never reaches the screen: a solid green rectangle in every configuration, because Chromium's Linux decoder only offers the GL output path and has nothing to fall back on. `docs/video-decode.md` carries the backend build, the measurements and the flag matrix; no image change follows from it, Chromium video stays software-decoded.
+
 - Change: the image ships **zsh as the login shell** with the shell setup the handheld has been running: `zsh` joins `base.list`, `05-configure-base.sh` sets it for `rg`, and `/etc/skel/.zshrc` (Oh My Zsh + `git`/`docker`/`zsh-autosuggestions`/`zsh-syntax-highlighting` + starship) is copied into every fresh home. Oh My Zsh and the two custom plugins come from the new `build/04d-ohmyzsh.sh`, pinned to the revisions the device runs. Until now the environment had to be recreated by hand after a reflash; a reflash now keeps it. The `overlay/etc/zsh/zprofile` hook above is what starts the desktop on a zsh login shell.
 - Fix: switching the login shell to zsh left the device on a bare tty1 shell after a reboot (no desktop). The session launcher is `/etc/profile.d/zz-rg35xxh-session.sh` and Debian's zsh does not read `/etc/profile`, so it never ran; the overlay now ships `/etc/zsh/zprofile` with `emulate sh -c 'source /etc/profile'`, which restores `/etc/profile.d` (session launcher, dev-tools PATH) for zsh login shells.
 
