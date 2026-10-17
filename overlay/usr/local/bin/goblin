@@ -136,8 +136,8 @@ ListView { height: 1fr; }
 ListItem { height: 3; padding: 0; }
 /* Media rows are plain Labels (1 line): 200 bordered Buttons per page were
    too slow to mount/paint on the A53 and looked like a hang. */
-MediaItem, LoadMoreItem { height: 1; padding: 0 1; }
-MediaItem > Label, LoadMoreItem > Label { width: 100%; }
+MediaItem, LoadMoreItem, RowItem { height: 1; padding: 0 1; }
+MediaItem > Label, LoadMoreItem > Label, RowItem > Label { width: 100%; }
 ListItem.-highlight { background: #45475a; }
 Button { width: 100%; height: 100%; background: #313244; color: #cdd6f4; border: solid #585b70; text-align: left; }
 Button:hover { background: #45475a; border: solid #89b4fa; }
@@ -177,7 +177,7 @@ class DashboardPanel(Static):
         self.update("\n".join(lines))
 
 
-PLAYABLE_TYPES = {"Episode", "Movie", "MusicVideo", "Video"}
+PLAYABLE_TYPES = {"Episode", "Movie", "MusicVideo", "Video", "Audio"}
 
 # Offline copies live here (SD card root, NOT /tmp which is 128 MB tmpfs).
 OFFLINE_DIR = Path(os.environ.get("GOBLIN_OFFLINE_DIR", str(Path.home() / "Offline")))
@@ -218,10 +218,13 @@ def save_manifest(m):
 
 # Jellyfin virtual folders map to the item types their children have; without
 # this a MusicVideos library lists nothing (its children are MusicVideo).
+# Music libraries are listed flat (all tracks, like a giant playlist): artists
+# and albums would need three browse levels for zero benefit on 640x480.
 COLLECTION_TYPES = {
     "movies": ["Movie"],
     "tvshows": ["Series"],
     "musicvideos": ["MusicVideo"],
+    "music": ["Audio"],
 }
 
 
@@ -241,7 +244,7 @@ class MediaItem(ListItem):
 
     def compose(self):
         icons = {"Collection": "📁", "Series": "📺", "Season": "🗓️", "Episode": "▶️",
-                 "Movie": "🎬", "MusicVideo": "🎵", "Video": "🎞️"}
+                 "Movie": "🎬", "MusicVideo": "🎵", "Audio": "🎧", "Video": "🎞️"}
         icon = icons.get(self.item_type, "📄")
         mark = " ✓" if self.offline else ""
         # Jellyfin ids are hex and often start with a digit; Textual ids must
@@ -260,6 +263,18 @@ class LoadMoreItem(ListItem):
 
     def compose(self):
         yield Label(f"⬇ …and {self.remaining} more")
+
+
+class RowItem(ListItem):
+    """Menu/dashboard row: plain Label like MediaItem (cheap), carries a key."""
+
+    def __init__(self, label, key=None, **kwargs):
+        super().__init__(**kwargs)
+        self.row_label = label
+        self.key = key
+
+    def compose(self):
+        yield Label(Text(self.row_label))
 
 
 class GoblinApp(App):
@@ -341,10 +356,11 @@ class GoblinApp(App):
         list_view = self.query_one("#items-view", ListView)
         await list_view.clear()
         
-        for label, key in [("Dashboard", "d"), ("Play Media", "p"), 
-                           ("Music", "m"), ("Run App", "r"), ("Quit", "q")]:
-            btn = Button(label, id=key, variant="default")
-            await list_view.append(ListItem(btn))
+        for label, key in [("📊 Dashboard", "d"), ("▶️ Play Media", "p"),
+                           ("🎵 Music", "m"), ("🚀 Run App", "r"), ("⏻ Quit", "q")]:
+            await list_view.append(RowItem(label, key))
+        list_view.index = 0
+        list_view.focus()
     
     async def show_dashboard(self):
         self.mode = "dashboard"
@@ -365,9 +381,9 @@ class GoblinApp(App):
         ]
         
         for label, value in stats:
-            btn_id = label.lower().replace(" ", "-")
-            btn = Button(f"{label}: {value}", id=btn_id, variant="default")
-            await list_view.append(ListItem(btn))
+            await list_view.append(RowItem(f"{label}: {value}"))
+        list_view.index = 0
+        list_view.focus()
     
     async def show_libraries(self):
         self.mode = "play"
@@ -528,13 +544,13 @@ class GoblinApp(App):
             return
         
         if self.mode == "menu":
-            btn_id = child.query_one(Button).id
+            btn_id = getattr(child, "key", None)
             if btn_id == "d":
                 await self.show_dashboard()
             elif btn_id == "p":
                 await self.show_libraries()
             elif btn_id == "m":
-                self.notify("Music player coming soon!")
+                self.notify("Music lives in Jellyfin — Play Media → Music 🎧")
             elif btn_id == "r":
                 self.exit("RUN_APP")
             elif btn_id == "q":
@@ -586,6 +602,8 @@ class GoblinApp(App):
         files = load_manifest().get(m.item_id, [])
         if files and (OFFLINE_DIR / files[0]).exists():
             return str(OFFLINE_DIR / files[0])
+        if self.STREAM_TRANSCODE:
+            return self._transcode_url(m.item_id)
         url = f"{self.jellyfin_url}/Videos/{m.item_id}/stream"
         return url + f"?api_key={self.api_key}&MaxStreamingBitrate=40000000"
 
@@ -632,22 +650,20 @@ class GoblinApp(App):
         if bid == "btn-rm":
             self.action_remove_item()
             return
-        # Menu/dashboard rows are still Buttons; media rows activate via
-        # ListView.Selected (click bubbles to ListItem, Enter posts Selected).
-        # Re-activating an already-exited app is harmless (exit is idempotent).
-        if not self._exit:
-            await self._activate(event.button.parent)
 
     def _highlighted_media(self):
         lv = self.query_one("#items-view", ListView)
         child = lv.highlighted_child
         return child if isinstance(child, MediaItem) else None
 
-    # Transcoding is OPTIONAL (GOBLIN_DL_TRANSCODE=1): only worth it if the
-    # server transcodes faster than your network moves the original. Off by
-    # default -> always the direct copy. When on, originals bigger than this,
-    # or taller than the panel can use, come down as 720p mp4 instead.
-    DL_TRANSCODE = os.environ.get("GOBLIN_DL_TRANSCODE", "0") == "1"
+    # Transcoding ON by default both ways (aurora transcodes ~16x realtime vs
+    # ~6 MB/s Wi-Fi, so a server-side 720p mp4 lands faster than the original
+    # AND plays guaranteed-hardware in mpv). Opt out per direction with
+    # GOBLIN_DL_TRANSCODE=0 / GOBLIN_STREAM_TRANSCODE=0. Downloads only
+    # transcode originals bigger than this or taller than the panel anyway;
+    # streaming always asks for <=720p (Jellyfin direct-remuxes when it can).
+    DL_TRANSCODE = os.environ.get("GOBLIN_DL_TRANSCODE", "1") == "1"
+    STREAM_TRANSCODE = os.environ.get("GOBLIN_STREAM_TRANSCODE", "1") == "1"
     DL_TRANSCODE_ABOVE = int(os.environ.get("GOBLIN_DL_TRANSCODE_MB", "1024")) * 1024 * 1024
     DL_TRANSCODE_HEIGHT = int(os.environ.get("GOBLIN_DL_TRANSCODE_HEIGHT", "720"))
 

@@ -133,6 +133,25 @@ async def main():
         urls = expect_pl(app, shuffle=False)
         print("PASS episode ordered playlist:", len(urls), "episodes")
 
+    # --- Music library (flat track list -> playlist); skipped if server has none
+    app = GoblinApp(mode="play")
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(); await pilot.pause()
+        names = [m.media_name for m in pilot.app.query("MediaItem")]
+        if "Music" not in names:
+            print("SKIP music library (not on this server)")
+        else:
+            target = [m for m in pilot.app.query("MediaItem") if m.media_name == "Music"][0]
+            from textual.widgets import ListView as _LVm
+            pilot.app.query_one(_LVm).index = list(pilot.app.query("MediaItem")).index(target)
+            await press_enter(pilot); await pilot.pause()
+            kinds = {m.item_type for m in pilot.app.query("MediaItem")}
+            assert kinds == {"Audio"}, f"Music library listed {kinds}"
+            await press_enter(pilot)
+            urls = expect_pl(app, shuffle=False)
+            assert all("/Videos/" in u for u in urls), "audio stream url wrong shape"
+            print(f"PASS music: {len(urls)} tracks, Enter streams them")
+
     # --- Music video path + search filter + shuffle
     app = GoblinApp(mode="play")
     async with app.run_test(size=(80, 24)) as pilot:

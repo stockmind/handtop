@@ -133,18 +133,23 @@ and offline copies:
 
 * **Crash cause**: Jellyfin item ids are hex and often start with a digit;
   Textual rejects those as widget ids (`BadIdentifier`) the moment a library
-  listed anything. MediaItem now prefixes `item-`. Back-navigation also used
+  listed anything. Rows are plain Labels now (no per-row widget id at all —
+  also what made big lists paint fast). Back-navigation also used
   `asyncio.run_coroutine_threadsafe(self._loop)` outside the app loop — gone,
   handlers are plain async now.
+* **Streaming**: by default asks Jellyfin for a ≤720p h264 mp4 stream
+  (`GOBLIN_STREAM_TRANSCODE=0` opts out to the original + bitrate cap);
+  Jellyfin direct-remuxes when the source already fits, so small files cost
+  nothing and everything else is guaranteed-hardware in mpv over Wi-Fi.
 * **Playlists**: Enter plays the *filtered* list (whatever the search box
   leaves visible) starting at the cursor; `s` shuffles it. Exit value is
   `("PL", urls, shuffle)` and `__main__` hands mpv the whole list
   (`--shuffle` when set). Music-video libraries work out of the box
   (`CollectionType=musicvideos → MusicVideo`).
 * **Offline copies**: `f` saves the selected item (or every episode of a
-  series) under `~/Offline` via `/Items/{id}/Download` (direct copy; server
-  transcode to 720p mp4 only when `GOBLIN_DL_TRANSCODE=1` AND the original is
-  >1 GB or taller than 720p — measure your Wi-Fi vs aurora's transcoding first).
+  series) under `~/Offline`. Server transcode to 720p mp4 is the default
+  (`GOBLIN_DL_TRANSCODE=0` opts out) when the original is >1 GB or taller than
+  720p — aurora transcodes ~16× realtime vs ~6 MB/s Wi-Fi, so it lands faster.
   `x` removes the local copy only; the server file is never touched. Playing an
   item that has a local copy uses it instead of streaming (✓ marks stored items).
 * **Layout**: dashboard stats are hidden in play mode (the 480-px screen goes
