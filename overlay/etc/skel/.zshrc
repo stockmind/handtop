@@ -1,8 +1,8 @@
 # ============================================================================
 # ~/.zshrc — shipped by the image (/etc/skel; 10-image.sh copies skel into a
-# fresh /home/rg). Ported from aurora webtop-private (webtop/config/.zshrc);
-# container paths (/config/...) rewritten to $HOME, and toolchain managers that
-# are not installed here are guarded so the shell always starts clean.
+# fresh /home/rg). Ported from the developer's Arch/zsh setup; container paths
+# were rewritten to $HOME, and toolchain managers that are not installed here
+# are guarded so the shell always starts clean.
 # Oh My Zsh + the two custom plugins come from build/04d-ohmyzsh.sh (pinned).
 # ============================================================================
 
