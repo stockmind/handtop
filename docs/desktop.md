@@ -20,7 +20,7 @@ Sway (ROCKNIX's default) is a keyboard-driven tiling WM — unsuitable for gamep
 ## Hardware acceleration
 
 - OpenGL/GLES via Panfrost (Mesa) for the compositor and GL apps (browser rendering, Moonlight).
-- **Hardware video decode for Moonlight** (H.264/HEVC, up to 1080p60) via the Cedrus V4L2 stateless decoder — see `video-decode.md`. The system FFmpeg and mpv use the same VPU through the same patchset (`--hwdec=v4l2request-copy`); zero-copy rendering in mpv is the remaining gap, and browsers still decode on the CPU.
+- **Hardware video decode for Moonlight** (H.264/HEVC, up to 1080p60) via the Cedrus V4L2 stateless decoder — see `video-decode.md`. The system FFmpeg and mpv use the same VPU through the same patchset and have rendered **zero-copy** since 2026-10-17 (`hwdec=auto-safe` selects the `drm` registration of those decoders, whose dmabufs mpv's DRM PRIME interop takes directly): 1080p HEVC and H.264 play with 0 dropped frames over 10 s, 540p with room to spare. Browsers still decode on the CPU.
 
 ## Shell components: Waybar + nwg-drawer + wlogout
 
