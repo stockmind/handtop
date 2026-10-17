@@ -1,6 +1,40 @@
 # Hardware Video Decoding
 
-**Status (2026-10-09): working for Moonlight.** 1920×1080 60 fps HEVC at 20 Mbps streams at a steady 59.9 fps with 0 dropped frames, ~5.9 ms per decoded frame, whole device ~37 % busy (software decoding at 1080p was ~55 % busy and choppy). 720p HEVC: ~3.8 ms per frame, ~24 % busy.
+## Status
+
+**Working for Moonlight only.** Moonlight links its own FFmpeg — it contains the
+`h264_v4l2request` / `hevc_v4l2request` decoders and `hwcontext_v4l2request` — and
+picks the VPU automatically (Settings → video decoder: Automatic). Measured
+2026-10-09: 1920×1080 60 fps HEVC at 20 Mbps streams at a steady 59.9 fps with 0
+dropped frames, ~5.9 ms per decoded frame, whole device ~37 % busy (software
+decoding at 1080p was ~55 % busy and choppy). 720p HEVC: ~3.8 ms per frame, ~24 %
+busy.
+
+**Broken for the system FFmpeg and mpv.** The VPU is reachable from the system
+FFmpeg only through the mainline V4L2 request-API hwaccel (`ffmpeg -hwaccel drm` /
+`mpv --hwdec=drm`), and that path does not work against Cedrus here. Verified on a
+freshly booted device, 2026-10-17, with `tools/check-video-decode.sh`:
+
+| Command | Result |
+|---|---|
+| `ffmpeg -hwaccel drm -i <hevc>` | SIGSEGV in the decoder thread with the bundled patched FFmpeg (`str w1, [x2, x0, lsl #2]` with `x2 = 0` — a write through a NULL array); `Device creation failed: -14` (EFAULT) with stock Debian 7.1.5 |
+| `mpv --hwdec=drm <hevc>` | SIGSEGV, exit 139 |
+| `mpv --hwdec=drm <h264>` | hardware decode is never even attempted — this build's `drm` hwdec is HEVC-only (`mpv --hwdec=help` lists `drm (hevc-drm)`) |
+| `mpv --hwdec=no <any>` | fine — 1080p H.264 and 540p/1080p HEVC decode in software |
+
+The crash is not a memory problem: a 320×240 HEVC sample crashes identically with
+~110 MB of CMA free. It is also independent of buffer type (MMap and DMABuf both
+crash), of thread count (`--vd-lavc-threads=1` still crashes) and of the VO
+(`--vo=null` never engages the path and falls back to software).
+
+Because `/etc/mpv/mpv.conf` defaulted to `hwdec=drm`, **playing any HEVC file with
+mpv crashed the player**. The default is now software decoding.
+
+Note that Debian trixie's own FFmpeg 7.1 already provides this hwaccel
+(`ffmpeg -hwaccels` lists `drm`), so the cross-built rpi-ffmpeg installed by
+`build/04c-v4l2-ffmpeg.sh` is not what is missing. What works elsewhere is the
+older `*_v4l2request` *decoder* pair, which that build does not register (it
+registers only the `drm` hwaccel).
 
 ## How it works
 
@@ -10,10 +44,20 @@
 | Kernel driver | Cedrus, V4L2 **stateless** (request API) → `/dev/video0`, `/dev/media0` | `sunxi-cedrus.ko` in `/usr/lib/modules/7.2.0/extra/`, loaded automatically from the DT node |
 | Device tree | ROCKNIX DTB + overlay adding the video-engine node | `/boot/firmware/dtb.img` (original kept as `dtb-rocknix.img`) |
 | Memory | Decoder buffers come from CMA: `cma=256M` on the kernel command line (ROCKNIX default is 32 MB). Unused CMA stays available to normal programs. 1080p streaming uses ~140 MB. | `extlinux/extlinux.conf` |
-| Userspace | **Moonlight** ships its own FFmpeg with the `v4l2request` hwaccel (`h264_v4l2request`, `hevc_v4l2request`) and picks it automatically (Settings → video decoder: Automatic). | nothing to install |
+| Heap access | dma-buf heaps are `root:root 0600` in the kernel; the overlay's `72-rg35xxh-dma-heap.rules` gives group `video` access, otherwise ffmpeg logs `Unable to open any dma_heap device` and no dmabuf path can allocate. | `overlay/etc/udev/rules.d/` |
+| Userspace | **Moonlight** ships its own FFmpeg with the `v4l2request` decoders and picks it automatically (Settings → video decoder: Automatic). | nothing to install |
 
-Players: Moonlight (bundled patched ffmpeg) and mpv: build/04c-v4l2-ffmpeg.sh cross-compiles rpi-ffmpeg 7.1 with --enable-v4l2-request to /usr/local, shadowing system libavcodec. Play with: mpv --hwdec=drm --vo=gpu <file>.
-Not covered: ffplay is software-decode only; VLC has no V4L2 code path at all (removed from the image); Firefox cannot use a V4L2 stateless decoder.
+Players:
+
+- **Moonlight** — works today, nothing to install.
+- **mpv / ffmpeg (system)** — does not work; see Status. `build/04c-v4l2-ffmpeg.sh`
+  cross-builds rpi-ffmpeg 7.1 with `--enable-v4l2-request`, but the build registers
+  only the mainline `drm` **hwaccel**, not the `h264_v4l2request` /
+  `hevc_v4l2request` **decoders** Moonlight uses, and the hwaccel path fails against
+  Cedrus. Re-pinning to a build that still registers the decoder pair is the open
+  lead.
+- Not covered: ffplay is software-decode only; VLC has no V4L2 code path at all
+  (removed from the image); Firefox cannot use a V4L2 stateless decoder.
 
 ## Source
 

@@ -1,10 +1,18 @@
 #!/bin/bash
-# Patched ffmpeg with V4L2 request-API decode (Cedrus VPU) for mpv.
-# Debian trixie ships vanilla ffmpeg 7.1; upstream never merged the stateless
-# V4L2 decoders, so we cross-compile jc-kynesim/rpi-ffmpeg (7.1 branch, same
+# Patched ffmpeg with V4L2 request-API decode (Cedrus VPU).
+# Debian trixie ships vanilla ffmpeg 7.1, which has the mainline `drm`
+# (V4L2 request-API) hwaccel but not the older `*_v4l2request` decoders, so we
+# cross-compile jc-kynesim/rpi-ffmpeg (7.1 branch, same
 # libavcodec ABI) and install over the system libs (--libdir=triplet dir).
 # This replaces dpkg-owned files; intentional on an appliance image.
-# mpv then decodes H.264/HEVC/VP8 on the VPU via --hwdec=drm (drmprime).
+#
+# NOTE (2026-10-17): this does NOT give mpv working hardware decoding. Debian's
+# own ffmpeg 7.1 already ships the mainline `drm` hwaccel, and this build only
+# registers that hwaccel -- not the `h264_v4l2request`/`hevc_v4l2request`
+# *decoders* that Moonlight links statically and that do work against Cedrus.
+# Against this kernel/Cedrus the hwaccel path segfaults (see
+# docs/video-decode.md and tools/check-video-decode.sh). The checks below only
+# prove the hwaccel exists in the build, never that it decodes.
 # VLC/Firefox: no V4L2-request code path exists upstream; not solvable here.
 set -euo pipefail
 source "$(dirname "$0")/config.sh"
