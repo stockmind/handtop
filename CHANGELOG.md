@@ -9,6 +9,7 @@
 - Fix: images shipped a stale second copy of the patched ffmpeg under `/usr/local` (an earlier revision of `build/04c` used `--prefix=/usr/local`). Because `/usr/local/bin` precedes `/usr/bin` in `PATH`, the `ffmpeg` a user ran was that old build with no `v4l2request`; mpv was unaffected (the loader prefers `/usr/lib`). `04c` now removes it.
 - Fix: the desktop user could not open the dma-buf heaps (`/dev/dma_heap/*` are `root:root 0600`), so ffmpeg logged `Unable to open any dma_heap device` and every dmabuf-based hardware path was unavailable. New udev rule `72-rg35xxh-dma-heap.rules` grants group `video` access.
 - Docs: rewrote `docs/video-decode.md` with the measurements above; `tools/check-video-decode.sh` now requires a real decode (Cedrus VPU engaged, 0 decode errors, exit 0) instead of a capability listing — that listing is what let the earlier broken build through.
+- Docs: `docs/video-decode.md` gains a *Zero-copy* section — why `--hwdec=v4l2request` cannot render (mpv's DRM PRIME interop owns a `drm` device and so never matches the `v4l2request` hwdevice; mpv master is byte-for-byte identical there), what FFmpeg already provides (dmabufs, `AV_PIX_FMT_DRM_PRIME`), the two routes that would fix it (LibreELEC-style `v4l2-drmprime` decoders registered under the `drm` device type, which stock mpv renders as-is; or ~20 lines in mpv), and why a newer FFmpeg (`v4l2-request-n8.x`) or newer mpv does not help.
 
 ## v0.1.1
 
