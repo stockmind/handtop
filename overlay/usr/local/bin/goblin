@@ -2,6 +2,8 @@
 """goblin — unified handheld TUI suite."""
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -9,7 +11,7 @@ import urllib.request
 from pathlib import Path
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Vertical
+from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Button, Footer, Header, Input, Label, ListView, ListItem, Static
 
 
@@ -93,6 +95,14 @@ Footer { background: #181825; color: #a6adc8; }
 #breadcrumb { height: 1; padding: 0 1; color: #89dceb; text-style: bold; }
 #search-box { height: 3; padding: 0 1; }
 #main-content { height: 1fr; padding: 0 1; }
+/* Action bar: compact equal-width buttons along the bottom (media-center remote style). */
+#action-bar { height: 3; padding: 0 1; }
+#action-bar Button { width: 1fr; height: 1; margin: 1 1 0 0; padding: 0 1; border: round #585b70; background: #262637; text-align: center; }
+#action-bar Button:hover { border: round #89b4fa; background: #313244; }
+#action-bar Button#btn-play { color: #a6e3a1; }
+#action-bar Button#btn-shuffle { color: #cba6f7; }
+#action-bar Button#btn-dl { color: #89dceb; }
+#action-bar Button#btn-rm { color: #f38ba8; margin-right: 0; }
 ListView { height: auto; }
 ListItem { height: 3; padding: 0; }
 Button { width: 100%; height: 100%; background: #313244; color: #cdd6f4; border: solid #585b70; text-align: left; }
@@ -133,17 +143,61 @@ class DashboardPanel(Static):
         self.update("\n".join(lines))
 
 
+PLAYABLE_TYPES = {"Episode", "Movie", "MusicVideo", "Video"}
+
+# Offline copies live here (SD card root, NOT /tmp which is 128 MB tmpfs).
+OFFLINE_DIR = Path(os.environ.get("GOBLIN_OFFLINE_DIR", str(Path.home() / "Offline")))
+
+
+def safe_name(s):
+    return re.sub(r"[^A-Za-z0-9._ -]+", "_", s).strip()[:60] or "media"
+
+
+def load_manifest():
+    """item_id -> [filenames under OFFLINE_DIR]; written by the download action."""
+    try:
+        return json.loads((OFFLINE_DIR / "manifest.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_manifest(m):
+    OFFLINE_DIR.mkdir(parents=True, exist_ok=True)
+    (OFFLINE_DIR / "manifest.json").write_text(json.dumps(m))
+
+
+# Jellyfin virtual folders map to the item types their children have; without
+# this a MusicVideos library lists nothing (its children are MusicVideo).
+COLLECTION_TYPES = {
+    "movies": ["Movie"],
+    "tvshows": ["Series"],
+    "musicvideos": ["MusicVideo"],
+}
+
+
 class MediaItem(ListItem):
-    def __init__(self, name, item_id, item_type, **kwargs):
+    def __init__(self, name, item_id, item_type, collection_type=None, index_number=None,
+                 container=None, offline=False, file_size=None, video_height=None, **kwargs):
         super().__init__(**kwargs)
         self.media_name = name      # Don't use .name (reserved by ListItem)
         self.item_id = item_id
         self.item_type = item_type
-    
+        self.collection_type = collection_type
+        self.index_number = index_number   # Season number, for the Episodes fallback
+        self.container = container         # for the Download naming
+        self.offline = offline             # already stored on device -> show ✓
+        self.file_size = file_size         # bytes, for the transcode decision
+        self.video_height = video_height
+
     def compose(self):
-        icons = {"Collection": "📁", "Series": "📺", "Season": "🗓️", "Episode": "▶️", "Movie": "🎬"}
+        icons = {"Collection": "📁", "Series": "📺", "Season": "🗓️", "Episode": "▶️",
+                 "Movie": "🎬", "MusicVideo": "🎵", "Video": "🎞️"}
         icon = icons.get(self.item_type, "📄")
-        yield Button(f"{icon} {self.media_name}", id=self.item_id, variant="default")
+        mark = " ✓" if self.offline else ""
+        # Jellyfin ids are hex and often start with a digit; Textual ids must
+        # not (BadIdentifier otherwise), hence the prefix. The real id lives in
+        # self.item_id, which is what all handlers read.
+        yield Button(f"{icon} {self.media_name}{mark}", id=f"item-{self.item_id}", variant="default")
 
 
 class GoblinApp(App):
@@ -151,11 +205,14 @@ class GoblinApp(App):
     CSS = CSS
     
     BINDINGS = [
-        ("up", "cursor_up", "Up"), ("down", "cursor_down", "Down"),
-        ("enter", "select", "Select"), ("escape", "back_or_quit", "Back"),
+        # up/down/enter/space are handled natively by ListView and its focused
+        # Button; app-level duplicates here had no matching actions.
+        ("escape", "back_or_quit", "Back"),
         ("q", "quit", "Quit"), ("d", "show_dashboard", "Dashboard"),
         ("p", "show_play", "Play"), ("m", "show_music", "Music"),
         ("r", "show_run", "Run"),
+        ("s", "shuffle_play", "Shuffle"), ("f", "download_item", "Save"),
+        ("x", "remove_item", "Remove"),
     ]
     
     def __init__(self, mode="menu"):
@@ -180,6 +237,7 @@ class GoblinApp(App):
         self.api_key = os.environ.get("JELLYFIN_KEY", "")
         self.nav_stack = []
         self.current_parent_id = None
+        self.last_show = None      # (parent_id, name, child_types, episodes_of)
     
     def api_get(self, endpoint, params=None):
         url = f"{self.jellyfin_url}{endpoint}"
@@ -203,6 +261,11 @@ class GoblinApp(App):
             yield Input(placeholder="Search...", id="search-box")
             with Container(id="main-content"):
                 yield ListView(id="items-view")
+            with Horizontal(id="action-bar"):
+                yield Button("▶ Play (⏎)", id="btn-play", variant="primary")
+                yield Button("🔀 Shuffle (s)", id="btn-shuffle", variant="default")
+                yield Button("⬇ Save (f)", id="btn-dl", variant="default")
+                yield Button("🗑 Remove (x)", id="btn-rm", variant="default")
         yield Footer()
     
     async def on_mount(self):
@@ -217,6 +280,8 @@ class GoblinApp(App):
         self.mode = "menu"
         self.query_one("#breadcrumb", Label).update("")
         self.query_one("#search-box", Input).display = False
+        self.query_one("#action-bar").display = False
+        self.query_one("#dashboard-panel").display = True
         
         list_view = self.query_one("#items-view", ListView)
         await list_view.clear()
@@ -230,6 +295,8 @@ class GoblinApp(App):
         self.mode = "dashboard"
         self.query_one("#breadcrumb", Label).update("📊 Dashboard")
         self.query_one("#search-box", Input).display = False
+        self.query_one("#action-bar").display = False
+        self.query_one("#dashboard-panel").display = True
         
         list_view = self.query_one("#items-view", ListView)
         await list_view.clear()
@@ -254,6 +321,9 @@ class GoblinApp(App):
         
         self.query_one("#breadcrumb", Label).update("🏠 Home")
         self.query_one("#search-box", Input).display = True
+        self.query_one("#action-bar").display = True
+        # The 480-px screen belongs to the list: stats only live in menu/dashboard.
+        self.query_one("#dashboard-panel").display = False
         
         data = self.api_get("/Library/VirtualFolders?format=json")
         libs = data if isinstance(data, list) else []
@@ -265,82 +335,60 @@ class GoblinApp(App):
             name = lib.get("Name", "?")
             item_id = lib.get("ItemId", "") or lib.get("Id", "")  # VirtualFolders uses ItemId
             if item_id:
-                await list_view.append(MediaItem(name, item_id, "Collection"))
+                await list_view.append(MediaItem(name, item_id, "Collection",
+                                                 collection_type=lib.get("CollectionType")))
         
         if not libs:
             self.notify("No libraries found", severity="warning")
     
-    async def show_items(self, parent_id, parent_name, item_types=None):
+    async def show_children(self, parent_id, parent_name, item_types, episodes_of=None):
+        """List children of parent_id; one code path for libraries, series and seasons.
+
+        episodes_of=(series_id, season_number) enables the Episodes fallback:
+        on Jellyfin 12 some season nodes hold no children (episodes stay
+        parented to the series), and /Shows/{id}/Episodes?Season=N finds them.
+        """
         self.current_parent_id = parent_id
+        self.last_show = (parent_id, parent_name, item_types, episodes_of)
         
-        parts = ["🏠 Home"]
-        for _, name in self.nav_stack[-2:]:
-            parts.append(name)
-        parts.append(parent_name)
+        parts = ["🏠 Home"] + [name for _, name, _ in self.nav_stack[-2:]] + [parent_name]
         self.query_one("#breadcrumb", Label).update(" › ".join(parts))
         
-        params = ["Recursive=false", "format=json", "Limit=200", f"ParentId={parent_id}"]
+        # Recursive=true: ParentId+Recursive=false returns zero Episodes under
+        # a season on this server family (measured on Jellyfin 12.2/aurora).
+        params = ["Recursive=true", "format=json", "Limit=200", f"ParentId={parent_id}",
+                  "Fields=Width,Height"]
         if item_types:
             params.append(f"IncludeItemTypes={','.join(item_types)}")
         
         data = self.api_get("/Items", params)
         items = data.get("Items", []) if data else []
+        if not items and episodes_of:
+            series_id, season_no = episodes_of
+            data = self.api_get(f"/Shows/{series_id}/Episodes",
+                                [f"Season={season_no}", "format=json"])
+            items = data.get("Items", []) if data else []
         
+        manifest = load_manifest()
         list_view = self.query_one("#items-view", ListView)
         await list_view.clear()
         
         for item in items[:100]:
-            name = item.get("Name", "?")
             item_id = item.get("Id", "")
-            item_type = item.get("Type", "Folder")
             if item_id:
-                await list_view.append(MediaItem(name, item_id, item_type))
-    
-    async def show_seasons(self, series_id, series_name):
-        self.nav_stack.append((series_id, series_name))
-        self.current_parent_id = series_id
-        
-        parts = ["🏠 Home"]
-        for _, name in self.nav_stack[-2:]:
-            parts.append(name)
-        self.query_one("#breadcrumb", Label).update(" › ".join(parts))
-        
-        data = self.api_get("/Items", 
-                           ["Recursive=false", "format=json", f"ParentId={series_id}",
-                            "IncludeItemTypes=Season"])
-        seasons = data.get("Items", []) if data else []
-        
-        list_view = self.query_one("#items-view", ListView)
-        await list_view.clear()
-        
-        for season in seasons:
-            name = season.get("Name", "?")
-            item_id = season.get("Id", "")
-            if item_id:
-                await list_view.append(MediaItem(name, item_id, "Season"))
-    
-    async def show_episodes(self, season_id, season_name):
-        self.nav_stack.append((season_id, season_name))
-        self.current_parent_id = season_id
-        
-        parts = ["🏠 Home"]
-        for _, name in self.nav_stack[-2:]:
-            parts.append(name)
-        self.query_one("#breadcrumb", Label).update(" › ".join(parts))
-        
-        data = self.api_get("/Items",
-                           ["Recursive=false", "format=json", f"ParentId={season_id}",
-                            "IncludeItemTypes=Episode"])
-        episodes = data.get("Items", []) if data else []
-        
-        list_view = self.query_one("#items-view", ListView)
-        await list_view.clear()
-        
-        for ep in episodes:
-            name = ep.get("Name", "?")
-            item_id = ep.get("Id", "")
-            if item_id:
-                await list_view.append(MediaItem(name, item_id, "Episode"))
+                files = manifest.get(item_id, [])
+                offline = bool(files) and (OFFLINE_DIR / files[0]).exists()
+                await list_view.append(MediaItem(item.get("Name", "?"), item_id,
+                                                 item.get("Type", "Folder"),
+                                                 index_number=item.get("IndexNumber"),
+                                                 container=item.get("Container"),
+                                                 offline=offline,
+                                                 file_size=item.get("FileSize"),
+                                                 video_height=item.get("Height")))
+        if not items:
+            self.notify("No items", severity="warning")
+        list_view.index = 0    # fresh lists have no cursor; Enter/gamepad-A works at once
+        list_view.focus()
     
     def on_input_changed(self, event):
         search = event.value.lower()
@@ -349,64 +397,265 @@ class GoblinApp(App):
             if isinstance(child, MediaItem):
                 child.display = search in child.media_name.lower()
     
-    async def on_button_pressed(self, event):
-        btn = event.button
-        item_id = btn.id
+    async def _activate(self, child):
+        """Single activation path for mouse clicks AND keyboard/gamepad Enter."""
+        if child is None:
+            return
         
         if self.mode == "menu":
-            if item_id == "d":
+            btn_id = child.query_one(Button).id
+            if btn_id == "d":
                 await self.show_dashboard()
-            elif item_id == "p":
+            elif btn_id == "p":
                 await self.show_libraries()
-            elif item_id == "m":
+            elif btn_id == "m":
                 self.notify("Music player coming soon!")
-            elif item_id == "r":
+            elif btn_id == "r":
                 self.exit("RUN_APP")
-            elif item_id == "q":
+            elif btn_id == "q":
                 self.exit()
             return
         
         if self.mode == "play":
-            media_item = btn.parent
-            while media_item and not isinstance(media_item, MediaItem):
-                media_item = media_item.parent
-            
-            if not media_item:
+            media_item = child if isinstance(child, MediaItem) else None
+            if media_item is None:
+                node = child
+                while node and not isinstance(node, MediaItem):
+                    node = node.parent
+                media_item = node
+            if media_item is None:
                 return
             
-            item_type = media_item.item_type
+            item_id = media_item.item_id
             item_name = media_item.media_name
+            item_type = media_item.item_type
             
+            # The stack stores what to re-show on Back: (id, name, child-types).
             if item_type == "Collection":
-                self.nav_stack.append((item_id, item_name))
-                await self.show_items(item_id, item_name, ["Movie", "Series"])
+                child_types = COLLECTION_TYPES.get(media_item.collection_type,
+                                                   ["Movie", "Series"])
+                self.nav_stack.append((item_id, item_name, child_types))
+                await self.show_children(item_id, item_name, child_types)
             elif item_type == "Series":
-                await self.show_seasons(item_id, item_name)
+                self.nav_stack.append((item_id, item_name, ["Season"]))
+                await self.show_children(item_id, item_name, ["Season"])
             elif item_type == "Season":
-                await self.show_episodes(item_id, item_name)
-            elif item_type in ("Episode", "Movie"):
-                stream_url = f"{self.jellyfin_url}/Videos/{item_id}/stream"
-                stream_url += f"?api_key={self.api_key}&MaxStreamingBitrate=40000000"
-                self.exit(stream_url)
+                self.nav_stack.append((item_id, item_name, ["Episode"]))
+                series = self.nav_stack[-2] if len(self.nav_stack) >= 2 else None
+                epi = ((series[0], media_item.index_number)
+                       if series and media_item.index_number is not None else None)
+                await self.show_children(item_id, item_name, ["Episode"], episodes_of=epi)
+            elif item_type in PLAYABLE_TYPES:
+                await self._play_from(media_item)
+
+    def _visible_playables(self):
+        """MediaItems currently shown (search filter applied), in list order."""
+        lv = self.query_one("#items-view", ListView)
+        return [c for c in lv.children
+                if isinstance(c, MediaItem) and c.display and c.item_type in PLAYABLE_TYPES]
+
+    def _resolve_url(self, m):
+        """Local copy when we have one, stream otherwise."""
+        files = load_manifest().get(m.item_id, [])
+        if files and (OFFLINE_DIR / files[0]).exists():
+            return str(OFFLINE_DIR / files[0])
+        url = f"{self.jellyfin_url}/Videos/{m.item_id}/stream"
+        return url + f"?api_key={self.api_key}&MaxStreamingBitrate=40000000"
+
+    async def _play_from(self, mi, shuffle=False):
+        """Exit with the whole filtered playlist; ordered starts at the cursor."""
+        items = self._visible_playables()
+        urls = [self._resolve_url(m) for m in items]
+        if not urls:
+            urls = [self._resolve_url(mi)]
+        start = items.index(mi) if mi in items else 0
+        if not shuffle:
+            urls = urls[start:] + urls[:start]
+        self.exit(("PL", urls, shuffle))
+
+    async def action_shuffle_play(self):
+        if self.mode != "play":
+            return
+        mi = self._highlighted_media() or None
+        items = self._visible_playables()
+        if not items:
+            self.notify("Nothing to play", severity="warning")
+            return
+        urls = [self._resolve_url(m) for m in items]
+        self.exit(("PL", urls, True))
+
+    async def on_list_view_selected(self, event):
+        await self._activate(event.item)
+
+    async def on_button_pressed(self, event):
+        bid = event.button.id
+        if bid == "btn-play":
+            mi = self._highlighted_media()
+            if mi is not None and mi.item_type in PLAYABLE_TYPES:
+                await self._play_from(mi)
+            elif mi is not None:
+                await self._activate(mi)
+            return
+        if bid == "btn-shuffle":
+            await self.action_shuffle_play()
+            return
+        if bid == "btn-dl":
+            await self.action_download_item()
+            return
+        if bid == "btn-rm":
+            self.action_remove_item()
+            return
+        # Mouse/touch path; keyboard Enter arrives as ListView.Selected instead.
+        # Re-activating an already-exited app is harmless (exit is idempotent).
+        if not self._exit:
+            await self._activate(event.button.parent)
+
+    def _highlighted_media(self):
+        lv = self.query_one("#items-view", ListView)
+        child = lv.highlighted_child
+        return child if isinstance(child, MediaItem) else None
+
+    # Transcoding is OPTIONAL (GOBLIN_DL_TRANSCODE=1): only worth it if the
+    # server transcodes faster than your network moves the original. Off by
+    # default -> always the direct copy. When on, originals bigger than this,
+    # or taller than the panel can use, come down as 720p mp4 instead.
+    DL_TRANSCODE = os.environ.get("GOBLIN_DL_TRANSCODE", "0") == "1"
+    DL_TRANSCODE_ABOVE = int(os.environ.get("GOBLIN_DL_TRANSCODE_MB", "1024")) * 1024 * 1024
+    DL_TRANSCODE_HEIGHT = int(os.environ.get("GOBLIN_DL_TRANSCODE_HEIGHT", "720"))
+
+    def _transcode_url(self, iid):
+        return (f"{self.jellyfin_url}/Videos/{iid}/stream"
+                f"?Container=mp4&VideoCodec=h264&AudioCodec=aac"
+                f"&MaxWidth=1280&MaxHeight=720&api_key={self.api_key}")
+
+    def _dl_choice(self, file_size, video_height):
+        """(kind, ext) for one item: direct original vs server-transcoded 720p."""
+        if not self.DL_TRANSCODE:
+            return "direct", None
+        big = (file_size or 0) > self.DL_TRANSCODE_ABOVE
+        tall = (video_height or 0) > self.DL_TRANSCODE_HEIGHT
+        if big or tall:
+            return "transcode", "mp4"
+        return "direct", None
+
+    def _download_targets(self, mi):
+        """[(item_id, filename)] for a playable item, or all episodes for a Series."""
+        def fname(iid, name, container, force_ext=None):
+            ext = force_ext or (container or "mp4").split(",")[0]
+            return f"{safe_name(name)}.{ext}"
+
+        if mi.item_type == "Series":
+            data = self.api_get("/Items", ["Recursive=true", "format=json", "Limit=500",
+                                           f"ParentId={mi.item_id}",
+                                           "IncludeItemTypes=Episode",
+                                           "Fields=Width,Height"])
+            eps = data.get("Items", []) if data else []
+            out = []
+            for ep in eps:
+                if not ep.get("Id"):
+                    continue
+                kind, ext = self._dl_choice(ep.get("FileSize"), ep.get("Height"))
+                out.append((ep["Id"], fname(ep["Id"], f"{mi.media_name} - {ep.get('Name', 'ep')}",
+                                            ep.get("Container"), ext), kind))
+            return out
+        if mi.item_type in PLAYABLE_TYPES:
+            kind, ext = self._dl_choice(mi.file_size, mi.video_height)
+            return [(mi.item_id, fname(mi.item_id, mi.media_name, mi.container, ext), kind)]
+        return []
+
+    def _do_download(self, top_id, todo):
+        """Runs in a worker thread: direct copies or server-transcoded 720p mp4s."""
+        OFFLINE_DIR.mkdir(parents=True, exist_ok=True)   # worker runs before save_manifest
+        manifest = load_manifest()
+        done = skipped = 0
+        errors = []
+        for iid, fn, kind in todo:
+            dest = OFFLINE_DIR / fn
+            if dest.exists() and dest.stat().st_size > 0:
+                skipped += 1
+                manifest[iid] = [fn]
+                continue
+            try:
+                if kind == "transcode":
+                    url = self._transcode_url(iid)
+                else:
+                    url = f"{self.jellyfin_url}/Items/{iid}/Download"
+                req = urllib.request.Request(
+                    url, headers={"Authorization": f'MediaBrowser Token="{self.api_key}"'})
+                tmp = dest.with_suffix(dest.suffix + ".part")
+                with urllib.request.urlopen(req, timeout=600) as r, open(tmp, "wb") as fh:
+                    shutil.copyfileobj(r, fh)
+                os.replace(tmp, dest)
+                manifest[iid] = [fn]
+                done += 1
+            except Exception as e:
+                errors.append(f"{fn}: {e}")
+        manifest[top_id] = [fn for _, fn, _ in todo]   # whole-series bookkeeping
+        save_manifest(manifest)
+        return done, skipped, errors
+
+    async def action_download_item(self):
+        if self.mode != "play":
+            return
+        mi = self._highlighted_media()
+        if mi is None:
+            self.notify("Nothing selected", severity="warning")
+            return
+        todo = self._download_targets(mi)
+        if not todo:
+            self.notify(f"Not downloadable ({mi.item_type})", severity="warning")
+            return
+        n_tc = sum(1 for _, _, k in todo if k == "transcode")
+        self.notify(f"Downloading {len(todo)} file(s)" +
+                    (f", {n_tc} transcoded" if n_tc else "") + "…")
+        # run_worker(thread=True)+wait(): works on Debian's textual 2.1.2 and newer
+        worker = self.run_worker(lambda: self._do_download(mi.item_id, todo),
+                                 group="dl", exclusive=True, thread=True)
+        await worker.wait()
+        done, skipped, errors = worker.result
+        if errors:
+            self.notify(f"Saved {done}, errors: {errors[0]}", severity="error")
+        else:
+            self.notify(f"Saved to device ✓ ({done} new, {skipped} already there)")
+        await self.show_children(*self.last_show[:3], episodes_of=self.last_show[3])
+
+    def action_remove_item(self):
+        if self.mode != "play":
+            return
+        mi = self._highlighted_media()
+        if mi is None:
+            return
+        manifest = load_manifest()
+        files = manifest.pop(mi.item_id, [])
+        if not files:
+            self.notify("Not stored on device", severity="warning")
+            return
+        remaining = set()
+        for v in manifest.values():
+            remaining.update(v)
+        removed = 0
+        for fn in files:
+            if fn in remaining:          # still referenced by another entry
+                continue
+            try:
+                (OFFLINE_DIR / fn).unlink()
+                removed += 1
+            except OSError:
+                pass
+        save_manifest(manifest)
+        self.notify(f"Removed {removed} file(s) from device")
     
-    def action_back_or_quit(self):
-        import asyncio
+    async def action_back_or_quit(self):
         if self.mode == "play":
-            if len(self.nav_stack) >= 2:
+            if self.nav_stack:
                 self.nav_stack.pop()
-                parent_id, parent_name = self.nav_stack[-1]
-                asyncio.run_coroutine_threadsafe(
-                    self.show_seasons(parent_id, parent_name), self._loop
-                )
-            elif len(self.nav_stack) == 1:
-                self.nav_stack.pop()
-                asyncio.run_coroutine_threadsafe(
-                    self.show_libraries(), self._loop
-                )
+            if self.nav_stack:
+                parent_id, parent_name, child_types = self.nav_stack[-1]
+                await self.show_children(parent_id, parent_name, child_types)
+            elif self.current_parent_id is not None:
+                await self.show_libraries()   # Back from a library -> Home
             else:
-                asyncio.run_coroutine_threadsafe(
-                    self.show_menu(), self._loop
-                )
+                await self.show_menu()        # Back from Home -> menu
         else:
             self.exit()
 
@@ -420,6 +669,11 @@ if __name__ == "__main__":
     
     if result == "RUN_APP":
         subprocess.run(["goblin-run"])
+    elif isinstance(result, tuple) and result and result[0] == "PL":
+        # ("PL", [urls], shuffle) — play the filtered list; mpv --shuffle randomizes it.
+        _, urls, shuffle = result
+        cmd = ["mpv", "--force-window=yes", "--idle=no"] + (["--shuffle"] if shuffle else []) + urls
+        subprocess.run(cmd)
     elif result:
         cmd = ["mpv", "--force-window=yes", "--idle=no", result]
         subprocess.run(cmd)
