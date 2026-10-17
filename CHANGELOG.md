@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: the real cause of Thunar's "missing exec" error was a stub `/usr/local/share/applications/mpv.desktop` (no `Exec=`) left by an earlier experiment, shadowing the real one in `/usr/share`; GIO resolves `/usr/local` first and reported "Desktop file didn't specify Exec field" for every video. Removed on the device. Added `overlay/usr/local/share/applications/play-mpv.desktop` (a "Play with mpv" Open With entry that bypasses pseudo-gui mode) and `XDG_DATA_DIRS` defaults in `/etc/zsh/zshenv` so login shells never hand GIO an empty data path.
+
 - Fix: install `tumbler`. Thunar without the freedesktop thumbnail service crashed its OpenURI path (`exo-open`, trixie exo 4.20) and opening a video failed with a missing-exec error even when mimeapps.list was correct. Fresh homes also get mpv associations now (skel mimeapps.list above); both applied on the live device.
 
 - Fix: fresh homes now ship `~/.config/mimeapps.list` (`overlay/etc/skel/.config`) with mpv as the default for every video type. Thunar had no handler and its launcher fell back to executing a literal `%U` ("missing exec"); double-clicking a video now opens mpv. Applied on the live device too, and `/etc/skel/.config/mimeapps.list` updated there.
