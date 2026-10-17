@@ -63,10 +63,18 @@ export PKG_CONFIG_LIBDIR="$ROOTFS/usr/lib/aarch64-linux-gnu/pkgconfig:$ROOTFS/us
 # prefer /usr/lib over /usr/local/lib, so mpv was never affected -- it is still
 # ~23 MB of dead libs and a confusing second ffmpeg.
 safe_rm -r "$ROOTFS"/usr/local/bin/ffmpeg "$ROOTFS"/usr/local/bin/ffprobe "$ROOTFS"/usr/local/bin/ffplay
-for lib in libavcodec.so libavdevice.so libavfilter.so libavformat.so libavutil.so \
-           libpostproc.so libswresample.so libswscale.so; do
-  safe_rm -r "$ROOTFS/usr/local/lib/$lib"*
+# Deliberately not safe_rm: it realpaths its arguments, and realpath resolves the
+# .so symlinks to their targets, so the links themselves would survive as
+# dangling links once the versioned libraries are gone.
+for lib in libavcodec libavdevice libavfilter libavformat libavutil \
+           libpostproc libswresample libswscale; do
+  for f in "$ROOTFS/usr/local/lib/$lib".so*; do
+    { [ -e "$f" ] || [ -L "$f" ]; } && rm -f -- "$f"
+  done
 done
+stale="$(find "$ROOTFS/usr/local/lib" -maxdepth 1 \
+         \( -name 'libav*.so*' -o -name 'libsw*.so*' -o -name 'libpostproc*.so*' \) 2>/dev/null)"
+[ -z "$stale" ] || die "stale ffmpeg libraries still under /usr/local/lib: $stale"
 
 (cd "$SRC" && make DESTDIR="$ROOTFS" install >> "$WORK/ffmpeg-build.log" 2>&1)
 
