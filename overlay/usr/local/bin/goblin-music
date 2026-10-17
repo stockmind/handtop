@@ -1,0 +1,21 @@
+#!/bin/sh
+# goblin-music — pick an audio file and play it in mpv (audio-only, no window).
+#
+# The handheld's "jukebox": fuzzy-find anything under MUSIC_DIR and play it.
+# Good for podcasts / a local music folder without spinning up a web client.
+#   MUSIC_DIR   where to look (default ~/Music, else ~/Downloads/media)
+set -eu
+
+dir="${MUSIC_DIR:-$HOME/Music}"
+[ -d "$dir" ] || dir="${MEDIA_DIR:-$HOME/Downloads/media}"
+[ -d "$dir" ] || { echo "goblin-music: no music dir (set MUSIC_DIR)" >&2; exit 1; }
+
+file=$(find "$dir" -type f \
+          \( -iname '*.mp3' -o -iname '*.flac' -o -iname '*.m4a' -o -iname '*.ogg' \
+             -o -iname '*.opus' -o -iname '*.wav' -o -iname '*.aac' \) 2>/dev/null \
+          | sed "s#$dir/##" \
+          | sort \
+          | fzf --prompt='Music> ') || exit 0
+
+echo "♫ $file" >&2
+exec mpv --no-video --force-window=no "$dir/$file"

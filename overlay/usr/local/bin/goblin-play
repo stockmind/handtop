@@ -1,0 +1,57 @@
+#!/bin/sh
+# goblin-play — pick a Jellyfin item and play it in mpv with hardware decode.
+#
+# A deliberately tiny alternative to the Jellyfin web client: no JS, one curl +
+# fzf + mpv. It lists your favourite (or most-recent) movies/shows over the LAN
+# and hands the chosen stream URL straight to mpv, which decodes HEVC/H.264 on
+# the Cedrus VPU (see docs/video-decode.md).
+#
+# Configure via environment (all optional; sensible defaults so it just runs):
+#   JELLYFIN_URL   base URL, e.g. http://mediaserver:8096      (default off)
+#   JELLYFIN_KEY   API key                                     (default off)
+#   JELLYFIN_USER  user id for "in progress" (advanced; optional)
+#   MPV            mpv command                                 (default mpv)
+#
+# With JELLYFIN_URL unset it falls back to browsing local files under MEDIA_DIR
+# (default ~/Downloads/media), so it is useful even without a server.
+set -eu
+
+MPV="${MPV:-mpv}"
+MEDIA_DIR="${MEDIA_DIR:-$HOME/Downloads/media}"
+
+die() { echo "goblin-play: $*" >&2; exit 1; }
+
+play_url() {
+    # Hardware-safe flags mirror /etc/mpv/mpv.conf; add nothing exotic here.
+    echo "▶ $1" >&2
+    exec "$MPV" --force-window=yes --idle=no "$1"
+}
+
+if [ -n "${JELLYFIN_URL:-}" ]; then
+    command -v jq >/dev/null 2>&1 || die "jq is required for Jellyfin mode"
+    api="$JELLYFIN_URL/Library/Media/Items?IncludeItemTypes=Movie,Series,Episode"
+    api="$api&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Limit=300"
+    api="$api&Fields=Overview&format=json"
+    [ -n "${JELLYFIN_KEY:-}" ] && api="$api&api_key=$JELLYFIN_KEY"
+
+    picked=$(curl -fsSL --max-time 8 "$api" \
+        | jq -r '.Items[]? | "\(.Name // "?")\t\(.Id)"' \
+        | fzf --with-nth=1 --delimiter='\t' --prompt='Jellyfin> ' \
+              --header=$'Name\t(id)\nUp arrow = more history') || exit 0
+    id=${picked##*	}
+    [ -n "$id" ] || die "no item selected"
+
+    # Ask Jellyfin for a direct-stream URL for this item (H.264/HEVC where the
+    # server allows it; otherwise it transcodes).
+    stream="$JELLYFIN_URL/Videos/$id/stream?api_key=${JELLYFIN_KEY:-}&MaxStreamingBitrate=40000000"
+    play_url "$stream"
+else
+    # Local-file mode: fuzzy-find any video under MEDIA_DIR.
+    [ -d "$MEDIA_DIR" ] || die "no JELLYFIN_URL set and MEDIA_DIR missing: $MEDIA_DIR"
+    file=$(find "$MEDIA_DIR" -type f \
+              \( -iname '*.mkv' -o -iname '*.mp4' -o -iname '*.webm' \
+                 -o -iname '*.avi' -o -iname '*.m4v' -o -iname '*.ts' \) 2>/dev/null \
+              | sed "s#$MEDIA_DIR/##" \
+              | fzf --prompt='Media> ') || exit 0
+    play_url "$MEDIA_DIR/$file"
+fi

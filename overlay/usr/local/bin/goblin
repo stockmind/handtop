@@ -1,0 +1,43 @@
+#!/bin/sh
+# goblin — one entry point for the handheld's daily tools.
+#
+#   goblin            interactive fzf menu (dashboard / play / music / htop …)
+#   goblin dash       live TUI status dashboard
+#   goblin play       pick & play video (Jellyfin if configured, else local)
+#   goblin music      pick & play an audio file
+#
+# Thin wrappers named goblin-dash / goblin-play / goblin-music also exist so
+# each can be bound or scripted on its own; they all just call this script.
+set -eu
+
+DASH_JELLYFIN="${DASH_JELLYFIN:-}"     # e.g. http://mediaserver:8096  ("" = off)
+DASH_API_KEY="${DASH_API_KEY:-}"       # Jellyfin API key (optional now-playing)
+
+show_menu() {
+    choice=$(printf '%s\n' \
+        "Dashboard" \
+        "Play media" \
+        "Music" \
+        "htop" \
+        "Files" \
+        "Screen off" \
+        | fzf --prompt='goblin> ' --header='daily tools — Enter runs it') || return 0
+    case "$choice" in
+        Dashboard)  exec "${TERMINAL:-foot}" -e goblin-dash ;;
+        Play*)      exec "${TERMINAL:-foot}" -e goblin-play ;;
+        Music)      exec "${TERMINAL:-foot}" -e goblin-music ;;
+        htop)       exec "${TERMINAL:-foot}" -e htop ;;
+        Files)      exec thunar ;;
+        "Screen off") wlopm --off '*' 2>/dev/null || true ;;
+    esac
+}
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+    "")          show_menu ;;
+    dash|dash*)  DASH_JELLYFIN="$DASH_JELLYFIN" DASH_API_KEY="$DASH_API_KEY" exec python3 /usr/local/lib/goblin-dash.py "$@" ;;
+    play)        exec /usr/local/bin/goblin-play "$@" ;;
+    music)       exec /usr/local/bin/goblin-music "$@" ;;
+    *)           echo "usage: goblin [dash|play|music]" >&2; exit 2 ;;
+esac

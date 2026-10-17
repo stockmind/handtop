@@ -1,0 +1,4 @@
+#!/bin/sh
+# Live TUI system dashboard for the handheld. --once prints one frame.
+# See /usr/local/lib/goblin-dash.py for options (DASH_JELLYFIN, DASH_API_KEY).
+exec python3 /usr/local/lib/goblin-dash.py "$@"
