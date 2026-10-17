@@ -354,6 +354,12 @@ pure YUV(0,0,0) green with no logged error — matching every observation above.
    `cma=320M` or freed RAM to get a bit-exact `hwdownload` check independent
    of any browser.
 
+Prepared offline 2026-10-17 while the device was offline: the driver (tag 1.3)
+is cross-built in the qemu chroot by `tools/build-va-v4l2request.sh` (artifact
+`work/va-driver/v4l2_request_drv_video.so`, arm64, NEEDED=libc only as VA
+drivers require), and `tools/test-va-v4l2request.sh push|info|chromium|firefox`
+runs the whole plan over SSH with screenshots pulled back to `work/va-shots/`.
+
 ## How it works
 
 | Piece | What | Where |
