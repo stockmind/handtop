@@ -37,37 +37,57 @@ def test_face_buttons_desktop():
     assert c.button("x", True, 0) == [("osk", "toggle")]
     c.button("r1", False, 0.1)   # release keys held by the asserts above
     c.button("r2", False, 0.1)
-    assert c.button("select", True, 0.2) == [("mode", "keys")]
+    assert c.button("select", True, 0.2) == []          # hold-based now
+    out, _ = run_ticks(c, 0.2, 1.3)
+    assert ("mode", "keys") in out                      # fires after the 1 s hold
+    assert c.mode == "keys"
+
+
+def test_select_quick_tap_does_not_switch():
+    c = Core()
+    c.tick(0.0)
+    assert c.button("select", True, 0.1) == []
+    assert c.button("select", False, 0.5) == []         # released before 1 s
+    out, _ = run_ticks(c, 0.5, 1.0)
+    assert ("mode", "keys") not in out and c.mode == "desktop"
 
 
 def test_keys_mode_navigation():
     c = Core()
-    assert c.button("select", True, 0) == [("mode", "keys")]   # enter
-    assert c.button("select", False, 0.1) == []
-    assert c.mode == "keys"
-    assert c.button("down", True, 0.2) == [("key", "KEY_DOWN", True)]
-    assert c.button("down", False, 0.3) == [("key", "KEY_DOWN", False)]
-    assert c.button("a", True, 0.4) == [("key", "KEY_ENTER", True)]
-    assert c.button("a", False, 0.5) == [("key", "KEY_ENTER", False)]
-    assert c.button("b", True, 0.6) == [("key", "KEY_ESC", True)]
-    assert c.button("b", False, 0.7) == [("key", "KEY_ESC", False)]
+    c.tick(0.0)
+    assert c.button("select", True, 0.1) == []                 # hold to enter
+    out, t = run_ticks(c, 0.1, 1.3)
+    assert ("mode", "keys") in out and c.mode == "keys"
+    assert c.button("select", False, t) == []                  # release swallowed post-switch
+    assert c.button("down", True, 2.0) == [("key", "KEY_DOWN", True)]
+    assert c.button("down", False, 2.1) == [("key", "KEY_DOWN", False)]
+    assert c.button("a", True, 2.2) == [("key", "KEY_ENTER", True)]
+    assert c.button("a", False, 2.3) == [("key", "KEY_ENTER", False)]
+    assert c.button("b", True, 2.4) == [("key", "KEY_ESC", True)]
+    assert c.button("b", False, 2.5) == [("key", "KEY_ESC", False)]
     # right stick still scrolls (wheel), no pointer motion
-    c.tick(0.7)
-    c.axis("ry", -1.0, 0.7)
-    out, _ = run_ticks(c, 0.7, 0.5)
+    c.tick(2.5)
+    c.axis("ry", -1.0, 2.5)
+    out, _ = run_ticks(c, 2.5, 0.5)
     assert any(a[0] == "wheel" and a[1] > 0 for a in out)
     assert not any(a[0] == "rel" for a in out)
-    # select exits; a held arrow is released first
-    c.button("up", True, 1.3)
-    assert c.button("select", True, 1.4) == [("key", "KEY_UP", False), ("mode", "desktop")]
+    # holding select exits too; a held arrow is released first
+    c.button("up", True, 3.3)
+    c.button("select", True, 3.4)
+    out, _ = run_ticks(c, 3.4, 1.3)
+    assert ("key", "KEY_UP", False) in out and ("mode", "desktop") in out
     assert c.mode == "desktop"
 
 
 def test_keys_mode_start_goes_to_gamepad():
     c = Core()
-    c.button("select", True, 0)                       # desktop -> keys
-    c.button("down", True, 0.1)                       # leave an arrow held
-    out = c.button("start", True, 0.2)
+    c.tick(0.0)
+    c.button("select", True, 0.1)                     # hold select -> keys
+    run_ticks(c, 0.1, 1.3)
+    assert c.mode == "keys"
+    c.button("select", False, 1.5)
+    c.button("down", True, 1.6)                       # leave an arrow held
+    out = c.button("start", True, 1.7)
     assert ("key", "KEY_DOWN", False) in out          # held arrow released first
     assert ("mode", "gamepad") in out
     assert c.mode == "gamepad"

@@ -347,7 +347,7 @@ class Daemon:
                     except FileNotFoundError:
                         pass
                     if a[1] == "keys":
-                        spawn("notify-send", "-t", "2500", "Keypad mode", "D-pad moves, A selects, Select returns to desktop")
+                        spawn("notify-send", "-t", "2500", "Keypad mode", "D-pad moves, A selects; hold Select to return")
                     else:
                         spawn("notify-send", "-t", "1500", "Desktop mode")
             elif kind == "pad_key" and self.pad:

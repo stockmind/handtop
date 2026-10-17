@@ -95,6 +95,7 @@ class Core:
         self.swallowed = set()      # buttons whose press was consumed (e.g. screen wake)
         self.power_fired = False
         self.start_fired = False
+        self.select_fired = False
         self.osk_pressed_button = None  # button that triggered the current OSK press
         self.osk_next_repeat = {}   # dpad dir -> next repeat time
         self.vol_repeat = {}        # vol_up/vol_down -> [cmd, next repeat time]
@@ -147,8 +148,9 @@ class Core:
             return self._pad_button(name, True)
 
         if self.mode == "keys":
-            if name == "select":
-                return self._exit_keys()
+            if name == "select":          # hold (like Start) to leave; tap does nothing
+                self.select_fired = False
+                return []
             if name == "start":  # straight to gamepad mode, like from desktop
                 out = [("key", KEYS_DPAD[d], False) for d in list(self.held) if d in DPAD]
                 return out + self._enter_gamepad()
@@ -168,6 +170,9 @@ class Core:
         if name == osk_key and self.osk_visible:
             self.osk_pressed_button = name
             return [("osk", "press")]
+        if name == "select" and self._binding_of(name) == "mode_keys":
+            self.select_fired = False     # hold to enter keypad mode, like Start's hold
+            return []
         return self._binding(name, True)
 
     def _release(self, name, t):
@@ -198,7 +203,7 @@ class Core:
 
         if self.mode == "keys":
             if name == "select":
-                return []          # handled on press (toggle back to desktop)
+                return []          # hold handled in tick(); a tap does nothing
             if name in DPAD:
                 return [("key", KEYS_DPAD[name], False)]
             code = KEYS_BUTTONS.get(name)
@@ -237,6 +242,14 @@ class Core:
                 out.append(("pad_key", "BTN_START", 0))
                 out.extend(self._enter_desktop())
             return out
+
+        # Select switches into/out of keypad mode only after a hold (like Start);
+        # swallowed so its release does not bounce back.
+        st = self.held.get("select")
+        if st is not None and not self.select_fired and t - st >= self.s["start_hold_seconds"]:
+            self.select_fired = True
+            self.swallowed.add("select")
+            out.extend(self._enter_keys() if self.mode == "desktop" else self._exit_keys())
 
         if self.mode == "keys":
             # Right stick still scrolls long lists; no pointer motion (D-pad is keys).
