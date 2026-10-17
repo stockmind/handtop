@@ -111,7 +111,7 @@ in_chroot "ldconfig"
 [[ "$(in_chroot "command -v ffmpeg")" == "/usr/bin/ffmpeg" ]] || die "ffmpeg in PATH is not /usr/bin/ffmpeg"
 [[ "$(in_chroot "ffmpeg -version")" == *"${KWIBOO_PIN:0:7}"* ]] || die "patched ffmpeg is not the installed one"
 in_chroot "ffmpeg -hide_banner -hwaccels" | grep -qw v4l2request || die "installed ffmpeg has no v4l2request hwaccel"
-in_chroot "ffmpeg -hide_banner -decoders" | grep -qw dav1d || die "installed ffmpeg has no dav1d decoder"
+in_chroot "ffmpeg -hide_banner -decoders" | grep -qw libdav1d || die "installed ffmpeg has no dav1d decoder"
 # -init_hw_device alone just prints the usage screen; give it something to do.
 # An unregistered type fails with "unknown device type" (exit 234).
 in_chroot "ffmpeg -hide_banner -v error -init_hw_device v4l2request -f lavfi -i nullsrc=s=16x16:r=1:d=1 -f null -" >/dev/null \
