@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: `goblin-dash` now exports the sourced environment so Jellyfin now-playing actually appears when `/etc/default/goblin-dash` is set.
+
 - Fix: `goblin-dash` now uses the correct Jellyfin 12+ auth header (`Authorization: MediaBrowser Token="…"`) instead of the deprecated query param, enabling live now-playing over the LAN. Added `/etc/default/goblin-dash` as a template for setting `DASH_JELLYFIN` and `DASH_API_KEY`.
 
 - Change: `goblin-dash` gained a quick-links footer (press 1–5 to launch Play/Music/htop/Files/Screen-off from within the dashboard; q quits). Interactive mode now reads stdin in cbreak, so the number keys trigger the tool without waiting for Enter.
