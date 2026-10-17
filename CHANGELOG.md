@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: fresh homes now ship `~/.config/mimeapps.list` (`overlay/etc/skel/.config`) with mpv as the default for every video type. Thunar had no handler and its launcher fell back to executing a literal `%U` ("missing exec"); double-clicking a video now opens mpv. Applied on the live device too, and `/etc/skel/.config/mimeapps.list` updated there.
+
 - Change: `/etc/mpv/mpv.conf` gained an `[av1]` profile (`hwdec=no`). The Cedrus VPU has no AV1 decoder in this kernel, and `auto-safe` still tries `av1-drm`/`av1-drm-copy` first — both fail on every frame here instead of falling back cleanly. Software (dav1d) plays AV1 real time with 0 dropped frames (measured 2026-10-17: 1920x884@24 and 3840x1772@30 music videos); HEVC/H.264 keep zero-copy `drm`. The profile must come last in the file: activating a profile re-enables options set above it.
 
 - Docs: Chromium's VA-API route to the VPU was built, measured and rejected. It works as far as the decoder — `VaapiVideoDecoder` drives `/dev/video0` (Cedrus), 81 % of one core at 1080p24 against 185–195 % in software, 0 dropped frames once past startup — but the picture never reaches the screen: a solid green rectangle in every configuration, because Chromium's Linux decoder only offers the GL output path and has nothing to fall back on. `docs/video-decode.md` carries the backend build, the measurements and the flag matrix; no image change follows from it, Chromium video stays software-decoded.

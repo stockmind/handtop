@@ -1,0 +1,16 @@
+# Default applications shipped to every fresh home (see 10-image.sh). Without
+# this Thunar has no handler for video files and its launcher falls back to
+# running a literal "%U" — the "missing exec" error. mpv.desktop is the
+# association for every container type the device plays; decode policy itself
+# lives in /etc/mpv/mpv.conf.
+[Default Applications]
+video/mp4=mpv.desktop
+video/x-matroska=mpv.desktop
+video/webm=mpv.desktop
+video/quicktime=mpv.desktop
+video/x-msvideo=mpv.desktop
+video/mpeg=mpv.desktop
+video/x-mpegurl=mpv.desktop
+video/mp2t=mpv.desktop
+video/ogg=mpv.desktop
+video/x-theora+ogg=mpv.desktop
