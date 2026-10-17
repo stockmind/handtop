@@ -261,7 +261,7 @@ Players:
   `--hwdec=v4l2request-copy` (the default in `/etc/mpv/mpv.conf`) and
   `ffmpeg -hwaccel v4l2request`. Throughput caveats above.
 - Not covered: ffplay decodes in software only; VLC has no V4L2 code path at all
-  (removed from the image); Firefox cannot use a V4L2 stateless decoder.
+  (removed from the image); browsers (Chromium) cannot use a V4L2 stateless decoder.
 
 ## Source
 

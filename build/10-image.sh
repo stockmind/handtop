@@ -14,6 +14,7 @@ done
 # otherwise refuses to read the checkout ("dubious ownership") and the image
 # name silently falls back to the release version instead of the commit.
 VER="$(date +%Y%m%d)-$(git -c safe.directory="$TOP" -C "$TOP" rev-parse --short HEAD 2>/dev/null || echo "v$RELEASE_VERSION")"
+[ "$RAM_TYPE" != "DDR4" ] && VER="$VER-$RAM_TYPE"
 OUT="$WORK/out"; mkdir -p "$OUT"
 IMG="$OUT/$IMAGE_NAME-$VER.img"
 P="$WORK/image-parts"; [ -e "$P" ] && safe_rm -r "$P"; mkdir -p "$P"

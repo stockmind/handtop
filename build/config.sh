@@ -2,10 +2,11 @@
 TOP="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"   # absolute, independent of $HOME/sudo
 WORK="${WORK:-$TOP/work}"
 
-RELEASE_VERSION="0.1.1"            # used in the image name when not building from a git checkout
+RELEASE_VERSION="0.1.3"            # used in the image name when not building from a git checkout
+RAM_TYPE="${RAM_TYPE:-DDR4}"          # DDR4 (default) or DDR3 depending on board revision
 
 ROCKNIX_VERSION="20261001"
-ROCKNIX_IMAGE="ROCKNIX-H700.aarch64-${ROCKNIX_VERSION}-DDR4.img.gz"
+ROCKNIX_IMAGE="ROCKNIX-H700.aarch64-${ROCKNIX_VERSION}-${RAM_TYPE}.img.gz"
 ROCKNIX_URL="https://github.com/ROCKNIX/distribution/releases/download/${ROCKNIX_VERSION}/${ROCKNIX_IMAGE}"
 
 ROCKNIX_DL="$WORK/download"        # downloaded image + checksum

@@ -26,7 +26,7 @@ Status: **v0.1.1**, developed and tested on the RG35XX H.
 - Sleep (s2idle) from the power menu or after 10 min idle; Power tap wakes
 - Charges while switched off (power button boots)
 - Wi-Fi set up from Windows/macOS by editing `wifi.txt` on the boot partition
-- Firefox ESR tuned for 1 GB RAM, with uBlock Origin; zram + 2 GB swap file
+- Chromium with uBlock Origin Lite (installed automatically on first launch when online); zram + 2 GB swap file
 - Boot logs written to the FAT partition, readable from any PC
 
 Full control map: [docs/input-mapping.md](docs/input-mapping.md).
@@ -35,7 +35,7 @@ Full control map: [docs/input-mapping.md](docs/input-mapping.md).
 
 You need a microSD card (16 GB or larger) and balenaEtcher or Rufus.
 
-1. Download `handtop-<date>-v0.1.1.img.xz` and its `.sha256` from the Releases page.
+1. Download `handtop-<date>-v0.1.2.img.xz` and its `.sha256` from the Releases page. If that image does nothing at all on power-on (no LED), your unit has DDR3 RAM: use the `-DDR3` image instead.
 2. Flash the `.img.xz` directly (no need to unpack). If Windows offers to format the card afterwards, choose **Cancel**.
 3. Optional: on the `RG35XXHBOOT` drive, fill in `wifi.txt` (SSID, password, country).
 4. Put the card in the **TF1** (left) slot and power on. The first boot takes longer (the system grows to fill the card).
@@ -46,6 +46,24 @@ open Apps → **Enable SSH**, which makes you choose your own password first.
 Screen garbled or black? Your unit may have the newer panel: copy
 `device_trees\sun50i-h700-anbernic-rg35xx-h-rev6-panel.dtb` over `dtb.img` on the boot partition.
 Details: [docs/flashing.md](docs/flashing.md).
+
+## External display
+
+Plug a monitor into the mini HDMI port at any time (hot-plug). Choose what happens from the Apps menu:
+
+- **Monitor only:** the desktop moves to the monitor; the handheld screen becomes a full-size on-screen keyboard
+- **Extend:** the monitor and the handheld screen form one desktop
+- **Mirror:** both show the same picture
+
+Resolution: **tested at 1920×1080 60 Hz**. The HDMI driver allows pixel clocks up to 594 MHz, so higher modes (e.g. 1440p60, 1080p120, up to 4K60 on paper) may work but are untested, and the desktop gets slower at high resolutions. The monitor's preferred mode is used automatically; to change it (in a terminal):
+
+```sh
+wlr-randr                                        # list modes
+wlr-randr --output HDMI-A-1 --mode 1920x1080@60  # pick one
+wlr-randr --output HDMI-A-1 --scale 2            # bigger UI on 4K screens
+```
+
+There is no HDMI audio.
 
 ## Good to know
 
