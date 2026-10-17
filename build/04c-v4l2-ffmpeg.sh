@@ -1,27 +1,45 @@
 #!/bin/bash
 # Patched ffmpeg with V4L2 request-API decode (Cedrus VPU).
-# Debian trixie ships vanilla ffmpeg 7.1, which has the mainline `drm`
-# (V4L2 request-API) hwaccel but not the older `*_v4l2request` decoders, so we
-# cross-compile jc-kynesim/rpi-ffmpeg (7.1 branch, same
-# libavcodec ABI) and install over the system libs (--libdir=triplet dir).
-# This replaces dpkg-owned files; intentional on an appliance image.
 #
-# NOTE (2026-10-17): this does NOT give mpv working hardware decoding. Debian's
-# own ffmpeg 7.1 already ships the mainline `drm` hwaccel, and this build only
-# registers that hwaccel -- not the `h264_v4l2request`/`hevc_v4l2request`
-# *decoders* that Moonlight links statically and that do work against Cedrus.
-# Against this kernel/Cedrus the hwaccel path segfaults (see
-# docs/video-decode.md and tools/check-video-decode.sh). The checks below only
-# prove the hwaccel exists in the build, never that it decodes.
-# VLC/Firefox: no V4L2-request code path exists upstream; not solvable here.
+# Debian trixie ships vanilla ffmpeg 7.1, which has the mainline `drm` hwaccel
+# but none of the stateless V4L2 request-API hwaccels that Cedrus needs, so we
+# cross-compile Kwiboo's FFmpeg -- the V4L2 Request API patchset (upstream PR
+# 20847, branch "v4l2request-v3") -- and install over the system libs
+# (--libdir=triplet dir). This replaces dpkg-owned files; intentional on an
+# appliance image.
+#
+# Why this tree: Moonlight's working 1080p60 HEVC decode comes from the same
+# code. Its binary embeds libavutil/hwcontext_v4l2request.c and the
+# h264/hevc/av1_v4l2request hwaccels, i.e. a `v4l2request` hwdevice plus
+# per-codec stateless hwaccels. mpv builds its --hwdec values from FFmpeg's
+# per-codec hw configs via av_hwdevice_get_type_name(), so
+# `--hwdec=v4l2request[-copy]` becomes usable with no mpv patch.
+#
+# Branch v4l2-request-n7.1.3 is rebased on FFmpeg n7.1.3 and reports
+# libavutil 59.39.100 / libavcodec 61.19.101: the same soname ABI as Debian's
+# ffmpeg 7.1.5 that this rootfs' mpv 0.40 was built against, so nothing else is
+# rebuilt (libplacebo and friends stay as built).
+#
+# The checks below prove the decoders exist AND are wired into mpv. They cannot
+# prove a frame decodes: only a device with /dev/video0 can, see
+# tools/check-video-decode.sh. Gating on CONFIG_*_V4L2REQUEST_HWACCEL or on
+# `mpv --hwdec=help` alone is not enough -- an earlier image passed those and
+# still segfaulted on every HEVC file (docs/video-decode.md).
+#
+# History: this replaced a build of jc-kynesim/rpi-ffmpeg@6dbf87a, whose
+# hevc_v4l2request is a hwaccel bound to AV_HWDEVICE_TYPE_DRM; that path
+# segfaults against Cedrus on this kernel. That revision installed with
+# --prefix=/usr/local, and images built since still carry that copy: whichever
+# ffmpeg sits in /usr/local/bin wins in PATH, so the CLI silently stayed on the
+# old build. We delete it below.
 set -euo pipefail
 source "$(dirname "$0")/config.sh"
 source "$(dirname "$0")/lib/chroot.sh"
 trap chroot_umount EXIT
 
-RPI_PIN="6dbf87aefd7f491210abe1e043a1c228fa1439a0"
-RPI_URL="https://github.com/jc-kynesim/rpi-ffmpeg"
-SRC="$WORK/src/rpi-ffmpeg"
+KWIBOO_PIN="fad85d9c76611c09b561167ab405c667a0dcdeb7"
+KWIBOO_URL="https://github.com/Kwiboo/FFmpeg"
+SRC="$WORK/src/kwiboo-ffmpeg"
 DEV_PKGS="libdrm-dev libudev-dev zlib1g-dev"
 
 chroot_mount
@@ -31,23 +49,46 @@ chroot_umount
 [ -e "$SRC" ] && safe_rm -r "$SRC"
 mkdir -p "$SRC"
 git init -q "$SRC"
-(cd "$SRC" && git remote add origin "$RPI_URL" && git fetch -q --depth 1 origin "$RPI_PIN" && git checkout -q FETCH_HEAD)
-[ "$(cd "$SRC" && git rev-parse HEAD)" = "$RPI_PIN" ] || die "rpi-ffmpeg checkout mismatch"
+(cd "$SRC" && git remote add origin "$KWIBOO_URL" && git fetch -q --depth 1 origin "$KWIBOO_PIN" && git checkout -q FETCH_HEAD)
+[ "$(cd "$SRC" && git rev-parse HEAD)" = "$KWIBOO_PIN" ] || die "kwiboo-ffmpeg checkout mismatch"
 
 export PKG_CONFIG_SYSROOT_DIR="$ROOTFS"
 export PKG_CONFIG_LIBDIR="$ROOTFS/usr/lib/aarch64-linux-gnu/pkgconfig:$ROOTFS/usr/share/pkgconfig"
 (cd "$SRC" && ./configure --arch=aarch64 --target-os=linux --enable-cross-compile --cross-prefix=aarch64-linux-gnu- --sysroot="$ROOTFS" --pkg-config=pkg-config --prefix=/usr --libdir=/usr/lib/aarch64-linux-gnu --enable-shared --disable-static --disable-doc --disable-debug --enable-gpl --enable-neon --enable-libdrm --enable-libudev --enable-v4l2-request > "$WORK/ffmpeg-config.log" 2>&1)
 (cd "$SRC" && make -j"$(nproc)" > "$WORK/ffmpeg-build.log" 2>&1)
+
+# Drop the stale --prefix=/usr/local copy from the earlier revision of this
+# script (see the history note above). /usr/local/bin comes before /usr/bin in
+# PATH, so without this the device keeps running the old build; the loader does
+# prefer /usr/lib over /usr/local/lib, so mpv was never affected -- it is still
+# ~23 MB of dead libs and a confusing second ffmpeg.
+safe_rm -r "$ROOTFS"/usr/local/bin/ffmpeg "$ROOTFS"/usr/local/bin/ffprobe "$ROOTFS"/usr/local/bin/ffplay
+for lib in libavcodec.so libavdevice.so libavfilter.so libavformat.so libavutil.so \
+           libpostproc.so libswresample.so libswscale.so; do
+  safe_rm -r "$ROOTFS/usr/local/lib/$lib"*
+done
+
 (cd "$SRC" && make DESTDIR="$ROOTFS" install >> "$WORK/ffmpeg-build.log" 2>&1)
 
 file "$ROOTFS/usr/bin/ffmpeg" | grep -q "ARM aarch64" || die "ffmpeg is not arm64"
-grep -q "#define CONFIG_HEVC_V4L2REQUEST_HWACCEL 1" "$SRC/config_components.h" || die "v4l2request hwaccel not compiled in"
+[ ! -e "$ROOTFS/usr/local/bin/ffmpeg" ] || die "stale /usr/local/bin/ffmpeg still present"
+grep -q "#define CONFIG_V4L2_REQUEST 1" "$SRC/config.h" || die "v4l2_request not compiled in"
+for c in H264 HEVC AV1 VP8 VP9 MPEG2; do
+  grep -q "#define CONFIG_${c}_V4L2REQUEST_HWACCEL 1" "$SRC/config_components.h" \
+    || die "${c}_v4l2request hwaccel not compiled in"
+done
 
 chroot_mount
 in_chroot "ldconfig"
-[[ "$(in_chroot "ffmpeg -version")" == *"${RPI_PIN:0:7}"* ]] || die "patched ffmpeg is not the installed one"
-[[ "$(in_chroot "mpv --hwdec=help")" == *"drm (hevc-drm)"* ]] || die "mpv misses the drm hwaccel path"
+[[ "$(in_chroot "command -v ffmpeg")" == "/usr/bin/ffmpeg" ]] || die "ffmpeg in PATH is not /usr/bin/ffmpeg"
+[[ "$(in_chroot "ffmpeg -version")" == *"${KWIBOO_PIN:0:7}"* ]] || die "patched ffmpeg is not the installed one"
+in_chroot "ffmpeg -hide_banner -hwaccels" | grep -qw v4l2request || die "installed ffmpeg has no v4l2request hwaccel"
+# -init_hw_device alone just prints the usage screen; give it something to do.
+# An unregistered type fails with "unknown device type" (exit 234).
+in_chroot "ffmpeg -hide_banner -v error -init_hw_device v4l2request -f lavfi -i nullsrc=s=16x16:r=1:d=1 -f null -" >/dev/null \
+  || die "cannot create the v4l2request hwdevice"
+[[ "$(in_chroot "mpv --hwdec=help")" == *"v4l2request"* ]] || die "mpv does not offer the v4l2request hwdec"
 in_chroot "apt-get purge -y -qq $DEV_PKGS && apt-get autoremove -y -qq --purge && apt-get clean"
 safe_rm -r "$ROOTFS"/var/lib/apt/lists/\*
 mkdir -p "$ROOTFS/var/lib/apt/lists/partial"
-echo "rpi-ffmpeg $RPI_PIN installed to /usr/local."
+echo "kwiboo-ffmpeg $KWIBOO_PIN installed to /usr."

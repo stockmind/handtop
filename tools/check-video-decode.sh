@@ -1,14 +1,19 @@
 #!/bin/bash
 # Check the hardware video-decode (Cedrus VPU) path on a running Handtop device.
 #
-# Nothing in the image build can prove this works: the decoders only exist on the
-# device, against /dev/video0. Run this there.
+# Nothing in the image build can prove this: the VPU only exists on the device,
+# behind /dev/video0. Run this there.
 #
 #   ./check-video-decode.sh [video-file]
 #
 # With no argument it uses the first video file it finds under ~/Downloads or
 # /usr/share; pass a H.264 or HEVC file to be explicit. Exits non-zero if the
 # VPU path does not decode.
+#
+# The checks require a real decode (VPU engaged, no decode errors) rather than a
+# capability listing: an earlier image shipped with CONFIG_*_V4L2REQUEST_HWACCEL
+# set and `mpv --hwdec=help` listing the method, and still crashed on every HEVC
+# file. See docs/video-decode.md.
 set -u
 
 FILE="${1:-}"
@@ -35,6 +40,7 @@ chk() { printf '  %-4s  %s\n' "$([ "$2" = 0 ] && echo ok || echo FAIL)" "$1"; [ 
 
 echo "device:"
 [ -e /dev/video0 ] && chk "/dev/video0 present" 0 || chk "/dev/video0 present" 1
+[ -e /dev/media0 ] && chk "/dev/media0 present" 0 || chk "/dev/media0 present" 1
 lsmod 2>/dev/null | grep -q '^sunxi_cedrus' && chk "sunxi_cedrus loaded" 0 || chk "sunxi_cedrus loaded" 1
 if [ -e /dev/dma_heap/system ]; then
   if [ -r /dev/dma_heap/system ] && [ -w /dev/dma_heap/system ]; then
@@ -44,15 +50,30 @@ if [ -e /dev/dma_heap/system ]; then
   fi
 fi
 
-echo "ffmpeg -hwaccel drm:"
-timeout 90 ffmpeg -hide_banner -nostdin -v info -hwaccel drm -t 5 -i "$FILE" -f null /dev/null > "$T/ff.log" 2>&1
+echo "patched ffmpeg:"
+ffmpeg_bin=$(command -v ffmpeg || true)
+# A stale --prefix=/usr/local install used to shadow /usr/bin here (see 04c).
+[ "$ffmpeg_bin" = /usr/bin/ffmpeg ] \
+  && chk "ffmpeg resolves to /usr/bin/ffmpeg (got ${ffmpeg_bin:-nothing})" 0 \
+  || chk "ffmpeg resolves to /usr/bin/ffmpeg (got ${ffmpeg_bin:-nothing} -- stale /usr/local copy?)" 1
+ffmpeg -hide_banner -hwaccels 2>/dev/null | grep -qw v4l2request \
+  && chk "ffmpeg -hwaccels lists v4l2request" 0 \
+  || chk "ffmpeg -hwaccels lists v4l2request" 1
+
+echo "ffmpeg -hwaccel v4l2request (real decode, first 5 s):"
+timeout 90 ffmpeg -hide_banner -nostdin -v verbose -hwaccel v4l2request -t 5 -i "$FILE" -f null /dev/null > "$T/ff.log" 2>&1
 rc=$?
 [ $rc -eq 0 ] && chk "decodes without crashing (exit 0)" 0 || chk "decodes without crashing (exit $rc)" 1
-grep -q 'Hwaccel V4L2' "$T/ff.log" && chk "V4L2 request-API hwaccel engaged" 0 || chk "V4L2 request-API hwaccel engaged" 1
-grep -aiE 'Hwaccel V4L2|Segmentation|Error|Invalid' "$T/ff.log" | head -3 | sed 's/^/        /'
+grep -q 'Using V4L2 media driver cedrus' "$T/ff.log" \
+  && chk "Cedrus VPU engaged (not software)" 0 \
+  || chk "Cedrus VPU engaged (not software)" 1
+grep -qa '0 decode errors' "$T/ff.log" \
+  && chk "no decode errors" 0 \
+  || chk "no decode errors" 1
+grep -aiE 'Using V4L2 media driver|decode errors|Segmentation|Invalid' "$T/ff.log" | tail -3 | sed 's/^/        /'
 
-echo "mpv --hwdec=drm:"
-timeout 90 mpv --hwdec=drm --vo=gpu --gpu-context=wayland --no-audio --frames=30 \
+echo "mpv --hwdec=v4l2request-copy (60 frames):"
+timeout 90 mpv --hwdec=v4l2request-copy --vo=gpu --gpu-context=wayland --no-audio --frames=60 \
       --msg-level=all=info -- "$FILE" > "$T/mpv.log" 2>&1
 rc=$?
 if grep -qa 'Using hardware decoding' "$T/mpv.log"; then
@@ -60,7 +81,7 @@ if grep -qa 'Using hardware decoding' "$T/mpv.log"; then
 else
   chk "hardware decoding used (exit $rc, no 'Using hardware decoding' line)" 1
 fi
-grep -aE 'Using hardware decoding|Using software decoding|VO: \[' "$T/mpv.log" | head -3 | sed 's/^/        /'
+grep -aE 'Using hardware decoding|Using software decoding' "$T/mpv.log" | head -2 | sed 's/^/        /'
 
 echo
 [ $fail -eq 0 ] && echo "RESULT: VPU path OK" || echo "RESULT: VPU path NOT working (see docs/video-decode.md)"
