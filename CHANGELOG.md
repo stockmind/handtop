@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add: `.desktop` entries for the goblin tools (Dashboard, Play, Menu) so they appear in nwg-drawer under Apps. Drawer itself now uses 5 columns with 48px icons and tight margins to fit 640×480 without horizontal scrollbars.
+
 - Fix: `goblin-dash` now exports the sourced environment so Jellyfin now-playing actually appears when `/etc/default/goblin-dash` is set.
 
 - Fix: `goblin-dash` now uses the correct Jellyfin 12+ auth header (`Authorization: MediaBrowser Token="…"`) instead of the deprecated query param, enabling live now-playing over the LAN. Added `/etc/default/goblin-dash` as a template for setting `DASH_JELLYFIN` and `DASH_API_KEY`.

@@ -2,4 +2,5 @@
 # App launcher: full-screen icon grid sized for 640x480 (toggles if already open).
 mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
 pgrep -x nwg-drawer >/dev/null && exec nwg-drawer -close
-exec nwg-drawer -c 4 -is 56 -nofs -nocats -closebtn right -fm thunar -term foot -ovl
+# Smaller icons + tighter spacing to eliminate horizontal scroll on 640x480.
+exec nwg-drawer -c 5 -is 48 -mb 2 -ml 2 -mr 2 -nofs -nocats -closebtn right -fm thunar -term foot -ovl

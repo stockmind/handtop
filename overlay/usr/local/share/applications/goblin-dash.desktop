@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Goblin Dashboard
+Name[en]=Goblin Dashboard
+Comment=Live system status and quick links
+Exec=foot -e goblin-dash
+Icon=utilities-system-monitor
+Terminal=false
+Categories=Xfce;System;Monitor;
+Keywords=status;monitor;system;dashboard;
