@@ -49,18 +49,15 @@ def api(path):
 
 
 async def click_by_name(pilot, want_name):
-    # Click the ListItem, not the inner Button: ListItem relays child clicks as
-    # _ChildClicked -> ListView.Selected, which is what the app handles.
-    from textual.widgets import Button
+    # Click the ListItem: ListItem relays child clicks as _ChildClicked ->
+    # ListView.Selected, which is what the app handles. Rows are Labels now.
     target = None
     for item in pilot.app.query("MediaItem"):
-        btn = item.query_one(Button)
-        lbl = btn.label.plain if hasattr(btn.label, "plain") else str(btn.label)
-        if want_name in lbl:
+        if want_name in item.media_name:
             target = item
             break
     assert target is not None, f"no item matching {want_name!r}: " + repr(
-        [b.label.plain if hasattr(b.label,'plain') else str(b.label) for b in pilot.app.query(Button)])
+        [m.media_name for m in pilot.app.query("MediaItem")])
     await pilot.click(target)
     await pilot.pause()
     await pilot.pause()
@@ -98,7 +95,7 @@ async def main():
         await pilot.pause()
 
         # --- libraries listed
-        names = [str(b.label) for b in pilot.app.query("MediaItem Button")]
+        names = [m.media_name for m in pilot.app.query("MediaItem")]
         assert len(names) >= 3, f"expected >=3 libraries, got {names}"
         crumb = pilot.app.query_one("#breadcrumb").render()
         assert "saved" in str(crumb) and "free" in str(crumb), f"Home lacks space line: {crumb!r}"
@@ -148,8 +145,12 @@ async def main():
         from textual.widgets import Input as _In
         box = pilot.app.query_one("#search-box", _In)
         box.focus(); box.value = "youngblood"
-        await pilot.pause(0.8)          # let the 0.35 s debounce + API round-trip land
-        vis = [m for m in pilot.app.query("MediaItem") if m.display]
+        vis = []
+        for _ in range(25):             # 0.35 s debounce + round-trip; slow devices need slack
+            await pilot.pause(0.2)
+            vis = [m for m in pilot.app.query("MediaItem") if m.display]
+            if vis and all("youngblood" in m.media_name.lower() for m in vis):
+                break
         assert vis and all("youngblood" in m.media_name.lower() for m in vis), \
             f"filter left {[m.media_name[:20] for m in vis]}"
         await press_enter(pilot)
@@ -180,6 +181,15 @@ async def main():
         assert n_after > n_before, f"load-more appended nothing ({n_before}->{n_after})"
         assert len(pilot.app.query("LoadMoreItem")) == 1, "sentinel gone after page 2"
         print(f"PASS load-more: {n_before} -> {n_after} items, sentinel updated")
+        # keyboard scrolling: arrows must move the cursor AND keep it visible
+        from textual.widgets import ListView as _LVs
+        lv = pilot.app.query_one(_LVs)
+        for _ in range(30):
+            await pilot.press("down")
+        await pilot.pause()
+        assert lv.index >= 29, f"arrows did not move the cursor (index={lv.index})"
+        assert lv.scroll_y > 0, "ListView did not scroll; rows below the screen are unreachable"
+        print(f"PASS keyboard scroll: index={lv.index}, scroll_y={lv.scroll_y}")
 
     # --- Escape-back integrity: Home -> lib -> escape must land on libraries, not re-descend
     app = GoblinApp(mode="play")
@@ -188,7 +198,7 @@ async def main():
         await click_by_name(pilot, "Film")
         await pilot.pause(); await pilot.pause()
         await pilot.press("escape"); await pilot.pause(); await pilot.pause()
-        labels = [str(b.label) for b in pilot.app.query("MediaItem Button")]
+        labels = [m.media_name for m in pilot.app.query("MediaItem")]
         kinds = [m.item_type for m in pilot.app.query("MediaItem")]
         assert set(kinds) == {"Collection"}, f"escape from library left {set(kinds)}: {labels[:4]}"
         print("PASS escape returns to libraries")

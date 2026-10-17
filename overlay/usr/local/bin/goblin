@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Button, Footer, Header, Input, Label, ListView, ListItem, Static
@@ -123,14 +124,21 @@ Footer { background: #181825; color: #a6adc8; }
 #main-content { height: 1fr; padding: 0 1; }
 /* Action bar: compact equal-width buttons along the bottom (media-center remote style). */
 #action-bar { height: 3; padding: 0 1; }
-#action-bar Button { width: 1fr; height: 1; margin: 1 1 0 0; padding: 0 1; border: round #585b70; background: #262637; text-align: center; }
+#action-bar Button { width: 1fr; height: auto; margin: 0 1 0 0; padding: 0 1; border: round #585b70; background: #262637; text-align: center; }
 #action-bar Button:hover { border: round #89b4fa; background: #313244; }
 #action-bar Button#btn-play { color: #a6e3a1; }
 #action-bar Button#btn-shuffle { color: #cba6f7; }
 #action-bar Button#btn-dl { color: #89dceb; }
 #action-bar Button#btn-rm { color: #f38ba8; margin-right: 0; }
-ListView { height: auto; }
+/* ListView must stay viewport-sized (1fr): height:auto made it grow to fit
+   every row, so the list overflowed the screen and never scrolled. */
+ListView { height: 1fr; }
 ListItem { height: 3; padding: 0; }
+/* Media rows are plain Labels (1 line): 200 bordered Buttons per page were
+   too slow to mount/paint on the A53 and looked like a hang. */
+MediaItem, LoadMoreItem { height: 1; padding: 0 1; }
+MediaItem > Label, LoadMoreItem > Label { width: 100%; }
+ListItem.-highlight { background: #45475a; }
 Button { width: 100%; height: 100%; background: #313244; color: #cdd6f4; border: solid #585b70; text-align: left; }
 Button:hover { background: #45475a; border: solid #89b4fa; }
 Button:focus { background: #45475a; border: solid #89dceb; }
@@ -237,9 +245,10 @@ class MediaItem(ListItem):
         icon = icons.get(self.item_type, "📄")
         mark = " ✓" if self.offline else ""
         # Jellyfin ids are hex and often start with a digit; Textual ids must
-        # not (BadIdentifier otherwise), hence the prefix. The real id lives in
-        # self.item_id, which is what all handlers read.
-        yield Button(f"{icon} {self.media_name}{mark}", id=f"item-{self.item_id}", variant="default")
+        # not (BadIdentifier otherwise). The real id lives in self.item_id,
+        # which is what all handlers read. Text() so names with [brackets]
+        # are not parsed as markup.
+        yield Label(Text(f"{icon} {self.media_name}{mark}"))
 
 
 class LoadMoreItem(ListItem):
@@ -250,7 +259,7 @@ class LoadMoreItem(ListItem):
         self.remaining = remaining
 
     def compose(self):
-        yield Button(f"⬇ …and {self.remaining} more", id="load-more", variant="default")
+        yield Label(f"⬇ …and {self.remaining} more")
 
 
 class GoblinApp(App):
@@ -443,7 +452,7 @@ class GoblinApp(App):
         self.page_total = total
         if total > len(items):
             await list_view.append(LoadMoreItem(total - len(items)))
-        self.query_one("#breadcrumb", Label).update(crumb)
+        self.query_one("#breadcrumb", Label).update(Text(crumb))
         # restore the cursor where it was (or row 0); Enter/gamepad-A works at once
         idx = self.index_memory.get(parent_id)
         list_view.index = idx if idx is not None and idx < len(items) else 0
@@ -623,7 +632,8 @@ class GoblinApp(App):
         if bid == "btn-rm":
             self.action_remove_item()
             return
-        # Mouse/touch path; keyboard Enter arrives as ListView.Selected instead.
+        # Menu/dashboard rows are still Buttons; media rows activate via
+        # ListView.Selected (click bubbles to ListItem, Enter posts Selected).
         # Re-activating an already-exited app is harmless (exit is idempotent).
         if not self._exit:
             await self._activate(event.button.parent)
