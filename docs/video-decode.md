@@ -327,6 +327,33 @@ Chromium's dmabuf import on panfrost or the driver's DRM PRIME export is fixed;
 the backend is unmaintained upstream and unpackaged in Debian, so it would have
 to be built in the image either way.
 
+### Revisit plan (researched 2026-10-17, device offline; try in this order)
+
+The driver (Ondrej Jirman's fork, tag 1.3 ≈ master) documents supported clients
+as **mpv and Firefox only** — Chromium is never mentioned. Its design notes say
+surfaces exported before their first decode (which is exactly how Chromium
+probes formats) get a *throwaway* dma-buf backing that is dropped when the
+surface binds to a real decode context, and that consumers are expected to
+cache imports per surface id. Chromium sampling a stale empty backing yields
+pure YUV(0,0,0) green with no logged error — matching every observation above.
+
+1. **firefox-esr + the same driver** — most likely to work out of the box:
+   `LIBVA_DRIVER_NAME=v4l2_request MOZ_DISABLE_RDD_SANDBOX=1` (the RDD sandbox
+   blocks `/dev/video*`/`/dev/media*`) and `media.ffmpeg.vaapi.enabled=true`.
+   Firefox has CPU-readback paths, so it displays even if GL import stays
+   broken. Costs: slower browsing than Chromium on this device, sandbox off.
+2. **Untried Chromium flags**: `--disable-gpu-compositing` (isolates GPU-side
+   sampling from export/buffer mismatch) and `--use-angle=vulkan` (panvk
+   imports dmabufs through a different stack; check the Mesa Vulkan ICD exists
+   and watch RAM first).
+3. **Confirm the stale-backing theory** with the driver's own trace
+   (`v4l2r_trace`): watch whether the exported fd changes after the first
+   decode while Chromium plays. If yes, that is a clean upstream issue.
+4. **Repair the diagnostic consumers**: `ffmpeg -hwaccel vaapi` failed at
+   device setup with `Cannot allocate memory` (CMA pressure) — retry with
+   `cma=320M` or freed RAM to get a bit-exact `hwdownload` check independent
+   of any browser.
+
 ## How it works
 
 | Piece | What | Where |
