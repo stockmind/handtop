@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: AV1 rendered black. This FFmpeg registers `av1` under the drm/v4l2request hw devices, but Cedrus has no AV1 VPU, so the native av1 decoder fails to pick a pixel format and returns zero frames (audio plays, picture is black) — even with `hwdec=no`. The route-A build now configures `--enable-libdav1d` (adds `libdav1d-dev`, gates on `CONFIG_LIBDAV1D` and an installed dav1d decoder), so AV1 decodes in software via dav1d and renders. Rebuilt ffmpeg + image.
+
 - Fix: the real cause of Thunar's "missing exec" error was a stub `/usr/local/share/applications/mpv.desktop` (no `Exec=`) left by an earlier experiment, shadowing the real one in `/usr/share`; GIO resolves `/usr/local` first and reported "Desktop file didn't specify Exec field" for every video. Removed on the device. Added `overlay/usr/local/share/applications/play-mpv.desktop` (a "Play with mpv" Open With entry that bypasses pseudo-gui mode) and `XDG_DATA_DIRS` defaults in `/etc/zsh/zshenv` so login shells never hand GIO an empty data path.
 
 - Fix: install `tumbler`. Thunar without the freedesktop thumbnail service crashed its OpenURI path (`exo-open`, trixie exo 4.20) and opening a video failed with a missing-exec error even when mimeapps.list was correct. Fresh homes also get mpv associations now (skel mimeapps.list above); both applied on the live device.

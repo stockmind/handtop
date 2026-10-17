@@ -47,7 +47,7 @@ trap chroot_umount EXIT
 KWIBOO_PIN="fad85d9c76611c09b561167ab405c667a0dcdeb7"
 KWIBOO_URL="https://github.com/Kwiboo/FFmpeg"
 SRC="$WORK/src/kwiboo-ffmpeg"
-DEV_PKGS="libdrm-dev libudev-dev zlib1g-dev"
+DEV_PKGS="libdrm-dev libudev-dev zlib1g-dev libdav1d-dev"
 
 chroot_mount
 in_chroot "apt-get update -qq && apt-get install -y -qq --no-install-recommends $DEV_PKGS"
@@ -68,7 +68,7 @@ grep -q "HWACCEL_DRM_V4L2REQUEST" "$SRC/libavcodec/hwconfig.h" || die "route A p
 
 export PKG_CONFIG_SYSROOT_DIR="$ROOTFS"
 export PKG_CONFIG_LIBDIR="$ROOTFS/usr/lib/aarch64-linux-gnu/pkgconfig:$ROOTFS/usr/share/pkgconfig"
-(cd "$SRC" && ./configure --arch=aarch64 --target-os=linux --enable-cross-compile --cross-prefix=aarch64-linux-gnu- --sysroot="$ROOTFS" --pkg-config=pkg-config --prefix=/usr --libdir=/usr/lib/aarch64-linux-gnu --enable-shared --disable-static --disable-doc --disable-debug --enable-gpl --enable-neon --enable-libdrm --enable-libudev --enable-v4l2-request > "$WORK/ffmpeg-config.log" 2>&1)
+(cd "$SRC" && ./configure --arch=aarch64 --target-os=linux --enable-cross-compile --cross-prefix=aarch64-linux-gnu- --sysroot="$ROOTFS" --pkg-config=pkg-config --prefix=/usr --libdir=/usr/lib/aarch64-linux-gnu --enable-shared --disable-static --disable-doc --disable-debug --enable-gpl --enable-neon --enable-libdrm --enable-libudev --enable-libdav1d --enable-v4l2-request > "$WORK/ffmpeg-config.log" 2>&1)
 (cd "$SRC" && make -j"$(nproc)" > "$WORK/ffmpeg-build.log" 2>&1)
 
 # Drop the stale --prefix=/usr/local copy from the earlier revision of this
@@ -100,11 +100,18 @@ for c in H264 HEVC AV1 VP8 VP9 MPEG2; do
     || die "${c}_v4l2request hwaccel not compiled in"
 done
 
+# AV1 has no Cedrus VPU decoder, so playback relies on software: this build must
+# carry dav1d, because the native av1 decoder fails to pick a pixel format once
+# av1 advertises the drm/v4l2request hw devices (renders black). See
+# docs/video-decode.md.
+grep -q "#define CONFIG_LIBDAV1D 1" "$SRC/config.h" || die "dav1d not compiled in"
+
 chroot_mount
 in_chroot "ldconfig"
 [[ "$(in_chroot "command -v ffmpeg")" == "/usr/bin/ffmpeg" ]] || die "ffmpeg in PATH is not /usr/bin/ffmpeg"
 [[ "$(in_chroot "ffmpeg -version")" == *"${KWIBOO_PIN:0:7}"* ]] || die "patched ffmpeg is not the installed one"
 in_chroot "ffmpeg -hide_banner -hwaccels" | grep -qw v4l2request || die "installed ffmpeg has no v4l2request hwaccel"
+in_chroot "ffmpeg -hide_banner -decoders" | grep -qw dav1d || die "installed ffmpeg has no dav1d decoder"
 # -init_hw_device alone just prints the usage screen; give it something to do.
 # An unregistered type fails with "unknown device type" (exit 234).
 in_chroot "ffmpeg -hide_banner -v error -init_hw_device v4l2request -f lavfi -i nullsrc=s=16x16:r=1:d=1 -f null -" >/dev/null \
