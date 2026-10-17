@@ -12,6 +12,15 @@ Environment:
   DASH_JELLYFIN   http://host:port of Jellyfin (default empty = off)
   DASH_API_KEY    Jellyfin API key (optional; enables now-playing)
   DASH_INTERVAL   refresh seconds (default 2)
+
+Quick links (press a number while running):
+  1  Dashboard     this view (no-op if already here)
+  2  Play media    goblin-play
+  3  Music         goblin-music
+  4  htop          process monitor
+  5  Files         thunar
+  6  Screen off    wlopm --off
+  q  Quit
 """
 import json
 import os
@@ -19,13 +28,23 @@ import shutil
 import socket
 import subprocess
 import sys
+import termios
 import time
+import tty
 import urllib.error
 import urllib.request
 
 JELLYFIN = os.environ.get("DASH_JELLYFIN", "").rstrip("/")
 API_KEY = os.environ.get("DASH_API_KEY", "")
 INTERVAL = float(os.environ.get("DASH_INTERVAL", "2"))
+
+QUICK_LINKS = [
+    ("1", "Play media", "goblin-play"),
+    ("2", "Music", "goblin-music"),
+    ("3", "htop", "htop"),
+    ("4", "Files", "thunar"),
+    ("5", "Screen off", "wlopm --off '*'"),
+]
 
 
 def read(path, default="?"):
@@ -200,6 +219,11 @@ def render(width):
         lines.append("-" * width)
         lines.append(jp[:width])
     lines.append("=" * width)
+
+    # quick-links footer (only when interactive)
+    links_line = "  ".join(f"{key}:{name}" for key, name, _ in QUICK_LINKS)
+    lines.append(links_line)
+
     return "\n".join(lines)
 
 
@@ -212,15 +236,39 @@ def main():
     if once:
         print(render(width))
         return
+
+    # interactive loop: refresh every INTERVAL seconds; check for a keypress.
+    # Pressing a number launches the matching tool (in a new terminal or inline).
+    old_settings = None
+    if sys.stdin.isatty():
+        old_settings = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())
+
+    def read_key(timeout):
+        """Return one character from stdin within timeout, else ''."""
+        import select
+        rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+        return sys.stdin.read(1) if rlist else ""
+
     try:
         while True:
             frame = render(width)
             sys.stdout.write("\033[H\033[J")  # home + clear (no flicker)
             sys.stdout.write(frame + "\n")
             sys.stdout.flush()
-            time.sleep(INTERVAL)
-    except KeyboardInterrupt:
-        pass
+
+            key = read_key(INTERVAL)
+            if key == "q":
+                break
+            elif key and not key.isspace():
+                # match quick-link by digit
+                action_cmd = next((cmd for k, name, cmd in QUICK_LINKS if k == key), None)
+                if action_cmd:
+                    subprocess.run(["sh", "-c", action_cmd])
+                    # after returning from the launched tool, redraw immediately
+    finally:
+        if old_settings is not None:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
 
 
 if __name__ == "__main__":
