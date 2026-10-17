@@ -5,6 +5,7 @@ dbus-user-session
 polkitd
 sudo
 bash-completion
+zsh                      # login shell; oh-my-zsh shipped in /etc/skel (build/04d)
 less
 nano
 micro

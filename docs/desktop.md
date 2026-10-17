@@ -35,7 +35,7 @@ Chosen over LXQt-on-labwc (heavier) and sfwbar (smaller community) for low RAM a
 
 ### Session details (implemented)
 
-- Boot → getty auto-login on tty1 → labwc. Logging out restarts the session; after 3 failed starts a shell is left on tty1. The launcher is `/etc/profile.d/zz-rg35xxh-session.sh`, which a **bash** login shell sources through `/etc/profile`; Debian's zsh never reads `/etc/profile`, so the overlay also ships `/etc/zsh/zprofile` with `emulate sh -c 'source /etc/profile'`. Without it, switching `rg` to zsh silently breaks the desktop (2026-10-17: the device came up on a bare tty1 shell after a reboot).
+- Boot → getty auto-login on tty1 → labwc. Logging out restarts the session; after 3 failed starts a shell is left on tty1. The launcher is `/etc/profile.d/zz-rg35xxh-session.sh`, sourced from `/etc/profile`. Debian's zsh does not read `/etc/profile`, so the overlay ships `/etc/zsh/zprofile` with `emulate sh -c 'source /etc/profile'` — that is what makes the desktop start on the zsh login shell the image now uses (and why switching `rg` to zsh once silently broke it: 2026-10-17, bare tty1 shell after a reboot). Bash login shells are unaffected, so the same image works with either.
 - System-wide defaults in `/etc/xdg/` (labwc, waybar, mako, foot, kanshi); per-user overrides go in `~/.config/`.
 - Normal windows open **maximized** (640×480 screen); dialogs keep their size.
 - Panel: `☰ Apps` (launcher) · open windows · tray · volume · network · battery · clock · `⏻` (power menu).
@@ -45,6 +45,12 @@ Chosen over LXQt-on-labwc (heavier) and sfwbar (smaller community) for low RAM a
 - Audio: speaker starts at 100 % on a fresh system (`/etc/wireplumber/wireplumber.conf.d/50-rg35xxh.conf`; WirePlumber default is 40 %); the codec DAC and Line Out are set to 100 % by `rg35xxh-hwinit`.
 - Memory: zram swap (50 % of RAM, zstd, priority 100) plus a 2 GB swap file `/swapfile` on the SD card (priority 10, created on first boot by `rg35xxh-swapfile`). Firefox defaults for 1 GB RAM in `/etc/firefox-esr/rg35xxh.js`; uBlock Origin from `webext-ublock-origin-firefox`.
 - Component logs: `~/.local/state/session/*.log`, labwc: `~/.local/state/labwc.log`.
+
+### Shell (zsh)
+
+- The login shell is **zsh** (`/usr/bin/zsh`, from `base.list`). `build/04d-ohmyzsh.sh` installs Oh My Zsh plus `zsh-autosuggestions` and `zsh-syntax-highlighting` into `/etc/skel/.oh-my-zsh` (all pinned to the revisions the handheld runs), `/etc/skel/.zshrc` loads them with a starship prompt (`starship` is in `dev.list`), and `10-image.sh` copies `/etc/skel` into a fresh `/home/rg` — so a reflash keeps the shell environment. `~/.zshrc` is the file to edit for per-user changes (it also adds `~/.opencode/bin` and `~/.local/bin` to `PATH`).
+- `overlay/etc/zsh/zprofile` (`emulate sh -c 'source /etc/profile'`) is load-bearing: it is what runs `/etc/profile.d/zz-rg35xxh-session.sh` (desktop) and `dev-tools.sh` (tool `PATH`) for a zsh login shell.
+- Oh My Zsh is only a convenience: if `~/.oh-my-zsh` is missing the shell still starts (the `.zshrc` then prints a source error) and the desktop is unaffected.
 
 ### External display (mini HDMI) — verified 2026-10-08
 
