@@ -16,6 +16,31 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Button, Footer, Header, Input, Label, ListView, ListItem, Static
 
 
+def _load_default_config():
+    """Seed env from /etc/default/goblin-dash: DASH_JELLYFIN/DASH_API_KEY map to
+    JELLYFIN_URL/JELLYFIN_KEY; any GOBLIN_* line passes through. Runs at import
+    so class-body defaults (DL_TRANSCODE etc.) see it."""
+    try:
+        with open("/etc/default/goblin-dash") as f:
+            for line in f:
+                if "=" not in line or line.lstrip().startswith("#"):
+                    continue
+                key, val = line.split("=", 1)
+                val = val.split("#")[0].strip().strip('"').strip("'")
+                key = key.strip()
+                if key == "DASH_JELLYFIN":
+                    os.environ.setdefault("JELLYFIN_URL", val)
+                elif key == "DASH_API_KEY":
+                    os.environ.setdefault("JELLYFIN_KEY", val)
+                elif key.startswith("GOBLIN_"):
+                    os.environ.setdefault(key, val)
+    except OSError:
+        pass
+
+
+_load_default_config()
+
+
 def read_file(path, default="?"):
     try:
         return Path(path).read_text().strip()
@@ -247,19 +272,7 @@ class GoblinApp(App):
         super().__init__()
         self.mode = mode
         
-        # Load config from /etc/default/goblin-dash if env vars not set
-        if not os.environ.get("JELLYFIN_URL"):
-            try:
-                with open("/etc/default/goblin-dash") as f:
-                    for line in f:
-                        if line.startswith("DASH_JELLYFIN="):
-                            val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            os.environ["JELLYFIN_URL"] = val
-                        elif line.startswith("DASH_API_KEY="):
-                            val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            os.environ["JELLYFIN_KEY"] = val
-            except OSError:
-                pass
+        # Config was seeded from /etc/default/goblin-dash at import time.
         
         self.jellyfin_url = os.environ.get("JELLYFIN_URL", "").rstrip("/")
         self.api_key = os.environ.get("JELLYFIN_KEY", "")

@@ -360,6 +360,27 @@ is cross-built in the qemu chroot by `tools/build-va-v4l2request.sh` (artifact
 drivers require), and `tools/test-va-v4l2request.sh push|info|chromium|firefox`
 runs the whole plan over SSH with screenshots pulled back to `work/va-shots/`.
 
+### Revisit results (2026-10-17, device online)
+
+- **Driver gate (`info`) passes**: vainfo under `LIBVA_DRIVER_NAME=v4l2_request`
+  reports H264 CB/Main/High + HEVC Main/Main10 VLD via one Request API decoder.
+- **Chromium matrix: still green in all three variants** (baseline,
+  `--disable-gpu-compositing`, `--use-angle=vulkan`). Each run shows
+  `decoding h264 via /dev/video0 [cedrus]` and the driver trace reports
+  `bind wait … sync ≈0 ms` throughout — so decode completes and buffers bind
+  cleanly; the green is Chromium *consuming* the wrong (stale/never-updated)
+  backing, exactly the documented pre-first-decode export case. Not a sync bug.
+- **firefox-esr 153 plays real frames — but software.** With
+  `media.ffmpeg.vaapi.enabled=true` the PDM log still selects the plain FFmpeg
+  decoder; strace shows libva + our driver *are* opened (GPU-process probe),
+  yet the RDD decoder never initializes through them (zero driver-trace lines).
+  Debian's ESR does not engage ffmpeg-vaapi in this environment out of the box.
+- **Verdict**: browser VA display on goblin remains open; mpv stays the video
+  path (and works zero-copy-ish via `v4l2request-copy`). Next candidates, in
+  order: plan step 4 (`cma=320M` ffmpeg-vaapi bit-exact check to exonerate the
+  driver fully outside browsers), then filing the Chromium stale-backing case
+  upstream with these traces.
+
 ## How it works
 
 | Piece | What | Where |

@@ -66,7 +66,7 @@ grim "\$HOME/va-shot-$variant.png" 2>/dev/null || echo "grim failed (is labwc up
 pkill -f chromium || true; sleep 2
 grep -o "decoding [a-z0-9]* via /dev/video[0-9]* \[[a-z]*\]" /tmp/chrome-$variant.log | head -1 || echo "no VA decode line -> software"
 EOF
-    scp -q "goblin:$SHOTS-$variant.png" "$SHOTS/" 2>/dev/null || true
+    scp -q "goblin:va-shot-$variant.png" "$SHOTS/" 2>/dev/null || true
     echo "  screenshot: $SHOTS/$variant.png"
   done
   ;;
