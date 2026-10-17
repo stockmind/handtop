@@ -35,7 +35,32 @@ def test_face_buttons_desktop():
     assert c.button("l3", False, 0.1) == []
     assert c.button("r3", True, 0) == [("clipboard", "paste")]
     assert c.button("x", True, 0) == [("osk", "toggle")]
-    assert c.button("select", True, 0) == []
+    c.button("r1", False, 0.1)   # release keys held by the asserts above
+    c.button("r2", False, 0.1)
+    assert c.button("select", True, 0.2) == [("mode", "keys")]
+
+
+def test_keys_mode_navigation():
+    c = Core()
+    assert c.button("select", True, 0) == [("mode", "keys")]   # enter
+    assert c.button("select", False, 0.1) == []
+    assert c.mode == "keys"
+    assert c.button("down", True, 0.2) == [("key", "KEY_DOWN", True)]
+    assert c.button("down", False, 0.3) == [("key", "KEY_DOWN", False)]
+    assert c.button("a", True, 0.4) == [("key", "KEY_ENTER", True)]
+    assert c.button("a", False, 0.5) == [("key", "KEY_ENTER", False)]
+    assert c.button("b", True, 0.6) == [("key", "KEY_ESC", True)]
+    assert c.button("b", False, 0.7) == [("key", "KEY_ESC", False)]
+    # right stick still scrolls (wheel), no pointer motion
+    c.tick(0.7)
+    c.axis("ry", -1.0, 0.7)
+    out, _ = run_ticks(c, 0.7, 0.5)
+    assert any(a[0] == "wheel" and a[1] > 0 for a in out)
+    assert not any(a[0] == "rel" for a in out)
+    # select exits; a held arrow is released first
+    c.button("up", True, 1.3)
+    assert c.button("select", True, 1.4) == [("key", "KEY_UP", False), ("mode", "desktop")]
+    assert c.mode == "desktop"
 
 
 def test_pointer_left_stick_deadzone_and_speed():

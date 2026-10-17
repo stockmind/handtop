@@ -1,6 +1,6 @@
 # Input Mapping
 
-Implemented by a custom input daemon that grabs the "H700 Gamepad" exclusively and emits virtual mouse/keyboard (desktop mode) or a virtual Xbox-style controller (gamepad mode) via uinput.
+Implemented by a custom input daemon that grabs the "H700 Gamepad" exclusively and emits virtual mouse/keyboard (desktop mode), keystrokes only (keypad mode, for TUIs), or a virtual Xbox-style controller (gamepad mode) via uinput.
 
 - **Desktop mode is the default at boot.** Device is used for desktop control only; gamepad mode is kept for occasional use.
 - Physical USB/Bluetooth keyboard and mouse always work normally alongside.
@@ -25,7 +25,7 @@ Implemented by a custom input daemon that grabs the "H700 Gamepad" exclusively a
 | R3 (right stick click) | Paste | Passed through |
 | Start (tap) | Switch to gamepad mode | Passed through |
 | Start (hold 1 s) | — | Switch to desktop mode |
-| Select | — | Passed through |
+| Select | Switch to keypad mode | Passed through |
 | F (tap) | — | — |
 | F + Vol+/− | Brightness | Brightness |
 | Vol+/− | System volume | System volume |
@@ -43,6 +43,7 @@ Implemented by a custom input daemon that grabs the "H700 Gamepad" exclusively a
 - **On-screen keyboard:** custom, part of the input daemon, so the daemon always knows whether it is open. Left stick still moves the pointer while it is open.
 - **Copy/paste:** daemon checks the focused app. Terminals get Ctrl+Shift+C / Ctrl+Shift+V; other apps Ctrl+C / Ctrl+V (Ctrl+C in a terminal would kill the running program). Bash bracketed paste must stay enabled so an accidental R3 paste cannot execute a command. Hold-to-paste can be added later if accidental stick clicks are a problem.
 - **Gamepad mode:** virtual controller uses standard Xbox layout **by position** (bottom button = Xbox A). F is not forwarded (would open Xbox Game Bar on Windows). Rumble from Moonlight can be forwarded to the motor.
+- **Keypad mode (Select):** for terminal TUIs (e.g. the goblin media browser), which read the keyboard and never the virtual pad. D-pad = arrow keys (moves list cursors), A = Enter, B/Esc-path = Esc, X = Tab, Y = Space, L1/R1 = Esc/Enter, right stick still scrolls. Select returns to desktop mode. Mapping is fixed in code (`KEYS_BUTTONS`), not configurable yet.
 - **Start in gamepad mode:** short tap is sent to the PC as Start; only a 1 s hold switches back.
 - Brightness moved off F-tap to avoid colliding with the F + Vol combo.
 

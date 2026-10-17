@@ -346,7 +346,10 @@ class Daemon:
                         os.unlink(runtime_flag("rg35xxh-gamepad-mode"))
                     except FileNotFoundError:
                         pass
-                    spawn("notify-send", "-t", "1500", "Desktop mode")
+                    if a[1] == "keys":
+                        spawn("notify-send", "-t", "2500", "Keypad mode", "D-pad moves, A selects, Select returns to desktop")
+                    else:
+                        spawn("notify-send", "-t", "1500", "Desktop mode")
             elif kind == "pad_key" and self.pad:
                 self.pad.write(E.EV_KEY, E.ecodes[a[1]], a[2])
                 self.pad.syn()

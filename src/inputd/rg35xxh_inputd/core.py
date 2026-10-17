@@ -56,7 +56,7 @@ DEFAULT_BINDINGS = {
     "l3": "copy",
     "r3": "paste",
     "start": "mode_gamepad",
-    "select": "none",
+    "select": "mode_keys",
 }
 
 # Gamepad mode: by position, Xbox 360 (xpad) conventions.
@@ -68,6 +68,17 @@ PAD_BUTTONS = {
 }
 PAD_TRIGGERS = {"l2": "ABS_Z", "r2": "ABS_RZ"}
 PAD_AXES = {"lx": "ABS_X", "ly": "ABS_Y", "rx": "ABS_RX", "ry": "ABS_RY"}
+
+# Keypad mode: a terminal TUI (Textual, etc.) reads the keyboard, never the
+# virtual Xbox pad, so this mode turns the controls into keystrokes: D-pad ->
+# arrows (move the list cursor), A -> Enter (select/play), B -> Esc (back),
+# right stick still scrolls long lists. Select returns to desktop mode.
+# ponytail: mapping fixed; add a [keys] config section if anyone remaps it.
+KEYS_DPAD = {"up": "KEY_UP", "down": "KEY_DOWN", "left": "KEY_LEFT", "right": "KEY_RIGHT"}
+KEYS_BUTTONS = {
+    "a": "KEY_ENTER", "b": "KEY_ESC", "x": "KEY_TAB", "y": "KEY_SPACE",
+    "l1": "KEY_ESC", "r1": "KEY_ENTER",
+}
 
 
 class Core:
@@ -135,6 +146,14 @@ class Core:
                 self.start_fired = False
             return self._pad_button(name, True)
 
+        if self.mode == "keys":
+            if name == "select":
+                return self._exit_keys()
+            if name in DPAD:
+                return [("key", KEYS_DPAD[name], True)]
+            code = KEYS_BUTTONS.get(name)
+            return [("key", code, True)] if code else []
+
         # desktop mode
         if name in DPAD:
             if self.osk_visible:
@@ -174,6 +193,14 @@ class Core:
                 return []  # release already sent when switching modes
             return self._pad_button(name, False)
 
+        if self.mode == "keys":
+            if name == "select":
+                return []          # handled on press (toggle back to desktop)
+            if name in DPAD:
+                return [("key", KEYS_DPAD[name], False)]
+            code = KEYS_BUTTONS.get(name)
+            return [("key", code, False)] if code else []
+
         if name in DPAD:
             self.osk_next_repeat.pop(name, None)
             return []
@@ -206,6 +233,19 @@ class Core:
                 self.start_fired = True
                 out.append(("pad_key", "BTN_START", 0))
                 out.extend(self._enter_desktop())
+            return out
+
+        if self.mode == "keys":
+            # Right stick still scrolls long lists; no pointer motion (D-pad is keys).
+            sx, sy = self._stick_velocity(self.axes["rx"], self.axes["ry"],
+                                          self.s["scroll_speed"] * 120.0, self._log_curve)
+            self.acc[2] += -sy * dt
+            self.acc[3] += sx * dt
+            wv, wh = int(self.acc[2]), int(self.acc[3])
+            if wv or wh:
+                self.acc[2] -= wv
+                self.acc[3] -= wh
+                out.append(("wheel", wv, wh))
             return out
 
         if self.screen_off or dt == 0.0:
@@ -288,6 +328,8 @@ class Core:
             return [("osk", "toggle")]
         if action == "mode_gamepad":
             return self._enter_gamepad()
+        if action == "mode_keys":
+            return self._enter_keys()
         if action == "power_menu":
             return [("cmd", "power_menu")]
         return []
@@ -320,6 +362,20 @@ class Core:
         self.acc = [0.0, 0.0, 0.0, 0.0]
         self.osk_next_repeat.clear()
         return [("mode", "desktop")]
+
+    def _enter_keys(self):
+        out = self._release_all_desktop()
+        self.mode = "keys"
+        self.acc = [0.0, 0.0, 0.0, 0.0]
+        out.append(("mode", "keys"))
+        return out
+
+    def _exit_keys(self):
+        out = [("key", KEYS_DPAD[d], False) for d in list(self.held) if d in DPAD]
+        self.mode = "desktop"
+        self.acc = [0.0, 0.0, 0.0, 0.0]
+        out.append(("mode", "desktop"))
+        return out
 
     def _pad_button(self, name, pressed):
         if name in PAD_BUTTONS:
