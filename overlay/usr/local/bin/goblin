@@ -239,15 +239,15 @@ class GoblinApp(App):
         self.query_one("#breadcrumb", Label).update("🏠 Home")
         self.query_one("#search-box", Input).display = True
         
-        data = self.api_get("/Views?format=json")
-        libs = data.get("Items", []) if data else []
+        data = self.api_get("/Library/VirtualFolders?format=json")
+        libs = data if isinstance(data, list) else []
         
         list_view = self.query_one("#items-view", ListView)
         await list_view.clear()
         
         for lib in libs:
             name = lib.get("Name", "?")
-            item_id = lib.get("Id", "")
+            item_id = lib.get("ItemId", "") or lib.get("Id", "")  # VirtualFolders uses ItemId
             if item_id:
                 await list_view.append(MediaItem(name, item_id, "Collection"))
         
