@@ -20,7 +20,7 @@ Sway (ROCKNIX's default) is a keyboard-driven tiling WM — unsuitable for gamep
 ## Hardware acceleration
 
 - OpenGL/GLES via Panfrost (Mesa) for the compositor and GL apps (browser rendering, Moonlight).
-- **Hardware video decode for Moonlight** (H.264/HEVC, up to 1080p60) via the Cedrus V4L2 stateless decoder — see `video-decode.md`. Other players (mpv, browsers) still decode on the CPU.
+- **Hardware video decode for Moonlight** (H.264/HEVC, up to 1080p60) via the Cedrus V4L2 stateless decoder — see `video-decode.md`. The system FFmpeg and mpv use the same VPU through the same patchset (`--hwdec=v4l2request-copy`); zero-copy rendering in mpv is the remaining gap, and browsers still decode on the CPU.
 
 ## Shell components: Waybar + nwg-drawer + wlogout
 
@@ -35,7 +35,7 @@ Chosen over LXQt-on-labwc (heavier) and sfwbar (smaller community) for low RAM a
 
 ### Session details (implemented)
 
-- Boot → getty auto-login on tty1 → labwc. Logging out restarts the session; after 3 failed starts a shell is left on tty1.
+- Boot → getty auto-login on tty1 → labwc. Logging out restarts the session; after 3 failed starts a shell is left on tty1. The launcher is `/etc/profile.d/zz-rg35xxh-session.sh`, which a **bash** login shell sources through `/etc/profile`; Debian's zsh never reads `/etc/profile`, so the overlay also ships `/etc/zsh/zprofile` with `emulate sh -c 'source /etc/profile'`. Without it, switching `rg` to zsh silently breaks the desktop (2026-10-17: the device came up on a bare tty1 shell after a reboot).
 - System-wide defaults in `/etc/xdg/` (labwc, waybar, mako, foot, kanshi); per-user overrides go in `~/.config/`.
 - Normal windows open **maximized** (640×480 screen); dialogs keep their size.
 - Panel: `☰ Apps` (launcher) · open windows · tray · volume · network · battery · clock · `⏻` (power menu).
