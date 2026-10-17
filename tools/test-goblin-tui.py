@@ -100,6 +100,8 @@ async def main():
         # --- libraries listed
         names = [str(b.label) for b in pilot.app.query("MediaItem Button")]
         assert len(names) >= 3, f"expected >=3 libraries, got {names}"
+        crumb = pilot.app.query_one("#breadcrumb").render()
+        assert "saved" in str(crumb) and "free" in str(crumb), f"Home lacks space line: {crumb!r}"
         print("PASS libraries:", [n.strip()[:24] for n in names])
 
         # --- Movies library -> Enter on first Movie exits with ordered playlist from cursor

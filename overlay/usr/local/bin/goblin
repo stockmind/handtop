@@ -153,6 +153,22 @@ def safe_name(s):
     return re.sub(r"[^A-Za-z0-9._ -]+", "_", s).strip()[:60] or "media"
 
 
+def offline_size():
+    """Total bytes of local copies + free space, for the Home line."""
+    try:
+        used = sum(f.stat().st_size for f in OFFLINE_DIR.glob("*") if f.is_file())
+    except OSError:
+        used = 0
+    try:
+        free = shutil.disk_usage(str(OFFLINE_DIR.parent) if OFFLINE_DIR.parent.exists()
+                                 else str(OFFLINE_DIR)).free
+    except OSError:
+        free = 0
+    def hum(b):
+        return f"{b/1e9:.1f}G" if b >= 1e9 else f"{int(b/1e6)}M"
+    return hum(used), hum(free)
+
+
 def load_manifest():
     """item_id -> [filenames under OFFLINE_DIR]; written by the download action."""
     try:
@@ -319,7 +335,8 @@ class GoblinApp(App):
         self.current_parent_id = None
         self.nav_stack = []
         
-        self.query_one("#breadcrumb", Label).update("🏠 Home")
+        used, free = offline_size()
+        self.query_one("#breadcrumb", Label).update(f"🏠 Home   ·   {used} saved · {free} free")
         self.query_one("#search-box", Input).display = True
         self.query_one("#action-bar").display = True
         # The 480-px screen belongs to the list: stats only live in menu/dashboard.
