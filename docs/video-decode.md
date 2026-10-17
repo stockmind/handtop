@@ -12,8 +12,25 @@ busy.
 
 **Broken for the system FFmpeg and mpv.** The VPU is reachable from the system
 FFmpeg only through the mainline V4L2 request-API hwaccel (`ffmpeg -hwaccel drm` /
-`mpv --hwdec=drm`), and that path does not work against Cedrus here. Verified on a
-freshly booted device, 2026-10-17, with `tools/check-video-decode.sh`:
+`mpv --hwdec=drm`), and that path does not work against Cedrus here. Verified on
+the device, 2026-10-17, with `tools/check-video-decode.sh`, which reports:
+
+```
+  ok    /dev/video0 present
+  ok    sunxi_cedrus loaded
+  ok    dma-buf heaps openable by rg
+ffmpeg -hwaccel drm:
+  FAIL  decodes without crashing (exit 139)
+  ok    V4L2 request-API hwaccel engaged
+        [hevc @ ...] Hwaccel V4L2 HEVC stateless V4; devices: /dev/media0,/dev/video0; buffers: src DMABuf, dst DMABuf; swfmt=nv12
+        Segmentation fault
+mpv --hwdec=drm:
+  FAIL  hardware decoding used (exit 139, no 'Using hardware decoding' line)
+
+RESULT: VPU path NOT working
+```
+
+In detail:
 
 | Command | Result |
 |---|---|
