@@ -148,10 +148,10 @@ def jellyfin_now():
     """Return a short now-playing string from Jellyfin, or '' when unavailable."""
     if not JELLYFIN:
         return ""
-    url = f"{JELLYFIN}/Sessions?"
-    if API_KEY:
-        url += f"api_key={API_KEY}"
-    req = urllib.request.Request(url, headers={"X-Emby-Token": API_KEY} if API_KEY else {})
+    # Jellyfin 12+ requires Authorization: MediaBrowser Token="…" (not X-Emby-Token).
+    url = f"{JELLYFIN}/Sessions"
+    auth = f'MediaBrowser Token="{API_KEY}"' if API_KEY else None
+    req = urllib.request.Request(url, headers={"Authorization": auth} if auth else {})
     try:
         with urllib.request.urlopen(req, timeout=2.5) as r:
             data = json.load(r)

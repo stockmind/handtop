@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: `goblin-dash` now uses the correct Jellyfin 12+ auth header (`Authorization: MediaBrowser Token="…"`) instead of the deprecated query param, enabling live now-playing over the LAN. Added `/etc/default/goblin-dash` as a template for setting `DASH_JELLYFIN` and `DASH_API_KEY`.
+
 - Change: `goblin-dash` gained a quick-links footer (press 1–5 to launch Play/Music/htop/Files/Screen-off from within the dashboard; q quits). Interactive mode now reads stdin in cbreak, so the number keys trigger the tool without waiting for Enter.
 
 - Add: a small daily-use tool suite for the handheld, all dependency-free (sh + python stdlib + fzf): `goblin-dash` (live TUI status dashboard — load/temp/memory/disk/battery/IP/uptime, optional Jellyfin now-playing), `goblin-play` (fuzzy-pick and hardware-decode a video; Jellyfin when `JELLYFIN_URL` is set, else local files), `goblin-music` (audio jukebox), and `goblin` (an fzf launcher tying them together). labwc gains `Super+m` (menu) and `Super+p` (play media). No host/user specifics baked in.

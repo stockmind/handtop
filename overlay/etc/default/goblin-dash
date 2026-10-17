@@ -1,0 +1,6 @@
+# goblin-dash environment (source by /usr/local/bin/goblin-dash or labwc autostart)
+# Set these to enable the Jellyfin now-playing panel; empty = off.
+DASH_JELLYFIN=""
+DASH_API_KEY=""
+# DASH_JELLYFIN=http://mediaserver:8096
+# DASH_API_KEY=<your-api-key-here>
