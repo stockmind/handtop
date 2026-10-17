@@ -161,6 +161,21 @@ class GoblinApp(App):
     def __init__(self, mode="menu"):
         super().__init__()
         self.mode = mode
+        
+        # Load config from /etc/default/goblin-dash if env vars not set
+        if not os.environ.get("JELLYFIN_URL"):
+            try:
+                with open("/etc/default/goblin-dash") as f:
+                    for line in f:
+                        if line.startswith("DASH_JELLYFIN="):
+                            val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            os.environ["JELLYFIN_URL"] = val
+                        elif line.startswith("DASH_API_KEY="):
+                            val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            os.environ["JELLYFIN_KEY"] = val
+            except OSError:
+                pass
+        
         self.jellyfin_url = os.environ.get("JELLYFIN_URL", "").rstrip("/")
         self.api_key = os.environ.get("JELLYFIN_KEY", "")
         self.nav_stack = []
