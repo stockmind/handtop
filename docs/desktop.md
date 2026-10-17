@@ -151,6 +151,12 @@ and offline copies:
   to the list); action bar = Play/Shuffle/Save/Remove.
 * **Season quirk** (Jellyfin 12.2): some season nodes hold no children — the
   Episodes list falls back to `/Shows/{series}/Episodes?Season=N`.
+* **Search is server-side** (`SearchTerm`): libraries hold far more items than
+  one page (533 music videos), so typing filters at the server, not just the
+  loaded rows. Debounced 350 ms; Back clears the filter first; navigating down
+  resets it. The cursor position is remembered per folder and restored on Back.
+* **Pagination**: deliberately minimal — pages of 200 plus a `⬇ …and N more`
+  sentinel row that appends the next page. No infinite scroll machinery.
 * **Headless test** (no device needed, runs against any Jellyfin):
   `python3 tools/test-goblin-tui.py` with `JELLYFIN_URL`/`JELLYFIN_KEY` env —
   covers library listing, movie/episode/music-video playlists, filter, shuffle,

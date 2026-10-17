@@ -144,11 +144,11 @@ async def main():
         mv = pilot.app.query("MediaItem").first()
         assert mv.item_type == "MusicVideo", mv.item_type
         total = len(list(pilot.app.query("MediaItem")))
-        # filter by text: only matching items stay visible and playable
+        # filter by text: server-side SearchTerm, so even item 400 of 533 is found
         from textual.widgets import Input as _In
         box = pilot.app.query_one("#search-box", _In)
         box.focus(); box.value = "youngblood"
-        await pilot.pause()
+        await pilot.pause(0.8)          # let the 0.35 s debounce + API round-trip land
         vis = [m for m in pilot.app.query("MediaItem") if m.display]
         assert vis and all("youngblood" in m.media_name.lower() for m in vis), \
             f"filter left {[m.media_name[:20] for m in vis]}"
@@ -165,6 +165,21 @@ async def main():
         await pilot.app.action_shuffle_play()
         urls = expect_pl(app, shuffle=True)
         print(f"PASS shuffle playlist ({len(urls)} files)")
+
+    # --- Load-more sentinel in the overflowing library (533 music videos)
+    app = GoblinApp(mode="play")
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(); await pilot.pause()
+        await click_by_name(pilot, "Video Musicali")
+        lm = pilot.app.query("LoadMoreItem")
+        assert len(lm) == 1, f"sentinel missing in 533-item library ({len(lm)})"
+        n_before = len(list(pilot.app.query("MediaItem")))
+        await pilot.app._load_more()
+        await pilot.pause()
+        n_after = len(list(pilot.app.query("MediaItem")))
+        assert n_after > n_before, f"load-more appended nothing ({n_before}->{n_after})"
+        assert len(pilot.app.query("LoadMoreItem")) == 1, "sentinel gone after page 2"
+        print(f"PASS load-more: {n_before} -> {n_after} items, sentinel updated")
 
     # --- Escape-back integrity: Home -> lib -> escape must land on libraries, not re-descend
     app = GoblinApp(mode="play")

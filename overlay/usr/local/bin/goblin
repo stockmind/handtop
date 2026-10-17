@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -216,6 +217,17 @@ class MediaItem(ListItem):
         yield Button(f"{icon} {self.media_name}{mark}", id=f"item-{self.item_id}", variant="default")
 
 
+class LoadMoreItem(ListItem):
+    """Sentinel row: the only pagination we need (libraries rarely overflow)."""
+
+    def __init__(self, remaining, **kwargs):
+        super().__init__(**kwargs)
+        self.remaining = remaining
+
+    def compose(self):
+        yield Button(f"⬇ …and {self.remaining} more", id="load-more", variant="default")
+
+
 class GoblinApp(App):
     TITLE = "Goblin"
     CSS = CSS
@@ -254,6 +266,11 @@ class GoblinApp(App):
         self.nav_stack = []
         self.current_parent_id = None
         self.last_show = None      # (parent_id, name, child_types, episodes_of)
+        self.index_memory = {}     # parent_id -> cursor row, restored on Back
+        self._search_timer = None
+        self.applied_search = ""   # what the current list was fetched with
+        self.page_offset = 0       # items loaded for the current view (Load-more)
+        self.page_total = 0
     
     def api_get(self, endpoint, params=None):
         url = f"{self.jellyfin_url}{endpoint}"
@@ -360,65 +377,132 @@ class GoblinApp(App):
         list_view.index = 0    # otherwise the search box steals the dpad at start
         list_view.focus()
     
-    async def show_children(self, parent_id, parent_name, item_types, episodes_of=None):
+    async def show_children(self, parent_id, parent_name, item_types, episodes_of=None,
+                            search=""):
         """List children of parent_id; one code path for libraries, series and seasons.
 
         episodes_of=(series_id, season_number) enables the Episodes fallback:
         on Jellyfin 12 some season nodes hold no children (episodes stay
         parented to the series), and /Shows/{id}/Episodes?Season=N finds them.
+        search goes server-side (SearchTerm): libraries hold far more items
+        than we ever load, so filtering the loaded page alone hides most of them.
         """
+        # remember where the cursor was before replacing this list (Back restores)
+        lv_old = self.query_one("#items-view", ListView)
+        if self.current_parent_id is not None and lv_old.children:
+            self.index_memory[self.current_parent_id] = lv_old.index
+        
         self.current_parent_id = parent_id
         self.last_show = (parent_id, parent_name, item_types, episodes_of)
         
         parts = ["🏠 Home"] + [name for _, name, _ in self.nav_stack[-2:]] + [parent_name]
-        self.query_one("#breadcrumb", Label).update(" › ".join(parts))
+        crumb = " › ".join(parts)
         
         # Recursive=true: ParentId+Recursive=false returns zero Episodes under
         # a season on this server family (measured on Jellyfin 12.2/aurora).
+        # ponytail: hard page of 200, no Load-more row — server-side SearchTerm
+        # covers reach into big libraries; add pagination if anyone really
+        # dpads past item 200.
         params = ["Recursive=true", "format=json", "Limit=200", f"ParentId={parent_id}",
                   "Fields=Width,Height"]
         if item_types:
             params.append(f"IncludeItemTypes={','.join(item_types)}")
+        if search:
+            params.append(f"SearchTerm={urllib.parse.quote(search)}")
         
         data = self.api_get("/Items", params)
         items = data.get("Items", []) if data else []
-        if not items and episodes_of:
+        total = data.get("TotalRecordCount", len(items)) if data else 0
+        if not items and episodes_of and not search:
             series_id, season_no = episodes_of
             data = self.api_get(f"/Shows/{series_id}/Episodes",
                                 [f"Season={season_no}", "format=json"])
             items = data.get("Items", []) if data else []
+            total = data.get("TotalRecordCount", len(items)) if data else total
         
-        manifest = load_manifest()
         list_view = self.query_one("#items-view", ListView)
         await list_view.clear()
         
-        for item in items[:100]:
+        await self._add_media_items(items)
+        if not items:
+            self.notify("No items", severity="warning")
+        self.page_offset = len(items)
+        self.page_total = total
+        if total > len(items):
+            await list_view.append(LoadMoreItem(total - len(items)))
+        self.query_one("#breadcrumb", Label).update(crumb)
+        # restore the cursor where it was (or row 0); Enter/gamepad-A works at once
+        idx = self.index_memory.get(parent_id)
+        list_view.index = idx if idx is not None and idx < len(items) else 0
+        list_view.focus()
+        self.applied_search = search
+    
+    async def _add_media_items(self, items):
+        manifest = load_manifest()
+        lv = self.query_one("#items-view", ListView)
+        for item in items:
             item_id = item.get("Id", "")
             if item_id:
                 files = manifest.get(item_id, [])
                 offline = bool(files) and (OFFLINE_DIR / files[0]).exists()
-                await list_view.append(MediaItem(item.get("Name", "?"), item_id,
-                                                 item.get("Type", "Folder"),
-                                                 index_number=item.get("IndexNumber"),
-                                                 container=item.get("Container"),
-                                                 offline=offline,
-                                                 file_size=item.get("FileSize"),
-                                                 video_height=item.get("Height")))
-        if not items:
-            self.notify("No items", severity="warning")
-        list_view.index = 0    # fresh lists have no cursor; Enter/gamepad-A works at once
-        list_view.focus()
+                await lv.append(MediaItem(item.get("Name", "?"), item_id,
+                                          item.get("Type", "Folder"),
+                                          index_number=item.get("IndexNumber"),
+                                          container=item.get("Container"),
+                                          offline=offline,
+                                          file_size=item.get("FileSize"),
+                                          video_height=item.get("Height")))
+    
+    async def _load_more(self):
+        """Append the next page under the sentinel (see Limit note above)."""
+        pid, name, types, epi = self.last_show
+        params = ["Recursive=true", "format=json", "Limit=200", f"ParentId={pid}",
+                  "Fields=Width,Height", f"StartIndex={self.page_offset}"]
+        if types:
+            params.append(f"IncludeItemTypes={','.join(types)}")
+        if self.applied_search:
+            params.append(f"SearchTerm={urllib.parse.quote(self.applied_search)}")
+        data = self.api_get("/Items", params)
+        new = data.get("Items", []) if data else []
+        lv = self.query_one("#items-view", ListView)
+        await lv.query_one(LoadMoreItem).remove()
+        await self._add_media_items(new)
+        self.page_offset += len(new)
+        left = self.page_total - self.page_offset
+        if left > 0:
+            await lv.append(LoadMoreItem(left))
+        lv.focus()
     
     def on_input_changed(self, event):
-        search = event.value.lower()
-        list_view = self.query_one("#items-view", ListView)
-        for child in list_view.children:
-            if isinstance(child, MediaItem):
-                child.display = search in child.media_name.lower()
+        if self.mode != "play":
+            return
+        # Debounce: typing fires per keystroke; each search is an API call.
+        if self._search_timer:
+            self._search_timer.stop()
+        self._search_timer = self.set_timer(0.35, self._apply_search)
+
+    async def _apply_search(self):
+        box = self.query_one("#search-box", Input)
+        q = box.value.strip()
+        if self.current_parent_id is None:
+            # Home: few libraries, filter client-side
+            lv = self.query_one("#items-view", ListView)
+            for child in lv.children:
+                if isinstance(child, MediaItem):
+                    child.display = q.lower() in child.media_name.lower()
+            return
+        if q == self.applied_search:
+            return
+        pid, name, types, epi = self.last_show
+        await self.show_children(pid, name, types, episodes_of=epi, search=q)
     
     async def _activate(self, child):
         """Single activation path for mouse clicks AND keyboard/gamepad Enter."""
         if child is None:
+            return
+        
+        if isinstance(child, LoadMoreItem):
+            await self._load_more()
             return
         
         if self.mode == "menu":
@@ -450,6 +534,8 @@ class GoblinApp(App):
             item_type = media_item.item_type
             
             # The stack stores what to re-show on Back: (id, name, child-types).
+            if item_type in ("Collection", "Series", "Season"):
+                self.query_one("#search-box", Input).value = ""   # filter was for this level
             if item_type == "Collection":
                 child_types = COLLECTION_TYPES.get(media_item.collection_type,
                                                    ["Movie", "Series"])
