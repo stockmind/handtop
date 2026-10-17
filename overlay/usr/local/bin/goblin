@@ -243,7 +243,8 @@ class GoblinApp(App):
         ]
         
         for label, value in stats:
-            btn = Button(f"{label}: {value}", id=label.lower(), variant="default")
+            btn_id = label.lower().replace(" ", "-")
+            btn = Button(f"{label}: {value}", id=btn_id, variant="default")
             await list_view.append(ListItem(btn))
     
     async def show_libraries(self):
