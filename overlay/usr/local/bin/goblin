@@ -136,14 +136,14 @@ class DashboardPanel(Static):
 class MediaItem(ListItem):
     def __init__(self, name, item_id, item_type, **kwargs):
         super().__init__(**kwargs)
-        self.name = name
+        self.media_name = name      # Don't use .name (reserved by ListItem)
         self.item_id = item_id
         self.item_type = item_type
     
     def compose(self):
         icons = {"Collection": "📁", "Series": "📺", "Season": "🗓️", "Episode": "▶️", "Movie": "🎬"}
         icon = icons.get(self.item_type, "📄")
-        yield Button(f"{icon} {self.name}", id=self.item_id, variant="default")
+        yield Button(f"{icon} {self.media_name}", id=self.item_id, variant="default")
 
 
 class GoblinApp(App):
@@ -347,7 +347,7 @@ class GoblinApp(App):
         list_view = self.query_one("#items-view", ListView)
         for child in list_view.children:
             if isinstance(child, MediaItem):
-                child.display = search in child.name.lower()
+                child.display = search in child.media_name.lower()
     
     async def on_button_pressed(self, event):
         btn = event.button
@@ -375,7 +375,7 @@ class GoblinApp(App):
                 return
             
             item_type = media_item.item_type
-            item_name = media_item.name
+            item_name = media_item.media_name
             
             if item_type == "Collection":
                 self.nav_stack.append((item_id, item_name))
