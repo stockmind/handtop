@@ -38,6 +38,7 @@ chromium                  # browser: about half Firefox's CPU when scrolling on 
 imv
 qpdfview
 mpv
+bemenu                  # fast text app launcher (goblin-run); ~6x quicker than the icon drawer
 xarchiver
 # Themes / fonts
 adwaita-icon-theme

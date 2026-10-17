@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add: `goblin-run`, an instant text app launcher built on bemenu (~0.85s to show vs ~5s for the GTK icon drawer, which cold-starts and re-scans every launch). Lists all `.desktop` apps by name; type to filter, Enter launches. Bound to `Super+r`; also added as a desktop entry. bemenu is now in the desktop package list.
+
 - Add: `.desktop` entries for the goblin tools (Dashboard, Play, Menu) so they appear in nwg-drawer under Apps. Drawer itself now uses 5 columns with 48px icons and tight margins to fit 640×480 without horizontal scrollbars.
 
 - Fix: `goblin-dash` now exports the sourced environment so Jellyfin now-playing actually appears when `/etc/default/goblin-dash` is set.

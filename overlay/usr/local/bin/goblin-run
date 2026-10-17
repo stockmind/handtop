@@ -1,0 +1,35 @@
+#!/bin/sh
+# goblin-run — instant text app launcher (bemenu).
+#
+# Lists every .desktop application by name; type to filter, Enter to launch.
+# Cold start is well under a second (unlike the GTK icon drawer), so this is
+# the "reach for an app fast" keybind. Uses the same desktop database as the
+# drawer, so anything in Apps shows up here too.
+set -eu
+
+# Build "Name<TAB>Exec" pairs from all desktop files, skipping no-display ones.
+apps=$(
+    find /usr/local/share/applications /usr/share/applications \
+         "$HOME/.local/share/applications" -maxdepth 1 -name '*.desktop' 2>/dev/null |
+    while read -r f; do
+        # Skip hidden/no-display entries.
+        grep -qiE '^(NoDisplay|Hidden)=true' "$f" && continue
+        name=$(grep -m1 '^Name=' "$f" | cut -d= -f2-)
+        exec_=$(grep -m1 '^Exec=' "$f" | cut -d= -f2- | sed 's/ %[fFuUdDnNickvm]//g')
+        [ -n "$name" ] && [ -n "$exec_" ] && printf '%s\t%s\n' "$name" "$exec_"
+    done | sort -u
+)
+
+[ -n "$apps" ] || { echo "goblin-run: no applications found" >&2; exit 1; }
+
+sel=$(printf '%s\n' "$apps" | bemenu \
+        -l 14 -i --fn 'monospace 12' \
+        --tb '#242f4f' --tf '#eeeeee' --fb '#242f4f' --ff='#89ddff' \
+        --nb '#242f4f' --nf '#eeeeee' --hb '#3a4a78' --hf '#ffffff' \
+        -p 'run>' ) || exit 0
+
+cmd=${sel#*	}
+[ -n "$cmd" ] || exit 0
+
+# Launch detached so the launcher closes immediately.
+setsid sh -c "$cmd" >/dev/null 2>&1 &
