@@ -140,6 +140,12 @@ browser, shuffle) is gone — the client is the whole UI.
   or plays from the cursor down the visible list, `B` goes back (clearing the
   search filter first), `Y` saves, `X` deletes the saved copy (twice), `/`
   searches, `Q` quits. Physical keyboard works the same.
+* **Video**: mpv takes over with `--fullscreen`, so the film fills the
+  640x480 panel; the client is gone while it plays, so the keyboard belongs
+  to mpv. `B` (Esc) closes the video and the client comes back on the same
+  folder and row (mpv's own Esc binding is "cycle pause", so
+  `/etc/mpv/input-handtop.conf` rebinds it to `quit` for the client; the
+  built-in bindings stay in place).
 * **Transcoding**: playing and saving ask Jellyfin for
   `stream.mp4?static=false&videoCodec=h264&audioCodec=aac&maxWidth=1280&
   maxHeight=720&videoBitrate=4000000`. `static=false` is the part that

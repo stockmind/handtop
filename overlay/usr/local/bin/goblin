@@ -742,7 +742,16 @@ def main():
             # stride is not 64-pixel aligned (Mesa rejects the image, the video
             # area stays a flat blue), which hits low-res and odd-aspect
             # transcodes. The copy path shows every frame, 0 dropped at 720p.
-            subprocess.run(["mpv", "--force-window=yes", "--idle=no",
+            # --fullscreen: the video fills the 640x480 panel instead of a
+            # small window in the terminal. --terminal=no keeps the TUI's
+            # terminal clean behind the video. The app is already gone at
+            # this point (it exits with the playlist), so the keyboard belongs
+            # to mpv: B (Esc) quits it and the client comes back.
+            # /etc/mpv/input-handtop.conf: mpv's built-in Esc binding is
+            # "cycle pause", but B is the "close the video" key here.
+            subprocess.run(["mpv", "--fullscreen", "--force-window=yes",
+                            "--idle=no", "--terminal=no",
+                            "--input-conf=/etc/mpv/input-handtop.conf",
                             "--hwdec=drm-copy"] + result[1])
             resume = app.play_state
             continue

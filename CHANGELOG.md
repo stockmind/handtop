@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Change: video plays fullscreen and B closes it. The client starts mpv with
+  `--fullscreen` (the film fills the 640x480 panel) and the client is out of
+  the way while it plays, so the keyboard belongs to mpv: `B` (Esc) closes the
+  video and the client returns to the same folder and row. mpv's built-in Esc
+  binding is "cycle pause", so `/etc/mpv/input-handtop.conf` rebinds it to
+  `quit` for the client.
+
 - Change: `goblin` is now one Jellyfin client and nothing else. The menu,
   dashboard, music and app-runner modes are gone, as are the dead
   `goblin-play` wrapper and `goblin-play-tui.py`; the whole 80x24 terminal
