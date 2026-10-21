@@ -80,9 +80,6 @@ AUDIO_BITRATE = int(os.environ.get("GOBLIN_AUDIO_BITRATE", "96000"))
 # GOBLIN_SUB_LANGUAGES=ita,eng
 SUB_LANGUAGES = [x.strip() for x in
                  os.environ.get("GOBLIN_SUB_LANGUAGES", "").split(",") if x.strip()]
-# The bitrate cap for a direct-play stream: a resumed item is played from the
-# original file, because a transcode cannot be seeked into.
-DIRECT_BITRATE = int(os.environ.get("GOBLIN_DIRECT_BITRATE", "8000000"))
 # The smallest position worth resuming from (seconds).
 RESUME_MINIMUM = float(os.environ.get("GOBLIN_RESUME_MINIMUM", "10"))
 # How many files to save at once. The server transcodes much faster than the
@@ -229,6 +226,12 @@ def subtitle_track(item, prefs=None):
             if language == wanted or wanted in title:
                 score = max(score, 100 - index)
                 break
+        if not score and not language:
+            # A subtitle without a language is one that was added to the file
+            # (an external .ass beside the episode) - the server cannot know
+            # its language, but it is far more likely the wanted one than the
+            # source's own track in some other language.
+            score = 50
         if not score and stream.get("IsDefault"):
             score = 10
         if not score:
@@ -439,7 +442,7 @@ def row_text(item, width, local, resume=0, prefs=None):
             meta.append(f"{height}p")
         track = subtitle_track(item, prefs)
         if track:
-            meta.append((track.get("Language") or "?")[:3].lower())
+            meta.append(subtitle_language(track))
     right = "  ".join(meta)
     mark = "✓" if local else ""
     resume_mark = f"»{int(resume // 60)}:{int(resume % 60):02d}" if resume else ""
@@ -797,8 +800,7 @@ class Goblin(App):
                 "url": url,
                 "sub": subtitle,
                 "start": start,
-                # a direct play is the source width, a transcode the cap
-                "width": self.output_width(entry, transcoded=not start),
+                "width": self.output_width(entry),
             })
         start = playables.index(item)
         self.play_state = {
@@ -897,14 +899,9 @@ class Goblin(App):
         if item.get("Type") == "Audio":
             return (f"{self.api.url}/Audio/{item['Id']}/stream"
                     f"?static=true&api_key={self.api.key}"), None
-        if start:
-            return (f"{self.api.url}/Videos/{item['Id']}/stream.mp4?static=true"
-                    f"&MaxStreamingBitrate={DIRECT_BITRATE}"
-                    f"&api_key={self.api.key}"), self.api.subtitle_url(item, self.prefs)
         if self.STREAM_TRANSCODE:
             return self.transcode_url(item["Id"]), self.api.subtitle_url(item, self.prefs)
         return (f"{self.api.url}/Videos/{item['Id']}/stream.mp4?static=true"
-                f"&MaxStreamingBitrate={DIRECT_BITRATE}"
                 f"&api_key={self.api.key}"), self.api.subtitle_url(item, self.prefs)
 
     def action_search(self):
@@ -1317,6 +1314,21 @@ class Player:
             time.sleep(0.3)
         return False
 
+    def seek_to(self, entry):
+        """Jump to the saved position.
+
+        mpv's --start does not work on a transcode (the server produces one
+        growing file), but a seek does: the server honours the range request
+        and restarts the transcode at the offset."""
+        seconds = entry.get("start") or 0
+        if seconds <= 0 or self.socket is None:
+            return
+        try:
+            self.socket.sendall((json.dumps(
+                {"command": ["seek", seconds, "absolute"]}) + "\n").encode())
+        except OSError:
+            pass
+
     def check_width(self, process):
         """Keep the blue frames out.
 
@@ -1354,6 +1366,8 @@ class Player:
             process = self.check_width(process)
             self.connect()
         if self.entries:
+            self.seek_to(self.entries[0])
+        if self.entries:
             self.client.post("/Sessions/Playing", {
                 "ItemId": self.entries[0]["id"],
                 "MediaSourceId": self.entries[0].get("source") or self.entries[0]["id"],
@@ -1369,9 +1383,11 @@ class Player:
             if isinstance(index, int) and index < len(self.entries):
                 if index != self.index:
                     self.index = index
-                    # a new file starts: its width has to fit as well
+                    # a new file starts: its width has to fit as well, and
+                    # it may have a position of its own
                     process = self.check_width(process)
                     self.connect()
+                    self.seek_to(self.entries[self.index])
             if isinstance(position, (int, float)):
                 self.position = float(position)
                 item = self.entries[self.index]

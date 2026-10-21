@@ -114,14 +114,9 @@ async def main():
         entries = playlist(app)
         assert len(entries) == n, f"playlist {len(entries)} != visible {n}"
         assert first["Id"] == entries[0]["id"], "playlist does not start at the cursor"
-        # no saved position: a transcode, capped to the panel
-        if not entries[0]["start"]:
-            assert "static=false" in entries[0]["url"], entries[0]["url"]
-            assert "maxWidth=640" in entries[0]["url"], entries[0]["url"]
-        else:
-            # a saved position: the original file, which mpv can seek into
-            assert "static=true" in entries[0]["url"], entries[0]["url"]
-            assert entries[0]["start"] > 0, entries[0]
+        # always a transcode, capped to the panel (never the original)
+        assert "static=false" in entries[0]["url"], entries[0]["url"]
+        assert "maxWidth=640" in entries[0]["url"], entries[0]["url"]
         # the user's Jellyfin preferences decide the subtitle
         assert app.prefs, "no preferences read from the Jellyfin profile"
         print(f"PASS preferences: mode={app.prefs['mode']!r} "
@@ -235,8 +230,8 @@ async def main():
         assert len(app2.query(Row)) > lv.index, "resume did not pull the pages back"
         print(f"PASS resume keeps row {lv.index} with {len(app2.query(Row))} rows")
 
-    # --- A saved position is played from the original (a transcode cannot be
-    #     seeked into), and playback starts there
+    # --- A saved position is carried into the playlist (the player seeks in
+    #     the running transcode)
     app = Goblin()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
@@ -247,8 +242,9 @@ async def main():
         app.play(movie)
         entries = playlist(app)
         assert entries[0]["start"] == 90, entries[0]
-        assert "static=true" in entries[0]["url"], entries[0]["url"]
-        print("PASS a saved position seeks into the original file")
+        # still a transcode - the player seeks in it once it is running
+        assert "static=false" in entries[0]["url"], entries[0]["url"]
+        print("PASS a saved position is carried into the transcode")
 
     # --- Subtitles: every kind of media gets one, not just series
     app = Goblin()
