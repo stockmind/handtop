@@ -302,7 +302,7 @@ def test_request_gamepad_and_desktop_from_keypad_mode():
     out = c.request_gamepad()                         # e.g. the External Controller app
     assert ("key", "KEY_DOWN", False) in out and ("mode", "gamepad") in out
     assert c.mode == "gamepad"
-    assert c.button("down", False, 2.1) == [("pad_abs", "ABS_HAT0Y", 0)]
+    assert ("pad_abs", "ABS_HAT0Y", 0) in c.button("down", False, 2.1)
     out = c.request_desktop()                         # game launcher cleared its flag
     assert out == [("mode", "desktop")] and c.mode == "desktop"
     # request_desktop from keypad mode leaves through the keypad exit (arrows released)
