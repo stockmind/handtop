@@ -168,6 +168,27 @@ memory, so Mesa never imports a dmabuf — and at 720p it drops no frames at all
 (0 dropped over 15 s, measured). The copy path at 1080p does drop frames
 (21-40 over 15 s), which is why 1080p files prefer zero-copy.
 
+### The client picks the path per file
+
+The server scales the source to the panel (640 wide, and 640 = 10 x 64), so
+**zero-copy works** for the transcode; the copy path is only used when the
+width is not 64-aligned (a source narrower than 640 keeps its own width).
+
+Measured 2026-10-21 on the device (h264, 24 fps, 20 s, `vo=gpu --profile=fast`,
+CPU as % of one core):
+
+| resolution | `drm` (zero-copy) | `drm-copy` |
+|---|---|---|
+| 640x360 (the panel) | 16 % CPU, 0 dropped | 28 % CPU, 0 dropped |
+| 960x540 | 17 %, 0 | 45 %, 0 |
+| 1280x720 | 17 %, 0 | 62 %, 0 |
+| 1920x1080 | 18 %, 0 | 115 %, 19 dropped |
+
+Zero-copy is flat (the VPU and the GPU do the work, the CPU barely moves),
+while the copy path scales with the pixel count. That is why the client
+streams at the panel resolution *and* uses zero-copy when it can: 16 % CPU
+instead of the 62 % the old 720p copy stream cost, and no blue frames.
+
 ### The Mesa crash on the software path (pre-existing)
 
 `--hwdec=no` with a GPU VO segfaults intermittently, and it is *not* caused by

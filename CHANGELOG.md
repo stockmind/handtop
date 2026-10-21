@@ -42,6 +42,18 @@
   in the web UI under Settings > Playback > Subtitles, or override on the
   device with `GOBLIN_SUB_LANGUAGES=ita,eng`.
 
+- Fix: the client picks the decode path per file now: zero-copy (`drm`) when
+  the width is 64-pixel aligned — which the panel-sized transcode always is
+  (exactly 640 wide) — and the copy path otherwise. Measured on the device at
+  640x360: 16 % CPU zero-copy against 28 % for the copy path, 0 dropped
+  frames; the old 720p copy stream cost 62 %. The blue frames (panfrost
+  rejecting a stride it cannot import) cannot happen on the aligned path.
+
+- Add: an icon for the app drawer: `app-goblin.png` (the handheld with a
+  play triangle, 56 px pixel art with a `-light` variant), and the drawer
+  entry is now "Goblin - Jellyfin client for the handheld" instead of the
+  stale "Goblin Menu".
+
 - Add: subtitles. The client picks the item's subtitle track (Italian first,
   English second, otherwise whatever text track is there) and hands it to mpv
   per file, so every episode of the playlist is subtitled from the start. The
