@@ -116,6 +116,10 @@ async def main():
         assert "static=false" in entries[0]["url"], f"no transcode: {entries[0]['url']}"
         # the transcode is capped to the panel
         assert "maxWidth=640" in entries[0]["url"], entries[0]["url"]
+        # the user's Jellyfin preferences decide the subtitle
+        assert app.prefs, "no preferences read from the Jellyfin profile"
+        print(f"PASS preferences: mode={app.prefs['mode']!r} "
+              f"languages={app.prefs['languages']}")
         print(f"PASS movies: {n}-item playlist, transcode URL from cursor")
 
     # --- resume reopens the same folder and cursor
@@ -178,7 +182,7 @@ async def main():
         assert rows, "no episodes"
         chosen = None
         for row in rows:
-            track = goblin_app.subtitle_track(row.item)
+            track = goblin_app.subtitle_track(row.item, app.prefs)
             if track:
                 chosen = track
                 break
@@ -226,7 +230,7 @@ async def main():
         assert size > 50_000, f"suspiciously small: {size}"
         print(f"PASS save: {files[0]} ({size / 1e6:.1f} MB)")
         # the subtitle comes along as a sidecar mpv loads by itself
-        track = goblin_app.subtitle_track(item)
+        track = goblin_app.subtitle_track(item, app.prefs)
         if track:
             base = (OFFLINE / files[0]).with_suffix("")
             sidecars = [p for p in base.parent.glob(base.name + ".*")

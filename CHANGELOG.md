@@ -35,6 +35,13 @@
   exactly what the screen can show. `GOBLIN_MAX_WIDTH`/`GOBLIN_MAX_HEIGHT`
   raise it for the HDMI monitor.
 
+- Change: the subtitle language is no longer hardcoded. The client reads the
+  user's Jellyfin preferences (`SubtitleLanguagePreference`, `SubtitleMode`)
+  and picks a track accordingly: a preferred language, else the media's
+  default track, else the first one; mode `None` means no subtitles. Set it
+  in the web UI under Settings > Playback > Subtitles, or override on the
+  device with `GOBLIN_SUB_LANGUAGES=ita,eng`.
+
 - Add: subtitles. The client picks the item's subtitle track (Italian first,
   English second, otherwise whatever text track is there) and hands it to mpv
   per file, so every episode of the playlist is subtitled from the start. The

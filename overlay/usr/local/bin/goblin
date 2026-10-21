@@ -72,6 +72,10 @@ MAX_HEIGHT = int(os.environ.get("GOBLIN_MAX_HEIGHT", "480"))
 VIDEO_BITRATE = int(os.environ.get("GOBLIN_VIDEO_BITRATE", "0")) or (
     MAX_WIDTH * MAX_HEIGHT * 4)          # ~4 bits per pixel per second
 AUDIO_BITRATE = int(os.environ.get("GOBLIN_AUDIO_BITRATE", "96000"))
+# Subtitle languages, if the Jellyfin profile should not decide:
+# GOBLIN_SUB_LANGUAGES=ita,eng
+SUB_LANGUAGES = [x.strip() for x in
+                 os.environ.get("GOBLIN_SUB_LANGUAGES", "").split(",") if x.strip()]
 # Skip the intro/recap the server knows about (jfsh does the same).
 SKIP_INTRO = os.environ.get("GOBLIN_SKIP_INTRO", "1") == "1"
 
@@ -156,12 +160,14 @@ def safe_name(name):
 
 TEXT_SUBS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
 SUB_FORMAT = {"ass": "ass", "ssa": "ass", "webvtt": "vtt", "mov_text": "srt"}
-# Which subtitle to use: Italian first, English second, whatever else is there.
-SUB_PREFERENCE = {"ita": 3, "it": 3, "italian": 3, "eng": 2, "en": 2, "english": 2}
 
 
-def subtitle_track(item):
-    """The subtitle stream to use: Italian, else English, else the first one."""
+def subtitle_track(item, prefs=None):
+    """The subtitle stream to use, following the user's Jellyfin preferences.
+
+    Order: a track in one of the preferred languages (in the order the user
+    listed them), then the media's own default track, then the first text
+    track there is. Subtitle mode "None" means no subtitles at all."""
     sources = item.get("MediaSources") or []
     if not sources:
         return None
@@ -170,22 +176,30 @@ def subtitle_track(item):
                and (s.get("Codec") or "").lower() in TEXT_SUBS]
     if not streams:
         return None
+    prefs = prefs or {}
+    if str(prefs.get("mode") or "Default").lower() == "none":
+        return None
+    languages = [str(x).lower() for x in (prefs.get("languages") or [])]
+    if SUB_LANGUAGES:                       # GOBLIN_SUB_LANGUAGES overrides
+        languages = [x.lower() for x in SUB_LANGUAGES]
 
     def rank(stream):
         language = (stream.get("Language") or "").lower()
         title = (stream.get("DisplayTitle") or "").lower()
-        score = SUB_PREFERENCE.get(language, 0)
+        score = 0
+        for index, wanted in enumerate(languages):
+            if language == wanted or wanted in title:
+                score = max(score, 100 - index)
+                break
+        if not score and stream.get("IsDefault"):
+            score = 10
         if not score:
-            for word, value in (("italian", 3), ("english", 2)):
-                if word in title:
-                    score = value
-                    break
+            score = 1
         if stream.get("IsForced"):
             score -= 2
         return score
 
-    best = max(streams, key=rank)
-    return best if rank(best) > 0 else streams[0]
+    return max(streams, key=rank)
 
 
 def subtitle_language(track):
@@ -260,6 +274,22 @@ class Jellyfin:
                 out[item["Id"]] = ticks
         return out
 
+    def preferences(self):
+        """The user's Jellyfin playback preferences (subtitles).
+
+        Settings > Playback > Subtitles in the web UI: the preferred
+        languages (in order) and the subtitle mode (Default/Always/
+        OnlyForeign/Smart/None)."""
+        user = self.user_id()
+        if not user:
+            return {}
+        config = (self.get(f"/Users/{user}") or {}).get("Configuration") or {}
+        languages = config.get("SubtitleLanguagePreference") or ""
+        if isinstance(languages, str):
+            languages = [x.strip() for x in languages.split(",") if x.strip()]
+        return {"mode": config.get("SubtitleMode") or "Default",
+                "languages": languages}
+
     def position(self, item_id):
         """Stored playback position of one item, in seconds (0 if none)."""
         user = self.user_id()
@@ -297,12 +327,12 @@ class Jellyfin:
         data = self.get("/Items", params) or {}
         return data.get("Items", []), data.get("TotalRecordCount", 0)
 
-    def subtitle_url(self, item):
+    def subtitle_url(self, item, prefs=None):
         """URL of the subtitle track to use, or None.
 
         Jellyfin serves any subtitle stream as a file in any text format
         (srt/ass/vtt), so mpv can load it as a sidecar track."""
-        track = subtitle_track(item)
+        track = subtitle_track(item, prefs)
         if track is None:
             return None
         source = item["MediaSources"][0]
@@ -328,7 +358,7 @@ class Jellyfin:
 
 # ---------------------------------------------------------------- widgets
 
-def row_text(item, width, local, resume=0):
+def row_text(item, width, local, resume=0, prefs=None):
     """One compact row: marker, code, name, right-aligned meta, saved mark."""
     kind = item.get("Type", "")
     marker = "▶" if kind in PLAYABLE else "▸"
@@ -380,10 +410,10 @@ def row_text(item, width, local, resume=0):
 
 
 class Row(ListItem):
-    def __init__(self, item, width, local=False, resume=0, **kwargs):
+    def __init__(self, item, width, local=False, resume=0, prefs=None, **kwargs):
         super().__init__(**kwargs)
         self.item = item
-        self.text = row_text(item, width, local, resume)
+        self.text = row_text(item, width, local, resume, prefs)
 
     def compose(self):
         yield Label(self.text)
@@ -444,6 +474,7 @@ class Goblin(App):
         self._prev_cpu = cpu_snapshot()
         self._cpu = None
         self.resume_at = dict(positions or {})   # item id -> position in ticks
+        self.prefs = {}                           # the user's Jellyfin preferences
         self._confirm = None     # (item id, deadline) for delete
         self._search_timer = None
         self._busy = False
@@ -464,6 +495,7 @@ class Goblin(App):
         # ourselves (the server cannot store it for an API-key session, so
         # our own position is the fresher one and wins).
         self.resume_at = {**self.api.resume_positions(), **self.resume_at}
+        self.prefs = self.api.preferences()      # subtitle mode and languages
         await self.show_libraries()
         if self.resume:
             await self._resume()
@@ -528,7 +560,7 @@ class Goblin(App):
         for item in self.items:
             files = manifest.get(item.get("Id"), [])
             local = bool(files) and any((OFFLINE / f).exists() for f in files)
-            rows.append(Row(item, width, local, self.resume_seconds(item)))
+            rows.append(Row(item, width, local, self.resume_seconds(item), self.prefs))
         if self.total > len(self.items):
             rows.append(MoreRow(self.total - len(self.items)))
         await lv.clear()
@@ -611,7 +643,7 @@ class Goblin(App):
         for item in items:
             files = manifest.get(item.get("Id"), [])
             local = bool(files) and any((OFFLINE / f).exists() for f in files)
-            new.append(Row(item, width, local, self.resume_seconds(item)))
+            new.append(Row(item, width, local, self.resume_seconds(item), self.prefs))
         await lv.extend(new)
         self.items.extend(items)
         self.offset += len(items)
@@ -707,14 +739,14 @@ class Goblin(App):
             if any(local.with_suffix(ext).exists()
                    for ext in (".srt", ".ass", ".vtt")):
                 return str(local), None
-            return str(local), self.api.subtitle_url(item)
+            return str(local), self.api.subtitle_url(item, self.prefs)
         if item.get("Type") == "Audio":
             return (f"{self.api.url}/Audio/{item['Id']}/stream"
                     f"?static=true&api_key={self.api.key}"), None
         if self.STREAM_TRANSCODE:
-            return self.transcode_url(item["Id"]), self.api.subtitle_url(item)
+            return self.transcode_url(item["Id"]), self.api.subtitle_url(item, self.prefs)
         return (f"{self.api.url}/Videos/{item['Id']}/stream"
-                f"?static=true&api_key={self.api.key}"), self.api.subtitle_url(item)
+                f"?static=true&api_key={self.api.key}"), self.api.subtitle_url(item, self.prefs)
 
     def action_search(self):
         box = self.query_one("#search", Input)
@@ -839,7 +871,7 @@ class Goblin(App):
                 name = f"{name} ({ep['ProductionYear']})"
             transcode, ext = self.dl_choice(ep)
             out.append((ep["Id"], f"{safe_name(name)}.{ext}", api_size(ep),
-                        "tc" if transcode else "orig", self.api.subtitle_url(ep)))
+                        "tc" if transcode else "orig", self.api.subtitle_url(ep, self.prefs)))
         return out
 
     def dl_choice(self, item):

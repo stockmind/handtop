@@ -190,10 +190,14 @@ browser, shuffle) is gone — the client is the whole UI.
   stride alignment`); anything else renders as a flat blue rectangle. 416-wide
   and odd-aspect transcodes hit it constantly. The copy path shows every
   frame — 0 dropped frames at 720p, where the screen is 640x480 anyway.
-* **Subtitles**: the client asks the server for the item's subtitle streams
-  (`MediaSources` in the list query, no extra request) and enables the best
-  one by default — Italian first, English second, otherwise whatever text
-  track is there (forced-only tracks are skipped when a normal one exists).
+* **Subtitles**: the client follows the **user's Jellyfin preferences**
+  (`GET /Users/{id}` → `Configuration.SubtitleLanguagePreference` and
+  `SubtitleMode`), so nothing about languages is hardcoded: set
+  *Settings → Playback → Subtitles* in the web UI and the handheld follows.
+  The pick is: a track in one of the preferred languages (in the order the
+  user listed them), else the media's own default track, else the first text
+  track; mode `None` means no subtitles at all. `GOBLIN_SUB_LANGUAGES=ita,eng`
+  overrides the profile if you want a different order on the device.
   Jellyfin serves any subtitle stream as srt/ass/vtt on the fly
   (`/Videos/{id}/{source}/Subtitles/{index}/Stream.srt`), and the client
   hands it to mpv as a per-file `--sub-file`, so every episode of the
