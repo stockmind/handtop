@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -61,6 +62,18 @@ CONTAINERS = {
 }
 PAGE = 200
 FIELDS = "Fields=Width,Height,RunTimeTicks,ProductionYear,MediaSources"
+
+# The panel is 640x480: asking the server for that (it keeps the aspect ratio,
+# so 16:9 becomes 640x360) is enough picture and a quarter of the pixels of
+# 720p - less to transcode, less to push over Wi-Fi, less for the VPU.
+# Raise it for the HDMI monitor: GOBLIN_MAX_WIDTH=1280 GOBLIN_MAX_HEIGHT=720.
+MAX_WIDTH = int(os.environ.get("GOBLIN_MAX_WIDTH", "640"))
+MAX_HEIGHT = int(os.environ.get("GOBLIN_MAX_HEIGHT", "480"))
+VIDEO_BITRATE = int(os.environ.get("GOBLIN_VIDEO_BITRATE", "0")) or (
+    MAX_WIDTH * MAX_HEIGHT * 4)          # ~4 bits per pixel per second
+AUDIO_BITRATE = int(os.environ.get("GOBLIN_AUDIO_BITRATE", "96000"))
+# Skip the intro/recap the server knows about (jfsh does the same).
+SKIP_INTRO = os.environ.get("GOBLIN_SKIP_INTRO", "1") == "1"
 
 
 # ---------------------------------------------------------------- device stats
@@ -199,6 +212,7 @@ class Jellyfin:
     def __init__(self, url, key):
         self.url = url.rstrip("/")
         self.key = key
+        self._user = None
 
     def get(self, endpoint, params=None):
         url = f"{self.url}{endpoint}"
@@ -211,6 +225,55 @@ class Jellyfin:
                 return json.load(r)
         except (urllib.error.URLError, ValueError, TimeoutError, OSError):
             return None
+
+    def post(self, endpoint, body):
+        """POST a JSON body (progress reporting)."""
+        req = urllib.request.Request(
+            f"{self.url}{endpoint}",
+            data=json.dumps(body).encode(),
+            headers={"Authorization": f'MediaBrowser Token="{self.key}"',
+                     "Content-Type": "application/json"},
+            method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10):
+                return True
+        except (urllib.error.URLError, OSError):
+            return False
+
+    def user_id(self):
+        """The user this token belongs to (the first one; admin keys list all)."""
+        if self._user is None:
+            users = self.get("/Users") or []
+            self._user = users[0].get("Id") if users else ""
+        return self._user
+
+    def resume_positions(self):
+        """{item id: position ticks} of everything half watched."""
+        user = self.user_id()
+        if not user:
+            return {}
+        data = self.get(f"/Users/{user}/Items/Resume", ["Limit=200", "Recursive=true"])
+        out = {}
+        for item in (data or {}).get("Items", []):
+            ticks = ((item.get("UserData") or {}).get("PlaybackPositionTicks") or 0)
+            if ticks:
+                out[item["Id"]] = ticks
+        return out
+
+    def position(self, item_id):
+        """Stored playback position of one item, in seconds (0 if none)."""
+        user = self.user_id()
+        if not user:
+            return 0
+        data = self.get(f"/Users/{user}/Items/{item_id}")
+        ticks = ((data or {}).get("UserData") or {}).get("PlaybackPositionTicks") or 0
+        return ticks / 10_000_000
+
+    def segments(self, item_id):
+        """Intro/recap segments the server knows about (empty if none)."""
+        data = self.get(f"/MediaSegments/{item_id}",
+                        ["includeSegmentTypes=Intro", "includeSegmentTypes=Recap"])
+        return (data or {}).get("Items", [])
 
     def libraries(self):
         data = self.get("/Library/VirtualFolders?format=json")
@@ -265,7 +328,7 @@ class Jellyfin:
 
 # ---------------------------------------------------------------- widgets
 
-def row_text(item, width, local):
+def row_text(item, width, local, resume=0):
     """One compact row: marker, code, name, right-aligned meta, saved mark."""
     kind = item.get("Type", "")
     marker = "▶" if kind in PLAYABLE else "▸"
@@ -296,8 +359,9 @@ def row_text(item, width, local):
             meta.append((track.get("Language") or "?")[:3].lower())
     right = "  ".join(meta)
     mark = "✓" if local else ""
+    resume_mark = f"»{int(resume // 60)}:{int(resume % 60):02d}" if resume else ""
 
-    name_w = max(12, width - 3 - len(code) - len(right) - len(mark) - 4)
+    name_w = max(12, width - 3 - len(code) - len(right) - len(mark) - len(resume_mark) - 4)
     if len(name) > name_w:
         name = name[: name_w - 1] + "…"
 
@@ -310,14 +374,16 @@ def row_text(item, width, local):
         text.append("  " + right, style="#6b7280")
     if mark:
         text.append("  " + mark, style="bold #7ee787")
+    if resume_mark:
+        text.append("  " + resume_mark, style="#e5c07b")
     return text
 
 
 class Row(ListItem):
-    def __init__(self, item, width, local=False, **kwargs):
+    def __init__(self, item, width, local=False, resume=0, **kwargs):
         super().__init__(**kwargs)
         self.item = item
-        self.text = row_text(item, width, local)
+        self.text = row_text(item, width, local, resume)
 
     def compose(self):
         yield Label(self.text)
@@ -363,7 +429,7 @@ class Goblin(App):
     DL_TRANSCODE_HEIGHT = int(os.environ.get("GOBLIN_DL_TRANSCODE_HEIGHT", "720"))
     HINT = "[A] play  [B] back  [Y] save  [X] delete  [/] search  [Q] quit"
 
-    def __init__(self, resume=None):
+    def __init__(self, resume=None, positions=None):
         super().__init__()
         self.api = Jellyfin(os.environ.get("JELLYFIN_URL", ""),
                             os.environ.get("JELLYFIN_KEY", ""))
@@ -377,6 +443,7 @@ class Goblin(App):
         self.cursor = {}         # folder id -> list index (restored on Back)
         self._prev_cpu = cpu_snapshot()
         self._cpu = None
+        self.resume_at = dict(positions or {})   # item id -> position in ticks
         self._confirm = None     # (item id, deadline) for delete
         self._search_timer = None
         self._busy = False
@@ -393,6 +460,10 @@ class Goblin(App):
     async def on_mount(self):
         self.set_interval(5.0, self.tick)
         self.tick()
+        # "continue watching": what the server stored, plus what we tracked
+        # ourselves (the server cannot store it for an API-key session, so
+        # our own position is the fresher one and wins).
+        self.resume_at = {**self.api.resume_positions(), **self.resume_at}
         await self.show_libraries()
         if self.resume:
             await self._resume()
@@ -457,7 +528,7 @@ class Goblin(App):
         for item in self.items:
             files = manifest.get(item.get("Id"), [])
             local = bool(files) and any((OFFLINE / f).exists() for f in files)
-            rows.append(Row(item, width, local))
+            rows.append(Row(item, width, local, self.resume_seconds(item)))
         if self.total > len(self.items):
             rows.append(MoreRow(self.total - len(self.items)))
         await lv.clear()
@@ -540,7 +611,7 @@ class Goblin(App):
         for item in items:
             files = manifest.get(item.get("Id"), [])
             local = bool(files) and any((OFFLINE / f).exists() for f in files)
-            new.append(Row(item, width, local))
+            new.append(Row(item, width, local, self.resume_seconds(item)))
         await lv.extend(new)
         self.items.extend(items)
         self.offset += len(items)
@@ -571,22 +642,61 @@ class Goblin(App):
                      if isinstance(node, Row) and node.item.get("Type") in PLAYABLE]
         if item not in playables:
             playables = [item]
-        media = [self.media(i) for i in playables]
+        entries = []
+        for entry in playables:
+            url, subtitle = self.media(entry)
+            source = ((entry.get("MediaSources") or [{}])[0]).get("Id", "")
+            entries.append({
+                "id": entry.get("Id", ""),
+                "source": source,
+                "name": entry.get("Name", ""),
+                "url": url,
+                "sub": subtitle,
+                "start": self.start_position(entry),
+            })
         start = playables.index(item)
         self.play_state = {
             "path": [tuple(e) for e in self.path],
             "index": lv.index or 0,
             "search": self.search,
         }
-        self.exit(("PL", media[start:] + media[:start]))
+        self.exit(("PL", entries[start:] + entries[:start]))
 
     def transcode_url(self, item_id):
         # static=false is what makes Jellyfin transcode. Without it this
         # endpoint just serves the original and every parameter is ignored.
         return (f"{self.api.url}/Videos/{item_id}/stream.mp4?static=false"
                 f"&videoCodec=h264&audioCodec=aac"
-                f"&maxWidth=1280&maxHeight=720&videoBitrate=4000000&audioBitrate=128000"
+                f"&maxWidth={MAX_WIDTH}&maxHeight={MAX_HEIGHT}"
+                f"&videoBitrate={VIDEO_BITRATE}&audioBitrate={AUDIO_BITRATE}"
                 f"&api_key={self.api.key}")
+
+    def resume_seconds(self, item):
+        """Stored position of an item, in seconds (0 when there is none)."""
+        ticks = self.resume_at.get(item.get("Id"), 0)
+        seconds = ticks / 10_000_000 if ticks else 0
+        runtime = (item.get("RunTimeTicks") or 0) / 10_000_000
+        if runtime and seconds > runtime * 0.95:
+            return 0                      # watched to the end: start over
+        return seconds if seconds > 30 else 0
+
+    def start_position(self, item):
+        """Where playback starts: the stored position, or after the intro."""
+        seconds = self.resume_seconds(item)
+        if seconds:
+            return seconds
+        if not SKIP_INTRO:
+            return 0
+        runtime = (item.get("RunTimeTicks") or 0) / 10_000_000
+        for segment in self.api.segments(item.get("Id", "")):
+            if segment.get("Type") not in ("Intro", "Recap"):
+                continue
+            end = (segment.get("EndTicks") or 0) / 10_000_000
+            start = (segment.get("StartTicks") or 0) / 10_000_000
+            # only a short intro near the beginning is worth skipping
+            if end and end < 300 and start < 30 and end < (runtime or 1e9) * 0.1:
+                return end
+        return 0
 
     def media(self, item):
         """(video url, subtitle url or None) for one item."""
@@ -737,8 +847,9 @@ class Goblin(App):
         if not self.DL_TRANSCODE:
             return False, ext
         big = api_size(item) > self.DL_TRANSCODE_ABOVE
-        tall = (item.get("Height") or 0) > self.DL_TRANSCODE_HEIGHT
-        return (True, "mp4") if big or tall else (False, ext)
+        bigger_than_screen = ((item.get("Height") or 0) > MAX_HEIGHT
+                              or (item.get("Width") or 0) > MAX_WIDTH)
+        return (True, "mp4") if big or bigger_than_screen else (False, ext)
 
     def download(self, top, targets):
         """Worker thread: direct copies, or server-side 720p h264 mp4."""
@@ -816,37 +927,171 @@ class Goblin(App):
             self.query_one("#list", ListView).index = index
 
 
+class Player:
+    """mpv on the device, with the position reported back to Jellyfin.
+
+    The progress reports need a session that belongs to a user; an API key
+    creates an anonymous one on Jellyfin 12, so the position is only stored
+    when the config holds a real user token. Reading the stored position
+    (resume) works either way.
+    """
+
+    def __init__(self, client, entries):
+        self.client = client
+        self.entries = entries
+        self.socket_path = f"/tmp/goblin-mpv-{os.getpid()}.sock"
+        self.socket = None
+        self.reader = None
+        self.request_id = 0
+        self.position = 0.0
+        self.index = 0
+
+    def command(self):
+        # --input-terminal=no: mpv must not touch the tty. It saves the
+        # terminal state when it starts and restores it when it quits, which
+        # knocks the client's alternate screen away and leaves a black
+        # terminal behind. The keyboard reaches mpv through its window
+        # anyway (the input daemon sends it to the focused client).
+        command = ["mpv", "--fullscreen", "--force-window=yes",
+                   "--idle=no", "--terminal=no", "--input-terminal=no",
+                   "--input-conf=/etc/mpv/input-handtop.conf",
+                   "--hwdec=drm-copy",
+                   f"--input-ipc-server={self.socket_path}"]
+        for entry in self.entries:
+            if entry.get("sub"):
+                command.append(f"--sub-file={entry['sub']}")
+            if entry.get("start"):
+                command.append(f"--start={entry['start']}")
+            command.append(entry["url"])
+        return command
+
+    def connect(self):
+        """Connect to mpv's IPC socket (it appears a moment after mpv starts)."""
+        for _ in range(50):
+            if os.path.exists(self.socket_path):
+                try:
+                    self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    self.socket.connect(self.socket_path)
+                    self.socket.settimeout(2)
+                    self.reader = self.socket.makefile("rb")
+                    return True
+                except OSError:
+                    self.socket = None
+            time.sleep(0.2)
+        return False
+
+    def ask(self, name):
+        """Read one property from mpv (None if it does not answer)."""
+        if self.socket is None:
+            return None
+        self.request_id += 1
+        try:
+            self.socket.sendall((json.dumps({"command": ["get_property", name],
+                                             "request_id": self.request_id}) + "\n").encode())
+            while True:
+                line = self.reader.readline()
+                if not line:
+                    return None
+                try:
+                    answer = json.loads(line)
+                except ValueError:
+                    continue
+                if answer.get("request_id") == self.request_id:
+                    return answer.get("data")
+        except (OSError, ValueError):
+            return None
+
+    def report(self, position, item, event):
+        self.client.post("/Sessions/Playing/Progress", {
+            "ItemId": item["id"],
+            "MediaSourceId": item.get("source") or item["id"],
+            "PositionTicks": int(position * 10_000_000),
+            "IsPaused": False,
+            "CanSeek": True,
+            "PlayMethod": "Transcode",
+            "EventName": event,
+            "VolumeLevel": 100,
+        })
+
+    def skip_segment(self, item, position):
+        """Jump over an intro/recap the server marked."""
+        for segment in self.client.segments(item["id"]):
+            if segment.get("Type") not in ("Intro", "Recap"):
+                continue
+            start = (segment.get("StartTicks") or 0) / 10_000_000
+            end = (segment.get("EndTicks") or 0) / 10_000_000
+            if start <= position < end and end:
+                if self.socket:
+                    self.socket.sendall((json.dumps(
+                        {"command": ["seek", end, "absolute"]}) + "\n").encode())
+                return end
+        return None
+
+    def run(self):
+        """Run mpv until it exits, reporting the position on the way."""
+        try:
+            os.unlink(self.socket_path)
+        except OSError:
+            pass
+        process = subprocess.Popen(self.command())
+        self.connect()
+        if self.entries:
+            self.client.post("/Sessions/Playing", {
+                "ItemId": self.entries[0]["id"],
+                "MediaSourceId": self.entries[0].get("source") or self.entries[0]["id"],
+                "PositionTicks": int(self.entries[0].get("start", 0) * 10_000_000),
+                "IsPaused": False, "CanSeek": True,
+                "PlayMethod": "Transcode", "VolumeLevel": 100,
+            })
+        last_report = 0.0
+        while process.poll() is None:
+            time.sleep(1)
+            index = self.ask("playlist-pos")
+            position = self.ask("time-pos")
+            if isinstance(index, int) and index < len(self.entries):
+                self.index = index
+            if isinstance(position, (int, float)):
+                self.position = float(position)
+                item = self.entries[self.index]
+                if SKIP_INTRO:
+                    self.skip_segment(item, self.position)
+                if self.position - last_report >= 10:
+                    last_report = self.position
+                    self.report(self.position, item, "timeupdate")
+        if self.entries:
+            self.report(self.position, self.entries[self.index], "stopped")
+            self.client.post("/Sessions/Playing/Stopped", {
+                "ItemId": self.entries[self.index]["id"],
+                "MediaSourceId": self.entries[self.index].get("source")
+                                 or self.entries[self.index]["id"],
+                "PositionTicks": int(self.position * 10_000_000),
+                "Failed": False,
+            })
+        try:
+            os.unlink(self.socket_path)
+        except OSError:
+            pass
+        return self.entries[self.index] if self.entries else None
+
+
 def main():
     if not os.environ.get("JELLYFIN_URL"):
         print("JELLYFIN_URL not set; configure /etc/default/goblin-dash", file=sys.stderr)
         return 1
     resume = None
+    positions = {}
     while True:
-        app = Goblin(resume=resume)
+        app = Goblin(resume=resume, positions=positions)
         result = app.run()
         if isinstance(result, tuple) and result and result[0] == "PL":
-            # drm-copy instead of auto-safe: panfrost cannot import dmabufs whose
-            # stride is not 64-pixel aligned (Mesa rejects the image, the video
-            # area stays a flat blue), which hits low-res and odd-aspect
-            # transcodes. The copy path shows every frame, 0 dropped at 720p.
-            # --fullscreen: the video fills the 640x480 panel instead of a
-            # small window in the terminal. --terminal=no keeps the TUI's
-            # terminal clean behind the video. The app is already gone at
-            # this point (it exits with the playlist), so the keyboard belongs
-            # to mpv: B (Esc) quits it and the client comes back.
-            # /etc/mpv/input-handtop.conf: mpv's built-in Esc binding is
-            # "cycle pause", but B is the "close the video" key here.
-            # Per file: --sub-file before the file applies to that file only,
-            # so every episode in the playlist gets its own subtitles.
-            command = ["mpv", "--fullscreen", "--force-window=yes",
-                       "--idle=no", "--terminal=no",
-                       "--input-conf=/etc/mpv/input-handtop.conf",
-                       "--hwdec=drm-copy"]
-            for url, subtitle in result[1]:
-                if subtitle:
-                    command.append(f"--sub-file={subtitle}")
-                command.append(url)
-            subprocess.run(command)
+            # The client is out of the way while mpv plays, so the keyboard
+            # belongs to mpv: B (Esc) closes the video (input-handtop.conf)
+            # and the client comes back on the same row. The Player reports
+            # the position back to Jellyfin while it plays.
+            player = Player(app.api, result[1])
+            played = player.run()
+            if played:
+                positions[played["id"]] = int(player.position * 10_000_000)
             resume = app.play_state
             continue
         return 0

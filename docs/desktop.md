@@ -164,11 +164,26 @@ browser, shuffle) is gone — the client is the whole UI.
   `/etc/mpv/input-handtop.conf` rebinds it to `quit` for the client; the
   built-in bindings stay in place).
 * **Transcoding**: playing and saving ask Jellyfin for
-  `stream.mp4?static=false&videoCodec=h264&audioCodec=aac&maxWidth=1280&
-  maxHeight=720&videoBitrate=4000000`. `static=false` is the part that
-  matters — without it the endpoint serves the original file and every other
-  parameter is decoration. A 1080p HEVC source comes back as 1280x720 h264,
-  which the VPU decodes and the Wi-Fi can carry.
+  `stream.mp4?static=false&videoCodec=h264&audioCodec=aac&maxWidth=640&
+  maxHeight=480&videoBitrate=1228800&audioBitrate=96000`. `static=false` is
+  the part that matters — without it the endpoint serves the original file and
+  every other parameter is decoration. The size is the panel: the server keeps
+  the aspect ratio, so 16:9 comes back as 640x360 h264 — a quarter of the
+  pixels of 720p, a quarter of the bitrate, and still a picture the 640x480
+  screen shows pixel for pixel. `GOBLIN_MAX_WIDTH`/`GOBLIN_MAX_HEIGHT` raise
+  it for the HDMI monitor (1280x720 for a 4 Mbit/s stream).
+* **Resume**: the client reads the stored position of every item
+  (`/Users/{id}/Items/Resume`) and shows it on the row as `»55:01`; playing
+  starts there (`--start`, per file). Positions the server does not know —
+  because an API key creates an *anonymous* session, which Jellyfin refuses
+  to store a position for — are tracked by the client itself over mpv's IPC
+  socket and shown the same way. The progress is also posted back to
+  `/Sessions/Playing/Progress` every 10 s, so a real user token would make
+  the web UI show it too.
+* **Intro skipping**: the server's media segments (`/MediaSegments/{id}`) are
+  honoured — an intro or recap in the first minutes is skipped over
+  automatically while the video plays (`GOBLIN_SKIP_INTRO=0` turns it off).
+  This server has no segment detection installed, so it is a no-op here.
 * **Why the copy decode path**: mpv is started with `--hwdec=drm-copy`.
   Panfrost can only import zero-copy dmabufs whose width is a multiple of 64
   pixels (`MESA: panfrost: rejecting image due to unsupported offset or

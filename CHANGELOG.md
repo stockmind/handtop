@@ -17,6 +17,21 @@
   binding is "cycle pause", so `/etc/mpv/input-handtop.conf` rebinds it to
   `quit` for the client.
 
+- Add: resume, progress reporting and intro skipping (the good parts of
+  jfsh). The client reads the stored position of every item and shows it on
+  the row as `»55:01`; playing starts there, per file. It tracks the position
+  itself over mpv's IPC socket (an API key creates an anonymous Jellyfin
+  session, which stores nothing) and posts it back to
+  `/Sessions/Playing/Progress` every 10 s, so a user token would show it in
+  the web UI as well. The server's intro/recap segments are skipped over
+  while playing.
+
+- Change: the client transcodes to the panel now, not to 720p: 640x480 (the
+  server keeps the aspect ratio, so 16:9 becomes 640x360) at ~1.2 Mbit/s.
+  A quarter of the pixels and the bitrate of before, and the picture is
+  exactly what the screen can show. `GOBLIN_MAX_WIDTH`/`GOBLIN_MAX_HEIGHT`
+  raise it for the HDMI monitor.
+
 - Add: subtitles. The client picks the item's subtitle track (Italian first,
   English second, otherwise whatever text track is there) and hands it to mpv
   per file, so every episode of the playlist is subtitled from the start. The

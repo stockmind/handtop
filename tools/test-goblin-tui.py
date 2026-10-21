@@ -67,15 +67,15 @@ async def enter(pilot):
 
 
 def playlist(app):
-    """The exit value is a list of (video url, subtitle url or None) pairs."""
+    """The exit value is a list of play entries (id, url, subtitle, start)."""
     value = app.return_value
     assert isinstance(value, tuple) and value[0] == "PL", f"not a playlist: {value!r}"
     assert value[1], "empty playlist"
     return value[1]
 
 
-def urls(pairs):
-    return [u for u, _ in pairs]
+def urls(entries):
+    return [e["url"] for e in entries]
 
 
 async def main():
@@ -110,10 +110,12 @@ async def main():
         app.query_one(ListView).index = 0
         first = rows[0].item
         await enter(pilot)
-        pairs = playlist(app)
-        assert len(pairs) == n, f"playlist {len(pairs)} != visible {n}"
-        assert first["Id"] in pairs[0][0], "playlist does not start at the cursor"
-        assert "static=false" in pairs[0][0], f"stream is not a transcode: {pairs[0][0]}"
+        entries = playlist(app)
+        assert len(entries) == n, f"playlist {len(entries)} != visible {n}"
+        assert first["Id"] == entries[0]["id"], "playlist does not start at the cursor"
+        assert "static=false" in entries[0]["url"], f"no transcode: {entries[0]['url']}"
+        # the transcode is capped to the panel
+        assert "maxWidth=640" in entries[0]["url"], entries[0]["url"]
         print(f"PASS movies: {n}-item playlist, transcode URL from cursor")
 
     # --- resume reopens the same folder and cursor
@@ -141,9 +143,28 @@ async def main():
         episodes = list(app.query(Row))
         assert episodes and episodes[0].item.get("Type") == "Episode"
         await enter(pilot)
-        pairs = playlist(app)
-        assert all("static=false" in u for u, _ in pairs), pairs[0][0]
+        entries = playlist(app)
+        assert all("static=false" in e["url"] for e in entries), entries[0]["url"]
         print(f"PASS series: {len(episodes)}-episode playlist via season")
+
+    # --- Resume: a stored position shows up on the row and starts playback there
+    app = Goblin()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await settle(pilot)
+        await click_row(pilot, "Serie TV")
+        await enter(pilot)
+        await enter(pilot)
+        await settle(pilot)
+        rows = list(app.query(Row))
+        marked = [r for r in rows if "»" in r.text.plain]
+        if not marked:
+            print("SKIP resume marker (nothing half watched in this season)")
+        else:
+            row = marked[0]
+            print(f"PASS resume marker: {row.text.plain.strip()[-40:]}")
+            app.play(row.item)
+            entries = playlist(app)
+            assert entries[0]["start"] > 30, f"no start position: {entries[0]}"
 
     # --- Subtitles: Italian first, English second, else whatever is there
     app = Goblin()
@@ -167,10 +188,9 @@ async def main():
             language = (chosen.get("Language") or "").lower()
             print(f"PASS subtitle pick: {language or '?'} "
                   f"({chosen.get('DisplayTitle')})")
-            pairs = None
             app.play(rows[0].item)
-            pairs = playlist(app)
-            sub = pairs[0][1]
+            entries = playlist(app)
+            sub = entries[0]["sub"]
             assert sub and "/Subtitles/" in sub, f"no subtitle url: {sub}"
             print("PASS subtitle url:", sub[:90])
 
