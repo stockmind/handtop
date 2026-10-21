@@ -356,7 +356,7 @@ fails earlier, at device setup (`Cannot allocate memory`; CMA is 256 MB, ~60 MB
 free), and Debian's mpv is built without VA-API (`Unsupported hwdec: vaapi`).
 
 **Verdict.** The VPU stays reachable through FFmpeg's own `v4l2request` hwaccel —
-route A, and therefore mpv, the `ffmpeg` CLI and Moonlight — while Chromium video
+so mpv, the `ffmpeg` CLI and Moonlight all reach it — while Chromium video
 stays software-decoded (it plays 1080p24 in real time at ~2 cores). Revisit if
 Chromium's dmabuf import on panfrost or the driver's DRM PRIME export is fixed;
 the backend is unmaintained upstream and unpackaged in Debian, so it would have

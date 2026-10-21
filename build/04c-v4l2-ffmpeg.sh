@@ -85,7 +85,7 @@ git init -q "$SRC"
 FF_PATCH="$TOP/build/patches/ffmpeg-v4l2request-drm.patch"
 [ -f "$FF_PATCH" ] || die "missing patch: $FF_PATCH"
 (cd "$SRC" && git apply "$FF_PATCH") || die "failed to apply $FF_PATCH"
-grep -q "HWACCEL_DRM_V4L2REQUEST" "$SRC/libavcodec/hwconfig.h" || die "route A patch did not apply"
+grep -q "HWACCEL_DRM_V4L2REQUEST" "$SRC/libavcodec/hwconfig.h" || die "DRM-registration patch did not apply"
 
 export PKG_CONFIG_SYSROOT_DIR="$ROOTFS"
 export PKG_CONFIG_LIBDIR="$ROOTFS/usr/lib/aarch64-linux-gnu/pkgconfig:$ROOTFS/usr/share/pkgconfig"
@@ -140,7 +140,7 @@ if [ "$drm_ok" != 1 ]; then
   ls -la "$ROOTFS/usr/lib/aarch64-linux-gnu/libavcodec.so.61"* >&2
   in_chroot "ldconfig -p | grep libavcodec" >&2
   in_chroot "mpv --hwdec=help" >&2 | head -20
-  die "mpv does not offer the drm hwdec (route A patch missing?)"
+  die "mpv does not offer the drm hwdec (DRM-registration patch missing?)"
 fi
 
 # Hold the libraries we replace: without this an upgrade reinstalls Debian's
