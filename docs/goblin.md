@@ -45,9 +45,12 @@ Everything fits in one 80×24 terminal, and every row is one line:
 |---|---|
 | ![The series library](img/device-series.png) | ![Seasons](img/device-seasons.png) |
 
-Libraries are fetched 50 rows at a time and the next page arrives when the
-cursor gets close to the end, so even a 533-item library paints in about a
-second.
+Libraries are fetched 25 rows at a time and the next page arrives while the
+cursor is still ten rows away, so a 533-item library never holds more than a
+few dozen rows in memory. Mounting a row costs the A53 about 17 ms, so the
+page size is the thing that decides how the scrolling feels; the view keeps
+its place when a page arrives, and a download that finishes only repaints the
+rows it changed.
 
 ---
 

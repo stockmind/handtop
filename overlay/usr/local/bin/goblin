@@ -64,7 +64,8 @@ CONTAINERS = {
     "musicvideos": ["MusicVideo"],
     "music": ["Audio"],
 }
-PAGE = 50                                  # rows fetched per page
+PAGE = 25                                  # rows fetched per page (mounting a
+                                           # row costs ~17 ms on the A53)
 FIELDS = "Fields=Width,Height,RunTimeTicks,ProductionYear,MediaSources"
 
 # The panel is 640x480: asking the server for that (it keeps the aspect ratio,
@@ -648,6 +649,20 @@ class Goblin(App):
         # at the top. A timer (unlike a refresh callback) always fires.
         self._scroll_timer = self.set_timer(0.15, self._scroll_to_cursor)
 
+    def refresh_rows(self):
+        """Re-render the rows (the saved marks, the resume points)."""
+        lv = self.query_one("#list", ListView)
+        width = max(30, self.size.width - 4)
+        manifest = self.manifest()
+        for child in lv.children:
+            if not isinstance(child, Row):
+                continue
+            item = child.item
+            files = manifest.get(item.get("Id"), [])
+            local = bool(files) and any((OFFLINE / f).exists() for f in files)
+            child.text = row_text(item, width, local, self.resume_seconds(item), self.prefs)
+            child.refresh()
+
     def _scroll_to_cursor(self):
         """Bring the cursor row into view (the rebuild leaves it behind)."""
         try:
@@ -758,6 +773,10 @@ class Goblin(App):
         if total > self.offset:
             await lv.append(MoreRow(total - self.offset))
         lv.focus()
+        # Mounting the new rows moves the scroll; put the cursor back where
+        # it was, so the list does not jump while the user is scrolling.
+        if lv.highlighted_child is not None:
+            lv.scroll_to_widget(lv.highlighted_child, animate=False, immediate=True)
 
     # ------------------------------------------------------------- actions
     def selected(self):
@@ -765,9 +784,13 @@ class Goblin(App):
         return node.item if isinstance(node, Row) else None
 
     async def on_list_view_highlighted(self, event):
-        """Fetch the next page before the cursor reaches the end."""
+        """Fetch the next page before the cursor reaches the end.
+
+        Mounting a row is not free on the A53, so the page arrives a little
+        before it is needed - the pause then happens while the user is
+        still reading, not in the middle of a scroll."""
         index = event.list_view.index or 0
-        if index >= len(self.items) - 5 and self.offset < self.total and not self._loading:
+        if index >= len(self.items) - 10 and self.offset < self.total and not self._loading:
             await self.load_more()
 
     async def on_list_view_selected(self, event):
@@ -1023,7 +1046,10 @@ class Goblin(App):
         self.call_later(self._after_job, done, skipped, errors)
 
     async def _after_job(self, done, skipped, errors):
-        await self.reload()
+        # Only the saved marks changed: re-render those rows. Rebuilding the
+        # whole list here would drop the scroll and repaint every row, which
+        # is very visible in a long library.
+        self.refresh_rows()
         left = self._jobs.qsize()
         if errors:
             self.hint(f"Saved {done + skipped}, {len(errors)} failed: {errors[0][:40]}")

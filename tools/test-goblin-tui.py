@@ -177,19 +177,19 @@ async def main():
         await settle(pilot)
         await click_row(pilot, "Video Musicali")
         rows = list(app.query(Row))
-        assert len(rows) == 50, f"expected one page of 50, got {len(rows)}"
+        assert len(rows) == 25, f"expected one page of 25, got {len(rows)}"
         sentinels = list(app.query(MoreRow))
         assert sentinels, "no 'more' row for the rest of the library"
         print(f"PASS pagination: {len(rows)} rows + {sentinels[0].remaining} more")
         # walking to the end pulls the next page in
         from textual.widgets import ListView
         lv = app.query_one(ListView)
-        for _ in range(55):
+        for _ in range(30):
             await pilot.press("down")
         for _ in range(20):
             await pilot.pause(0.2)
         rows = list(app.query(Row))
-        assert len(rows) > 50, f"next page not loaded ({len(rows)} rows)"
+        assert len(rows) > 25, f"next page not loaded ({len(rows)} rows)"
         print(f"PASS pagination: next page loaded ({len(rows)} rows)")
         # no "Row" placeholders: the rows render their own text
         svg = app.export_screenshot()
@@ -204,12 +204,12 @@ async def main():
         await click_row(pilot, "Video Musicali")
         from textual.widgets import ListView
         lv = app.query_one(ListView)
-        for _ in range(55):
+        for _ in range(40):
             await pilot.press("down")
         for _ in range(20):
             await pilot.pause(0.2)
         index = lv.index
-        assert index and index > 50, f"did not get past the first page: {index}"
+        assert index and index > 25, f"did not get past the first page: {index}"
         print(f"PASS cursor walked to row {index}")
         await app.reload()                       # what a download does
         await settle(pilot)
