@@ -4,6 +4,8 @@ sharp in the app drawer).
   app-theme.png                Theme app: a circle split into a dark and a light half (27x27 art).
   app-external-controller.png  External Controller: the input-mode glass (BT blue / wired brown split
                                diagonally, rainbow stripes) with BT waves, a USB plug and an RG35XX H.
+  app-goblin.png               Goblin (the Jellyfin client): the handheld with a play triangle
+                               on its screen - the one app that plays something.
   All are 27x27 art x2 + 1 px margin = exactly 56x56, the app drawer's icon size.
   Each also gets a -light variant (dark drawing, pastel glass, deeper ring) for the light theme.
 
@@ -139,8 +141,73 @@ def external_controller_icon(light=False):
     return _tile(im)
 
 
+# ---- Goblin (the Jellyfin client) --------------------------------------------------
+GOB_BODY = (70, 78, 94)                        # the handheld's shell
+GOB_BODY_LIGHT = (138, 147, 163)
+GOB_EDGE = (128, 137, 152)                    # shell edge
+GOB_EDGE_LIGHT = (213, 218, 227)
+GOB_SCREEN = (22, 26, 34)                     # the dark screen
+GOB_SCREEN_LIGHT = (207, 214, 226)
+GOB_BEZEL = (159, 195, 255)                    # the app's blue
+GOB_BEZEL_LIGHT = (61, 104, 176)
+GOB_PLAY = (80, 190, 100)                     # the play triangle
+GOB_PLAY_LIGHT = (38, 132, 66)
+
+# the play triangle, drawn on the 27x27 grid (5 wide at the base, 6 tall)
+GOB_TRIANGLE = [
+    "..#..",
+    ".##..",
+    "###..",
+    "####.",
+    "###..",
+    ".##..",
+    "..#..",
+]
+
+
+def goblin_icon(light=False):
+    """The handheld with a play triangle on its screen."""
+    body = GOB_BODY_LIGHT if light else GOB_BODY
+    edge = GOB_EDGE_LIGHT if light else GOB_EDGE
+    screen = GOB_SCREEN_LIGHT if light else GOB_SCREEN
+    bezel = GOB_BEZEL_LIGHT if light else GOB_BEZEL
+    play = GOB_PLAY_LIGHT if light else GOB_PLAY
+    im = Image.new("RGBA", (EN, EN), (0, 0, 0, 0))
+    for y in range(EN):
+        for x in range(EN):
+            # shell: rounded rectangle from (2, 3) to (24, 23)
+            shell = _coverage(x, y, 0, 5.5, 0) if False else None
+            if _in_round_rect(x, y, 2, 3, 24, 23, 4):
+                im.putpixel((x, y), body + (255,))
+            # shell edge
+            if _in_round_rect(x, y, 2, 3, 24, 23, 4) and not _in_round_rect(x, y, 3, 4, 23, 22, 3):
+                im.putpixel((x, y), edge + (255,))
+            # screen with a blue bezel
+            if _in_round_rect(x, y, 5, 6, 21, 19, 2):
+                im.putpixel((x, y), screen + (255,))
+            if _in_round_rect(x, y, 5, 6, 21, 19, 2) and not _in_round_rect(x, y, 6, 7, 20, 18, 1):
+                im.putpixel((x, y), bezel + (255,))
+    # the play triangle, centred on the screen
+    top, left = 9, 10
+    for row, line in enumerate(GOB_TRIANGLE):
+        for col, c in enumerate(line):
+            if c == "#":
+                im.putpixel((left + col, top + row), play + (255,))
+    return _tile(im)
+
+
+def _in_round_rect(x, y, x0, y0, x1, y1, r):
+    """Is the pixel inside the rounded rectangle? (x1/y1 exclusive)"""
+    if not (x0 <= x < x1 and y0 <= y < y1):
+        return False
+    cx = min(max(x + 0.5, x0 + r), x1 - r)
+    cy = min(max(y + 0.5, y0 + r), y1 - r)
+    return (x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 <= r * r
+
+
 if __name__ == "__main__":
     out = sys.argv[1] if len(sys.argv) > 1 else "."
     for light, sfx in ((False, ""), (True, "-light")):
         theme_icon(light).save(f"{out}/app-theme{sfx}.png")
         external_controller_icon(light).save(f"{out}/app-external-controller{sfx}.png")
+        goblin_icon(light).save(f"{out}/app-goblin{sfx}.png")

@@ -157,6 +157,10 @@ browser, shuffle) is gone — the client is the whole UI.
   or plays from the cursor down the visible list, `B` goes back (clearing the
   search filter first), `Y` saves, `X` deletes the saved copy (twice), `/`
   searches, `Q` quits. Physical keyboard works the same.
+* **Icon**: `app-goblin.png` (56 px pixel art — the handheld with a play
+  triangle on its screen, drawn by `tools/icons/gen_app_icons.py`, with a
+  `-light` variant the theme script swaps in), shown in the app drawer as
+  "Goblin".
 * **Video**: mpv takes over with `--fullscreen`, so the film fills the
   640x480 panel; the client is gone while it plays, so the keyboard belongs
   to mpv. `B` (Esc) closes the video and the client comes back on the same

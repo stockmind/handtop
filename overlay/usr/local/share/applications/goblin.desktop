@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Goblin Menu
-Comment=Unified handheld TUI suite
-Exec=foot -e goblin menu
-Icon=applications-system
+Name=Goblin
+Comment=Jellyfin client for the handheld
+Exec=foot -e goblin
+Icon=/usr/local/share/rg35xxh/icons/app-goblin.png
 Terminal=false
-Categories=Xfce;Utility;
-Keywords=launcher;menu;tui;textual;neon;dashboard;media;jellyfin;
+Categories=AudioVideo;Video;Utility;
+Keywords=jellyfin;media;video;movies;series;streaming;tui;handheld;

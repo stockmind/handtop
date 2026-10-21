@@ -685,6 +685,7 @@ class Goblin(App):
                 "url": url,
                 "sub": subtitle,
                 "start": self.start_position(entry),
+                "width": self.output_width(entry, self.STREAM_TRANSCODE),
             })
         start = playables.index(item)
         self.play_state = {
@@ -729,6 +730,20 @@ class Goblin(App):
             if end and end < 300 and start < 30 and end < (runtime or 1e9) * 0.1:
                 return end
         return 0
+
+    def output_width(self, item, transcoded=True):
+        """Width of the pixels that will reach the screen.
+
+        The server scales the source to the cap, so a wide source arrives
+        exactly MAX_WIDTH wide (640 = 10 x 64). Panfrost can only import
+        zero-copy frames whose stride is 64-pixel aligned, so this decides
+        whether mpv may use the VPU directly."""
+        source = item.get("Width") or 0
+        if not source:
+            return 0
+        if not transcoded:
+            return source
+        return min(source, MAX_WIDTH)
 
     def media(self, item):
         """(video url, subtitle url or None) for one item."""
@@ -978,6 +993,13 @@ class Player:
         self.position = 0.0
         self.index = 0
 
+    @staticmethod
+    def decode_path(width):
+        """Zero-copy needs a 64-pixel aligned stride, the copy path does not."""
+        if width and width % 64 == 0:
+            return "drm"
+        return "drm-copy"
+
     def command(self):
         # --input-terminal=no: mpv must not touch the tty. It saves the
         # terminal state when it starts and restores it when it quits, which
@@ -987,9 +1009,9 @@ class Player:
         command = ["mpv", "--fullscreen", "--force-window=yes",
                    "--idle=no", "--terminal=no", "--input-terminal=no",
                    "--input-conf=/etc/mpv/input-handtop.conf",
-                   "--hwdec=drm-copy",
                    f"--input-ipc-server={self.socket_path}"]
         for entry in self.entries:
+            command.append(f"--hwdec={self.decode_path(entry.get('width'))}")
             if entry.get("sub"):
                 command.append(f"--sub-file={entry['sub']}")
             if entry.get("start"):
