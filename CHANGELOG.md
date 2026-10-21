@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: clicking a video in Thunar works again. `/usr/local/share/applications/mpv.desktop` was a hide-stub from v0.1.0 with no `Exec=`, and it shadows Debian's real entry of the same id, so every association naming `mpv.desktop` failed with "Desktop file didn't specify Exec field". The stub is gone (it reappeared on the device through an overlay deploy) and the skel `mimeapps.list` now defaults the video types to `play-mpv.desktop` (plain `mpv -- %f`) with `mpv.desktop` as fallback. mpv is visible in the drawer again: its Debian entry is `NoDisplay=false`.
+
 - Change: `tools/deploy.sh` grows `console` and `session` targets, so a device can be brought to the image state without a reflash: the whole overlay (scripts, icons, themes, units, rules, mako/waybar/drawer configs) is copied as root with `/etc/default/goblin-dash` left alone, then Waybar/mako/swaybg/inputd/labwc are restarted. `all` runs inputd + console + session + goblin.
 
 - Fix: `tools/check-video-decode.sh` no longer picks a file the hand-held cannot decode. It skipped the first video found even when that was AV1 (no Cedrus AV1 decoder), so the gate reported a broken VPU on a healthy device; it now walks the candidates, skips AV1, and handles filenames with spaces.
