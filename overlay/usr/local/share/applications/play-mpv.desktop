@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Play with mpv
-Exec=mpv -- %f
-Icon=mpv
-Terminal=false
-NoDisplay=true
-MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/mpeg;video/mp2t;

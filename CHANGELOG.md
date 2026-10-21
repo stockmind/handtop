@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Change: the patched FFmpeg keeps Debian's feature set. The first version of `build/04c-v4l2-ffmpeg.sh` enabled only drm/udev/dav1d, so the replacement was a downgrade against the ~60 external libraries Debian's build uses: no gnutls (no https in libavformat, so mpv could not play URLs), no x264/lame/opus/vorbis/vpx encoders, no libass (no subtitle rendering). The build now enables the same set, installs the runtime side of each into the image, and gates on them (https protocol, the five encoders, the ass filter).
+
+- Change: the replaced FFmpeg libraries are held with `apt-mark` (`libavcodec61`, `libavdevice61`, `libavfilter10`, `libavformat61`, `libavutil59`, `libpostproc58`, `libswresample5`, `libswscale8`), so an upgrade cannot reinstall Debian's ones and silently drop the VPU path. `THIRD-PARTY.md` lists the FFmpeg tree, the pinned commit and the local patch.
+
+
 - Change: video plays fullscreen and B closes it. The client starts mpv with
   `--fullscreen` (the film fills the 640x480 panel) and the client is out of
   the way while it plays, so the keyboard belongs to mpv: `B` (Esc) closes the
@@ -41,10 +46,10 @@
   keep zero-copy, where the width is 1920 and panfrost accepts it. See
   `docs/video-decode.md`.
 
-- Fix: MPEG-2 and VP8 play on the VPU too. mpv only tries hardware for the codecs on its built-in whitelist, so both stayed on the CPU ("codec mpeg2video is not on whitelist") even though Cedrus decodes them; `/etc/mpv/mpv.conf` now sets `hwdec-codecs=h264,hevc,mpeg2video,vp8` (the option replaces the default list, so H.264/HEVC stay listed). Measured 2026-10-21, 120 frames, `vo=gpu --profile=fast`: MPEG-2 1080i 88.8 → 45.6 % CPU, VP8 720p 92.1 → 48.1 %, same fps — battery and headroom, not frame rate.
+- Fix: MPEG-2 and VP8 play on the VPU too. mpv only tries hardware for the codecs on its built-in whitelist, so both stayed on the CPU ("codec mpeg2video is not on whitelist") even though Cedrus decodes them; `/etc/mpv/mpv.conf` now sets `hwdec-codecs=h264,hevc,mpeg2video,vp8` (the option replaces the default list, so H.264/HEVC stay listed). Measured 2026-10-21, 120 frames, `vo=gpu --profile=fast`: MPEG-2 1080i 88.8 -> 45.6 % CPU, VP8 720p 92.1 -> 48.1 %, same fps -- battery and thermal headroom, not frame rate. VP9 and AV1 are deliberately left out of that list: this kernel's Cedrus has no decoder for them and mpv's attempt does not fail cleanly (an error per frame), so they are never attempted and decode in software right away -- which also replaces the `[av1]` profile that only existed to keep mpv from trying them.
 
 
-- Fix: clicking a video in Thunar works again. `/usr/local/share/applications/mpv.desktop` was a hide-stub from v0.1.0 with no `Exec=`, and it shadows Debian's real entry of the same id, so every association naming `mpv.desktop` failed with "Desktop file didn't specify Exec field". The stub is gone (it reappeared on the device through an overlay deploy) and the skel `mimeapps.list` now defaults the video types to `play-mpv.desktop` (plain `mpv -- %f`) with `mpv.desktop` as fallback. mpv is visible in the drawer again: its Debian entry is `NoDisplay=false`.
+- Fix: clicking a video in Thunar works again. `/usr/local/share/applications/mpv.desktop` was a hide-stub from v0.1.0 with no `Exec=`, and it shadows Debian's real entry of the same id, so every association naming `mpv.desktop` failed with "Desktop file didn't specify Exec field" (the stub came back on the device through an overlay deploy). It is now a full entry -- `Exec=mpv -- %U`, an icon, the video and audio types -- and keeps `NoDisplay=true`, so mpv stays out of the drawer and is a usable handler at the same time. No separate `play-mpv.desktop` and no skel `mimeapps.list` are needed: the entry declares the types itself.
 
 - Change: `tools/deploy.sh` grows `console` and `session` targets, so a device can be brought to the image state without a reflash: the whole overlay (scripts, icons, themes, units, rules, mako/waybar/drawer configs) is copied as root with `/etc/default/goblin-dash` left alone, then Waybar/mako/swaybg/inputd/labwc are restarted. `all` runs inputd + console + session + goblin.
 

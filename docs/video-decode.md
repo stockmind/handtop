@@ -46,10 +46,17 @@ whitelist, which by default leaves MPEG-2 and VP8 on the CPU
 whitelist`, with any `--hwdec` spelling). `/etc/mpv/mpv.conf` therefore sets
 `hwdec-codecs=h264,hevc,mpeg2video,vp8` — that option *replaces* the default
 list, so the codecs that matter have to be in it — and all four formats this
-kernel's Cedrus has reach the VPU. VP9 attempts `vp9-drm` and falls back cleanly
-(no VP9 in Cedrus), and AV1 is pinned to software by the `[av1]` profile. The
-whitelist line is worth its keep on battery: MPEG-2 1080i drops from 88.8 % to
-45.6 % CPU and VP8 720p from 92.1 % to 48.1 %, at the same fps.
+kernel's Cedrus has reach the VPU. The whitelist line is worth its keep on
+battery: MPEG-2 1080i drops from 88.8 % to 45.6 % CPU and VP8 720p from 92.1 % to
+48.1 %, at the same fps.
+
+VP9 and AV1 are deliberately not in the list. This kernel's Cedrus has no
+decoder for them, and mpv's attempt at them does not fail cleanly: it reports
+`Error while decoding frame (hardware decoding)!` for every frame before it
+gives up. Leaving them out of the whitelist means they are never attempted and
+decode in software right away — VP9 in FFmpeg's native decoder, AV1 in dav1d
+(this build enables it: with the hardware devices advertised, the native av1
+decoder picks no pixel format and renders black).
 
 ### Throughput: zero-copy vs copy
 
@@ -104,12 +111,12 @@ decoding via hevc-drm`) and skips it when the VO has no usable interop.
 subtitles — so it remains an option rather than the default. The software path is
 unchanged and still the unstable one (next section).
 
-### Versus the software path (what an image without `04c` does)
+### Versus the software path (what an image without this PR does)
 
-Without the patched FFmpeg mpv has only software decoding, so that is the honest
-before/after baseline. Same harness, 120 frames, `vo=gpu --profile=fast`,
-measured 2026-10-21 on the device (mpv 0.40; `--hwdec=no` on the patched build —
-its software path is the same decoders Debian ships):
+Without `04c` mpv has only software decoding, so that is the honest before/after
+baseline. Same harness, 120 frames, `vo=gpu --profile=fast`, measured 2026-10-21
+on the device (mpv 0.40; `--hwdec=no` on the patched build — its software path is
+the same decoders Debian ships):
 
 | 120 frames, `vo=gpu --profile=fast` | software | `hwdec=drm` (zero-copy) |
 |---|---|---|
@@ -132,26 +139,6 @@ The power draw could not be compared directly: the AXP2202 fuel gauge on this
 board reports the same ~423 mA with the SoC idle and with four cores pegged, so
 CPU time is the only usable proxy.
 
-### The Mesa crash on the software path (pre-existing)
-
-`--hwdec=no` with a GPU VO segfaults intermittently, and it is *not* caused by
-the patched FFmpeg. Measured 2026-10-17, 12 s of normal playback of a 540p HEVC
-file, crashes per 5 runs:
-
-| Configuration | Crashes |
-|---|---|
-| software + `vo=gpu` | 3 |
-| software + `vo=gpu-next` | 5 |
-| `v4l2request-copy` + `vo=gpu` | 0 |
-| `v4l2request-copy` + `vo=gpu-next` | 0 |
-
-The same loop crashes 1/5 with Debian's **stock** libavcodec installed, and
-`gdb` puts the fault in Mesa's panfrost driver on mpv's `vo` thread
-(`libgallium-25.0.7-2+deb13u1.so`), not in any `libav*`/`libsw*` library.
-Software decoding produces `yuv420p` frames; the hardware copy path produces
-`nv12`, which Mesa handles fine. That is why `/etc/mpv/mpv.conf` defaults to `hwdec=auto-safe`: zero-copy
-`drm` first, `v4l2request-copy` only when the VO has no usable interop.
-
 ### The blue video: panfrost cannot import every dmabuf
 
 Zero-copy (`--hwdec=drm`) renders a **flat blue rectangle** for streams whose
@@ -173,25 +160,35 @@ errors" counted from the mpv log):
 
 Height does not matter (1280x536 is fine, 416x240 is fine), only the width —
 i.e. the NV12 stride. 640 = 10x64, 704 = 11x64, 960 = 15x64, 1280 = 20x64 all
-work; 416 = 6.5x64, 544 = 8.5x64 and 720 = 11.25x64 do not.
+work; 416 = 6.5x64, 544 = 8.5x64 and 720 = 11.25x64 do not. Common widths
+(1280, 1920, 640, 512) are fine; odd ones (854, 1366, 720) are not.
 
-This is why the Jellyfin client streams **and** downloads with the **copy**
-path (`--hwdec=drm-copy`, the same frames downloaded to system memory): it
-renders every stream, and at 720p — the resolution the client asks the server
-for — it drops no frames at all (0 dropped over 15 s, measured). The copy path
-at 1080p does drop frames (21-40 over 15 s), which is why local 1080p files
-still prefer zero-copy: their width is 1920, which panfrost accepts.
+`--hwdec=drm-copy` renders every width — the frames are downloaded to system
+memory, so Mesa never imports a dmabuf — and at 720p it drops no frames at all
+(0 dropped over 15 s, measured). The copy path at 1080p does drop frames
+(21-40 over 15 s), which is why 1080p files prefer zero-copy.
 
-### Fixed: a stale second ffmpeg under /usr/local
+### The Mesa crash on the software path (pre-existing)
 
-An earlier revision of `build/04c` installed with `--prefix=/usr/local`. Images
-built since kept that copy, and because `/usr/local/bin` precedes `/usr/bin` in
-`PATH`, the `ffmpeg` a user ran from a terminal was that old build (`6dbf87a`,
-no `v4l2request`), even though mpv — whose loader picks `/usr/lib` first — used
-the new one. `04c` now deletes it, and `tools/check-video-decode.sh` fails if
-`ffmpeg` does not resolve to `/usr/bin/ffmpeg`.
+`--hwdec=no` with a GPU VO segfaults intermittently, and it is *not* caused by
+the patched FFmpeg. Measured 2026-10-17, 12 s of normal playback of a 540p HEVC
+file, crashes per 5 runs:
 
-## Zero-copy: both routes now work
+| Configuration | Crashes |
+|---|---|
+| software + `vo=gpu` | 3 |
+| software + `vo=gpu-next` | 5 |
+| `v4l2request-copy` + `vo=gpu` | 0 |
+| `v4l2request-copy` + `vo=gpu-next` | 0 |
+
+The same loop crashes 1/5 with Debian's **stock** libavcodec installed, and
+`gdb` puts the fault in Mesa's panfrost driver on mpv's `vo` thread
+(`libgallium-25.0.7-2+deb13u1.so`), not in any `libav*`/`libsw*` library.
+Software decoding produces `yuv420p` frames; the hardware copy path produces
+`nv12`, which Mesa handles fine. That is why `/etc/mpv/mpv.conf` defaults to `hwdec=auto-safe`: zero-copy
+`drm` first, `v4l2request-copy` only when the VO has no usable interop.
+
+## Zero-copy
 
 The decoder was never the problem: FFmpeg's V4L2 request-API code already
 produces `AV_PIX_FMT_DRM_PRIME` dmabufs, exactly what a VO's DRM PRIME interop
@@ -208,9 +205,9 @@ duplicates the frame's object fds and imports them with
 `EGL_EXT_image_dma_buf_import` / `GL_EXT_EGL_image_storage`. Its own device fd is
 never used on this panfrost/EGL path, so the device mpv created for the interop
 does not have to be the same type as the decoder's. Two small patches make use of
-that. **Both are implemented; the image ships route A.**
+that; the image ships the FFmpeg-side one.
 
-### Route A — FFmpeg side (shipped): `build/patches/ffmpeg-v4l2request-drm.patch`
+### The patch: `build/patches/ffmpeg-v4l2request-drm.patch`
 
 Applied by `build/04c-v4l2-ffmpeg.sh` right after the pinned Kwiboo checkout.
 Three parts:
@@ -264,48 +261,22 @@ $ ffmpeg -hwaccel drm -hwaccel_device /dev/dri/renderD128 -i in.mp4 -f null -
 measured (62 fps at 1080p HEVC, 50 fps at 1080p H.264, 0 dropped frames over 10 s
 in both — video only).
 
-### Route B — mpv side (alternative, shipped as patch + helper)
-
-`build/patches/mpv-v4l2request-drmprime.patch`, ~20 lines in
-`video/decode/vd_lavc.c:get_hwdevice()`. When no interop offers a device of the
-decoder's type but the VO *does* already provide an interop for the frames' pixel
-format, it creates the device the decoder asks for
-(`av_hwdevice_ctx_create(AV_HWDEVICE_TYPE_V4L2REQUEST)`) rather than giving up.
-`--hwdec=v4l2request` is then zero-copy under its original name:
-
-```
-$ ~/mpv-patched --hwdec=v4l2request --vo=gpu -v <540p HEVC>
-[vo/gpu] Loading hwdec driver 'drmprime'
-[vo/gpu/drmprime] Using EGL dmabuf interop via GL_EXT_EGL_image_storage
-[vd] Using hardware decoding (v4l2request).
-```
-
-It needs mpv rebuilt; `tools/build-mpv-v4l2request.sh` reproduces it: clone the
-image rootfs, add a temporary `deb-src` line *in the clone only*, `apt-get
-build-dep mpv`, `apt-get source mpv`, `patch -p1`, `dpkg-buildpackage -us -uc -b`
-(about three minutes under qemu). Only the resulting `/usr/bin/mpv` is installed
-on a device; the libraries stay Debian's, and the clone is discarded so the real
-rootfs keeps the patched FFmpeg (a plain `apt-get build-dep mpv` would overwrite
-`libavcodec61`).
-
-### Why route A is shipped
+### Why the FFmpeg side
 
 - It is one FFmpeg patch, so *every* consumer of `AV_PIX_FMT_DRM_PRIME` gains it:
-  stock mpv, the `ffmpeg` CLI, anything else a user installs. Route B fixes mpv
-  only.
-- The image build stays free of a distribution-package rebuild (route B would add
-  a ~3 minute qemu build that must be kept away from the rootfs's FFmpeg
-  libraries).
+  stock mpv, the `ffmpeg` CLI, anything else a user installs. Patching mpv
+  instead would fix mpv only.
+- The image build stays free of a distribution-package rebuild.
 - All four spellings keep working — `v4l2request`, `v4l2request-copy`, `drm`,
   `drm-copy` — so existing configurations are not invalidated and the copy path
   remains available as a fallback.
 
-Route B stays in the tree because it is the smaller change and preserves the
-upstream spelling; the device these measurements were taken on runs it (as
-`~/mpv-patched`). Neither route needs a newer FFmpeg (`v4l2-request-n8.x`) or a
-newer mpv — mpv master is byte-for-byte identical in the relevant helper — and
-Moonlight is unaffected either way: it embeds its own FFmpeg and never goes
-through mpv.
+Nothing here needs a newer FFmpeg (`v4l2-request-n8.x`) or a newer mpv, and
+Moonlight is unaffected: it embeds its own FFmpeg and never goes through mpv.
+The `ff_get_format` change also looks like an upstream FFmpeg fix (a caller that
+passes a device of a type other than the codec's first-listed configuration is
+rejected today); it is kept as a local patch until that is settled upstream.
+
 
 ## Chromium and the VPU: the VA-API route (evaluated, not shipped)
 
@@ -454,18 +425,18 @@ runs the whole plan over SSH with screenshots pulled back to `work/va-shots/`.
 | Device tree | ROCKNIX DTB + overlay adding the video-engine node | `/boot/firmware/dtb.img` (original kept as `dtb-rocknix.img`) |
 | Memory | Decoder buffers come from CMA: `cma=256M` on the kernel command line (ROCKNIX default is 32 MB). Unused CMA stays available to normal programs. 1080p streaming uses ~140 MB. | `extlinux/extlinux.conf` |
 | Heap access | dma-buf heaps are `root:root 0600` in the kernel; the overlay's `72-rg35xxh-dma-heap.rules` gives group `video` access, otherwise ffmpeg logs `Unable to open any dma_heap device` and no dmabuf path can allocate. | `overlay/etc/udev/rules.d/` |
-| Userspace | `build/04c-v4l2-ffmpeg.sh` installs Kwiboo's FFmpeg (`v4l2request` hwdevice + per-codec hwaccels) over the Debian libs; `/etc/mpv/mpv.conf` selects `hwdec=v4l2request-copy`. Moonlight uses its own bundled FFmpeg. | `build/`, `overlay/etc/mpv/` |
+| Userspace | `build/04c-v4l2-ffmpeg.sh` installs Kwiboo's FFmpeg (`v4l2request` hwdevice + per-codec hwaccels) over the Debian libs, with the same external libraries the distro build has (gnutls for https, x264/lame/opus/vorbis/vpx encoders, libass for subtitles, dav1d for AV1); the replaced `libav*` packages are held with `apt-mark` so an upgrade cannot overwrite them. `/etc/mpv/mpv.conf` sets `hwdec=auto-safe`, which lands on zero-copy `drm`, and `hwdec-codecs=h264,hevc,mpeg2video,vp8`. Moonlight uses its own bundled FFmpeg. | `build/`, `overlay/etc/mpv/` |
 
 Players:
 
 - **Moonlight** — zero-copy, 1080p60 HEVC works today; nothing to install.
-- **mpv / ffmpeg (system)** — hardware decode works via
-  `--hwdec=v4l2request-copy` (the default in `/etc/mpv/mpv.conf`) and
-  `ffmpeg -hwaccel v4l2request`. Throughput caveats above.
-- Not covered: ffplay decodes in software only; VLC has no V4L2 code path at all
-  (removed from the image). Chromium is software-decoded as well: the VA-API
-  backend that would reach the VPU was built and measured, and it decodes but
-  never displays — see above.
+- **mpv / ffmpeg (system)** — hardware decode works, zero-copy by default
+  (`hwdec=auto-safe` → `drm` in `/etc/mpv/mpv.conf`), copy paths as fallback
+  (`v4l2request-copy`, `drm-copy`), and `ffmpeg -hwaccel v4l2request` on the CLI.
+  Throughput caveats above. AV1 is software (dav1d) on purpose: no Cedrus AV1.
+- Not covered: ffplay decodes in software only, VLC has no V4L2 code path at
+  all, and Chromium cannot use the V4L2 stateless decoder (its Linux decoder only
+  offers the GL output path, which does not accept these dmabufs).
 
 ## Source
 
@@ -497,7 +468,7 @@ Takes ~6 min on a 28-core x86_64 build host. **When `ROCKNIX_VERSION` changes, t
 
 On the boot partition (from Windows): rename `dtb.img` → `dtb-ve.img` and `dtb-rocknix.img` → `dtb.img`. Without the node the module never loads. Optionally remove ` cma=256M` from `extlinux/extlinux.conf`.
 
-Without the VPU, `hwdec=v4l2request-copy` falls back to software automatically
+Without the VPU, `hwdec=auto-safe` falls back to software automatically
 (`--hwdec-software-fallback` defaults to yes) — but note the pre-existing Mesa
 crash on that path above; `vo=gpu-next` is worse, not better.
 
