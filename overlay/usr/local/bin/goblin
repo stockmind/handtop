@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -77,6 +78,10 @@ AUDIO_BITRATE = int(os.environ.get("GOBLIN_AUDIO_BITRATE", "96000"))
 # GOBLIN_SUB_LANGUAGES=ita,eng
 SUB_LANGUAGES = [x.strip() for x in
                  os.environ.get("GOBLIN_SUB_LANGUAGES", "").split(",") if x.strip()]
+# How many files to save at once. The server transcodes much faster than the
+# Wi-Fi can carry, so a few in parallel make a series land in a fraction of
+# the time.
+DOWNLOAD_WORKERS = int(os.environ.get("GOBLIN_DOWNLOAD_WORKERS", "3"))
 # Skip the intro/recap the server knows about (jfsh does the same).
 SKIP_INTRO = os.environ.get("GOBLIN_SKIP_INTRO", "1") == "1"
 
@@ -959,18 +964,24 @@ class Goblin(App):
         return (True, "mp4") if big or bigger_than_screen else (False, ext)
 
     def download(self, top, targets):
-        """Worker thread: direct copies, or server-side 720p h264 mp4."""
+        """Worker thread: a few files at a time, so a series lands in a
+        fraction of the time (the server transcodes far faster than the
+        card can be written to).
+
+        The UI is never blocked: this runs off the event loop and only
+        touches the manifest at the end.
+        """
         OFFLINE.mkdir(parents=True, exist_ok=True)
         manifest = self.manifest()
         done = skipped = 0
         errors = []
-        for index, (item_id, name, _, kind, subtitle) in enumerate(targets, 1):
-            self.call_from_thread(self.hint, f"Saving {index}/{len(targets)}: {name[:42]}")
+
+        def fetch(target):
+            """Download one file (and its subtitle). Returns its state."""
+            item_id, name, _, kind, subtitle = target
             dest = OFFLINE / name
             if dest.exists() and dest.stat().st_size > 0:
-                skipped += 1
-                manifest[item_id] = [name]
-                continue
+                return item_id, name, "skip", None
             part = dest.with_suffix(dest.suffix + ".part")
             url = (self.transcode_url(item_id) if kind == "tc"
                    else f"{self.api.url}/Items/{item_id}/Download")
@@ -980,15 +991,32 @@ class Goblin(App):
                 with urllib.request.urlopen(req, timeout=600) as response, open(part, "wb") as fh:
                     shutil.copyfileobj(response, fh)
                 os.replace(part, dest)
-                manifest[item_id] = [name]
-                done += 1
                 if subtitle:
                     # sidecar with the same base name: mpv loads it by itself
                     self.fetch(subtitle, dest.with_suffix(
                         os.path.splitext(urlparse(subtitle).path)[1] or ".srt"))
+                return item_id, name, "ok", None
             except Exception as exc:                 # reported in the UI
-                errors.append(f"{name}: {exc}")
                 part.unlink(missing_ok=True)
+                return item_id, name, "error", str(exc)
+
+        workers = max(1, min(DOWNLOAD_WORKERS, len(targets)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(fetch, target) for target in targets]
+            for count, future in enumerate(as_completed(futures), 1):
+                item_id, name, state, error = future.result()
+                if state == "ok":
+                    done += 1
+                    manifest[item_id] = [name]
+                elif state == "skip":
+                    skipped += 1
+                    manifest[item_id] = [name]
+                else:
+                    errors.append(f"{name}: {error}")
+                try:
+                    self.call_from_thread(self.hint, f"Saving {count}/{len(targets)}: {name[:40]}")
+                except RuntimeError:
+                    pass                 # the app is gone, the download is not
         manifest[top["Id"]] = [name for _, name, _, _, _ in targets]
         self.save_manifest(manifest)
         return done, skipped, errors
