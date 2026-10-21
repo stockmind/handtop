@@ -44,8 +44,8 @@ source "$(dirname "$0")/config.sh"
 source "$(dirname "$0")/lib/chroot.sh"
 trap chroot_umount EXIT
 
-KWIBOO_PIN="fad85d9c76611c09b561167ab405c667a0dcdeb7"
-KWIBOO_URL="https://github.com/Kwiboo/FFmpeg"
+KWIBOO_PIN="$FFMPEG_V4L2REQ_PIN"      # pinned in config.sh
+KWIBOO_URL="$FFMPEG_V4L2REQ_URL"
 SRC="$WORK/src/kwiboo-ffmpeg"
 DEV_PKGS="libdrm-dev libudev-dev zlib1g-dev libdav1d-dev"
 
