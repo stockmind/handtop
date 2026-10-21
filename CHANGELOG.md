@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix: file associations work for a fresh home. GIO can guess the type of a file without the MIME databases, but it cannot map a type to an application, so a fresh home had no handler for a video file and Thunar fell back to running a literal `%U` ("missing exec"). The image had no `/usr/share/mime/mime.cache` and no `mimeinfo.cache` for `/usr/local/share/applications` at all; `build/05-configure-base.sh` now refreshes both, and `tools/deploy.sh` does the same when it updates a live device.
+
+
 - Change: the patched FFmpeg keeps Debian's feature set. The first version of `build/04c-v4l2-ffmpeg.sh` enabled only drm/udev/dav1d, so the replacement was a downgrade against the ~60 external libraries Debian's build uses: no gnutls (no https in libavformat, so mpv could not play URLs), no x264/lame/opus/vorbis/vpx encoders, no libass (no subtitle rendering). The build now enables the same set, installs the runtime side of each into the image, and gates on them (https protocol, the five encoders, the ass filter).
 
 - Change: the replaced FFmpeg libraries are held with `apt-mark` (`libavcodec61`, `libavdevice61`, `libavfilter10`, `libavformat61`, `libavutil59`, `libpostproc58`, `libswresample5`, `libswscale8`), so an upgrade cannot reinstall Debian's ones and silently drop the VPU path. `THIRD-PARTY.md` lists the FFmpeg tree, the pinned commit and the local patch.
