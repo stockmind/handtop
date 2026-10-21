@@ -5,7 +5,11 @@ The mock drives the *real* app - real widgets, real CSS, real layout - and
 only replaces the Jellyfin server with a canned one, so the screenshots
 cannot drift from the UI. Every name in the fake data is invented.
 
-Usage: python3 tools/goblin-mock.py docs/img
+Usage:
+    python3 tools/goblin-mock.py docs/img     # render the pictures
+    python3 tools/goblin-mock.py --live        # run it in a terminal (on the
+                                              # device, to photograph the
+                                              # real screen)
 """
 import asyncio
 import importlib.machinery
@@ -14,7 +18,11 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-APP = HERE.parent / "overlay" / "usr" / "local" / "bin" / "goblin"
+# The client: from the repository, or the one installed on a device.
+APP = Path(os.environ.get("GOBLIN_APP",
+                          HERE.parent / "overlay" / "usr" / "local" / "bin" / "goblin"))
+if not APP.exists():
+    APP = Path("/usr/local/bin/goblin")
 g = importlib.machinery.SourceFileLoader("goblin_app", str(APP)).load_module()
 
 # --------------------------------------------------------------- fake server
@@ -173,7 +181,27 @@ async def shot(app, pilot, name, out):
     print(f"  {name}.svg")
 
 
+async def live():
+    """Run the mock in a real terminal, so a device can be photographed."""
+    app = g.Goblin()
+    app.api = FakeServer()
+
+    async def walk():
+        await asyncio.sleep(2)
+        await app.open(LIBRARIES[0])
+        await asyncio.sleep(2)
+        await app.open(SERIES[0])
+        await asyncio.sleep(2)
+        await app.open(SEASONS[0])
+
+    app.call_later(walk)
+    await app.run_async()
+
+
 async def main():
+    if "--live" in sys.argv:
+        await live()
+        return
     out = Path(sys.argv[1] if len(sys.argv) > 1 else "docs/img")
     out.mkdir(parents=True, exist_ok=True)
     app = g.Goblin()

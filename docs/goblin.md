@@ -7,13 +7,15 @@ Jellyfin account, and saves episodes to the SD card.
 
 Start it with `Super+p` (or `Super+m`) — it opens in a terminal window.
 
-![The library list](img/goblin-home.png)
+![The client on the handheld](img/device-home.png)
 
-The screenshots above are **mocked**: they are produced by
-`tools/goblin-mock.py`, which drives the real application (real widgets, real
-CSS, real layout) against a fake server with invented library, series and
-episode names. That keeps the documentation free of anything copyrighted and
-keeps the pictures honest — they cannot drift away from the actual UI.
+Every picture in this document is **mocked**: `tools/goblin-mock.py` drives the
+real application (real widgets, real CSS, real layout) against a fake server
+with invented library, series and episode names. These ones are photographs
+of the actual RG35XX H running that mock — the terminal, the font, the
+taskbar and all — so nothing copyrighted is in the repository and the
+pictures cannot drift away from the UI. The same screens are also rendered
+crisply as SVG (`img/goblin-*.svg`).
 
 ---
 
@@ -37,7 +39,11 @@ Everything fits in one 80×24 terminal, and every row is one line:
 | **list** | one row per item: `▶` plays, `▸` opens a folder, `»27:31` is a resume point, `ita`/`eng` is the subtitle that will be used, `✓` is a saved copy |
 | **bottom line** | the keys that do something right now |
 
-![Episodes with a resume point and a subtitle track](img/goblin-episodes.png)
+![Episodes with a resume point and a subtitle track](img/device-episodes.png)
+
+| | |
+|---|---|
+| ![The series library](img/device-series.png) | ![Seasons](img/device-seasons.png) |
 
 Libraries are fetched 50 rows at a time and the next page arrives when the
 cursor gets close to the end, so even a 533-item library paints in about a
@@ -239,6 +245,10 @@ JELLYFIN_URL=http://192.168.1.60:8096 JELLYFIN_KEY=… python3 tools/test-goblin
 
 # regenerate the mocked screenshots in this document
 python3 tools/goblin-mock.py docs/img
+
+# run the mock on the handheld itself (for photographing it)
+scp tools/goblin-mock.py goblin:/tmp/ && ssh goblin 'foot -e "python3 /tmp/goblin-mock.py --live"'
+ssh goblin 'grim /tmp/shot.png'   # and pull the picture back
 
 # push the client to the handheld
 tools/deploy.sh goblin
