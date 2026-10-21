@@ -230,6 +230,20 @@ async def main():
         assert len(app2.query(Row)) > lv.index, "resume did not pull the pages back"
         print(f"PASS resume keeps row {lv.index} with {len(app2.query(Row))} rows")
 
+    # --- Subtitles: every kind of media gets one, not just series
+    app = Goblin()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await settle(pilot)
+        await click_row(pilot, "Film")
+        await settle(pilot)
+        with_sub = [r.item for r in app.query(Row)
+                    if app.targets(r.item) and app.targets(r.item)[0][4]]
+        assert with_sub, "no movie with a subtitle track in the library"
+        targets = app.targets(with_sub[0])
+        assert targets[0][4], "a movie with a subtitle track gets no sidecar"
+        print(f"PASS movie subtitle: {with_sub[0]['Name'][:28]} -> "
+              f"{targets[0][4][-40:]}")
+
     # --- Subtitles: Italian first, English second, else whatever is there
     app = Goblin()
     async with app.run_test(size=(80, 24)) as pilot:
@@ -282,8 +296,11 @@ async def main():
         rows = list(app.query(Row))
         item = rows[0].item
         app.query_one(ListView).index = 0
-        await app.action_save()
-        await settle(pilot)
+        await app.action_save()          # the download runs detached
+        for _ in range(120):             # wait for the worker to finish
+            await pilot.pause(0.5)
+            if load_manifest(app).get(item["Id"], []):
+                break
         files = load_manifest(app).get(item["Id"], [])
         assert files and (OFFLINE / files[0]).exists(), f"nothing saved: {files}"
         size = (OFFLINE / files[0]).stat().st_size

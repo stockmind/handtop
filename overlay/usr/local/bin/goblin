@@ -898,8 +898,15 @@ class Goblin(App):
         self.hint(f"Deleted {removed} file(s)")
 
     async def action_save(self):
+        """Start a save and let it run in the background.
+
+        The download is a worker thread; the list stays usable while it runs
+        and refreshes itself (with the saved marks) when it is done."""
         item = self.selected()
-        if item is None or self._busy:
+        if item is None:
+            return
+        if self._busy:
+            self.hint("A download is already running")
             return
         targets = self.targets(item)
         if not targets:
@@ -911,16 +918,17 @@ class Goblin(App):
                       f"{human_bytes(free_bytes())} free")
             return
         self._busy = True
-        self.hint(f"Saving {len(targets)} item(s)…")
-        worker = self.run_worker(lambda: self.download(item, targets),
-                                 group="dl", exclusive=True, thread=True)
-        await worker.wait()
+        self.hint(f"Saving {len(targets)} item(s) in the background…")
+        self.run_worker(lambda: self.download(item, targets),
+                        group="dl", exclusive=True, thread=True)
+
+    def _download_done(self, result):
+        """The download finished - called in the app's thread."""
         self._busy = False
-        result = worker.result
-        if isinstance(result, Exception):
-            self.hint(f"Save failed: {result}")
-            return
         done, skipped, errors = result
+        self.call_later(self._after_download, done, skipped, errors)
+
+    async def _after_download(self, done, skipped, errors):
         await self.reload()
         if errors:
             self.hint(f"Saved {done + skipped}, {len(errors)} failed: {errors[0][:45]}")
@@ -1019,6 +1027,10 @@ class Goblin(App):
                     pass                 # the app is gone, the download is not
         manifest[top["Id"]] = [name for _, name, _, _, _ in targets]
         self.save_manifest(manifest)
+        try:
+            self.call_from_thread(self._download_done, (done, skipped, errors))
+        except RuntimeError:
+            pass                     # the app is gone, the files are not
         return done, skipped, errors
 
     def fetch(self, url, dest):

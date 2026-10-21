@@ -71,6 +71,13 @@
   the cursor nears the end, instead of pulling 200 rows at once. On the
   device the 533-item music video library paints in ~1.2 s instead of ~3.2 s.
 
+- Fix: a download no longer blocks the client. It runs detached in a worker
+  thread: the list stays usable, the key line shows the progress, and the
+  saved marks appear when it is done.
+
+- Fix: every saved file gets its subtitle as a sidecar next to it - not just
+  series - so a saved episode, movie or music video is fully offline.
+
 - Fix: the cursor and the pages come back after a download or a video. The
   cursor is remembered per folder, the pages it needs are pulled back in,
   and the rebuilt list is scrolled to it (a resize re-cuts the rows instead

@@ -109,13 +109,22 @@ the media's own default track → the first track there is; mode `None` means
 no subtitles). The row shows the language that will be used. A saved copy
 keeps its subtitle as a sidecar next to the video, which mpv loads by itself.
 
-**Save to the card.** `Y` saves the selected episode, a whole season or a
-whole series under `~/Offline`. Three files are saved at a time, which is
-1.65× the throughput on the handheld's Wi-Fi (a single stream is limited by
-the connection, not by the server). Files that are already there are skipped;
+**Save to the card.** `Y` saves the selected item under `~/Offline` — an
+episode, a season, a whole series, a movie, a music video; whatever the
+selection covers. The download runs **detached**: the list stays usable
+while it works, the key line shows the progress, and the saved marks appear
+when it is done. Three files are saved at a time, which is 1.65× the
+throughput on the handheld's Wi-Fi (a single stream is limited by the
+connection, not by the server). Files that are already there are skipped;
 `X` `X` removes them again — the server's copy is never touched. The free
 space is on the top line, and a save that clearly will not fit is refused
 before it starts.
+
+**Subtitles come with it.** Every saved file gets its subtitle as a sidecar
+next to it (`<name>.srt`), so a saved episode is fully offline — mpv loads
+the sidecar by itself. The track is the one the profile would play: the
+preferred language, else the media's default track, else the first text
+track.
 
 **Play.** The client asks Jellyfin to transcode to the panel
 (`640×480`, the server keeps the aspect ratio, so 16:9 becomes 640×360) and
