@@ -144,6 +144,10 @@ Earlier rounds showed Firefox's rendering path (GPU/CPU WebRender, Wayland/X11),
 
 ## Goblin (the Jellyfin client, v0.2.0)
 
+> The full reference — keys, configuration, the feature set, the mocked
+> screenshots — is in **[goblin.md](goblin.md)**. This section is the short
+> version.
+
 `goblin` is the one media app on the handheld: a single Jellyfin client,
 keypad-first, no menu/dashboard/launcher modes. `Super+p` (or `Super+m`)
 starts it in a terminal. Everything the old suite did (menu, dashboard, play

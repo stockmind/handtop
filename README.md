@@ -22,6 +22,7 @@ Status: **v0.2.0**, developed and tested on the RG35XX H.
 - Gamepad mode (tap Start) presents an Xbox 360 pad, e.g. for Moonlight; hold Start 1 s to go back
 - **BT Controller mode**: the handheld becomes a Bluetooth gamepad for your PC or phone
 - **Moonlight** with **hardware video decoding** (H.264/HEVC up to 1080p60) via the Cedrus decoder
+- **Jellyfin client** (`goblin`, in the terminal): keypad-first browsing, fullscreen playback with subtitles, resume, and saving episodes to the card — [docs/goblin.md](docs/goblin.md)
 - **Tailscale** with tray icon and a QR-code login launcher
 - **HDMI**: hot-plug, monitor-only / extend / mirror modes, keyboard panel on the handheld when the monitor is the only screen
 - Sleep (s2idle) from the power menu or after 10 min idle; Power tap wakes
@@ -97,7 +98,7 @@ sudo bash build/10-image.sh        # → work/out/handtop-<date>-<version>.img.x
 - `src/inputd/` — input daemon and on-screen keyboard (Python), with unit tests
 - `boot-files/` — files placed on the FAT boot partition
 - `tools/` — test helpers (QEMU boot test, headless desktop screenshots, Wi-Fi import test)
-- `docs/` — how everything works and why
+- `docs/` — how everything works and why (`docs/goblin.md` is the media client)
 
 ## Credits and license
 
