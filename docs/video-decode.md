@@ -2,8 +2,9 @@
 
 ## Status
 
-**Working.** The Cedrus VPU decodes H.264 and HEVC (and MPEG-2/VP8/VP9 via the
-same hwaccel) both in Moonlight and in the system FFmpeg and mpv.
+**Working.** The Cedrus VPU decodes H.264 and HEVC (MPEG-2/VP8 as well, though
+see the mpv whitelist note below) both in Moonlight and in the system FFmpeg and
+mpv.
 
 - **Moonlight** always worked: it links its own FFmpeg with the V4L2 request-API
   patchset and picks the VPU automatically (Settings → video decoder: Automatic).
@@ -40,8 +41,12 @@ Using hardware decoding (v4l2request-copy).
 ```
 
 `--hwdec=v4l2request[-copy]` and `--hwdec=drm[-copy]` are offered for H.264,
-HEVC, MPEG-2, VP8, VP9 and AV1 (AV1/VP9 have no Cedrus support in this kernel,
-so they fall back).
+HEVC, MPEG-2, VP8, VP9 and AV1, but mpv only tries the codecs on its built-in
+hwdec whitelist (`[vd] Not trying to use hardware decoding: codec ... is not on
+whitelist`): H.264 and HEVC decode on the VPU, VP9 attempts `vp9-drm` and falls
+back cleanly (this kernel's Cedrus has no VP9), AV1 is pinned to software by the
+`[av1]` profile, and MPEG-2/VP8 stay in software — SD codecs mpv deliberately
+keeps on the CPU, though the ffmpeg CLI does use Cedrus for MPEG-2.
 
 ### Throughput: zero-copy vs copy
 
