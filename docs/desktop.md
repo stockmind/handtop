@@ -170,6 +170,11 @@ browser, shuffle) is gone — the client is the whole UI.
   triangle on its screen, drawn by `tools/icons/gen_app_icons.py`, with a
   `-light` variant the theme script swaps in), shown in the app drawer as
   "Goblin".
+* **Keypad during playback**: the mpv window has the focus, and
+  `/etc/mpv/input-handtop.conf` maps the rest of the pad onto it — D-pad
+  left/right seek 15 s, up/down change the volume, `Y` (Space) pauses,
+  `X` (Tab) switches the subtitle track, `B` (Esc) closes the video and
+  drops back into the library.
 * **Video**: mpv takes over with `--fullscreen`, so the film fills the
   640x480 panel; the client is gone while it plays, so the keyboard belongs
   to mpv. `B` (Esc) closes the video and the client comes back on the same

@@ -228,6 +228,7 @@ class Jellyfin:
         self.url = url.rstrip("/")
         self.key = key
         self._user = None
+        self.error = ""            # the last failure, for the status line
 
     def get(self, endpoint, params=None):
         url = f"{self.url}{endpoint}"
@@ -237,8 +238,10 @@ class Jellyfin:
             "Authorization": f'MediaBrowser Token="{self.key}"'})
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
+                self.error = ""
                 return json.load(r)
-        except (urllib.error.URLError, ValueError, TimeoutError, OSError):
+        except (urllib.error.URLError, ValueError, TimeoutError, OSError) as exc:
+            self.error = str(exc)
             return None
 
     def post(self, endpoint, body):
@@ -602,7 +605,10 @@ class Goblin(App):
         self.items = self.api.libraries()
         self.total = len(self.items)
         self.crumb("Home")
-        self.hint()
+        if not self.items and self.api.error:
+            self.hint(f"cannot reach {self.api.url}: {self.api.error[:60]}")
+        else:
+            self.hint()
         await self.render_rows(restore=False)
 
     async def show_level(self, entry, search="", restore_index=None):
@@ -630,7 +636,9 @@ class Goblin(App):
         trail = [e[1] for e in self.path[:-1]] + [name]
         self.crumb("Home › " + " › ".join(trail))
         await self.render_rows()
-        if search:
+        if not self.items and self.api.error:
+            self.hint(f"cannot reach {self.api.url}: {self.api.error[:60]}")
+        elif search:
             self.hint(f"{len(self.items)} of {self.total} matching “{search[:40]}”")
         else:
             self.hint()

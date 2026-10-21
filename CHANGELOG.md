@@ -83,6 +83,14 @@
   exactly the square and portrait music videos, the ones most likely to be
   opened.)
 
+- Add: the keypad controls playback. While a video plays the mpv window has
+  the focus, and the D-pad now seeks (left/right) and changes the volume
+  (up/down), `Y` pauses and `X` switches the subtitle track - only `B` was
+  reachable before.
+
+- Fix: a Jellyfin server that is down now says so ("cannot reach ...") in the
+  key line instead of showing an empty list.
+
 - Add: subtitles. The client picks the item's subtitle track (Italian first,
   English second, otherwise whatever text track is there) and hands it to mpv
   per file, so every episode of the playlist is subtitled from the start. The
