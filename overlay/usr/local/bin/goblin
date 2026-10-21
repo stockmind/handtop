@@ -332,6 +332,12 @@ class Goblin(App):
         await self.show_libraries()
         if self.resume:
             await self._resume()
+        # The screen takes the focus itself when it finishes mounting, so the
+        # list gets it one refresh later - otherwise the D-pad arrows and
+        # Enter never reach the list on the device.
+        self.call_after_refresh(self._focus_list)
+
+    def _focus_list(self):
         self.query_one("#list", ListView).focus()
 
     # ------------------------------------------------------------- status
