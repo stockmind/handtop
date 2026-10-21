@@ -36,8 +36,6 @@ blueman
 # Apps
 foot
 thunar
-tumbler                   # thumbnail service Thunar needs; without it opening a
-                          # video fails with a missing-exec error (exo-open crash)
 mousepad
 chromium                  # browser: about half Firefox's CPU when scrolling on this device (docs/desktop.md)
 imv

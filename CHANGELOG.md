@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Change: `tumbler` is dropped again. It was installed to work around Thunar's "missing exec" error, but that error is the missing MIME database: with the caches refreshed, `exo-open` (what Thunar calls) opens a video with no thumbnail service running at all, and without the caches it fails with tumbler running too. On a 1 GB device the thumbnail service is RAM and CPU for a cosmetic feature, so it goes.
+
+
 - Fix: file associations work for a fresh home. GIO can guess the type of a file without the MIME databases, but it cannot map a type to an application, so a fresh home had no handler for a video file and Thunar fell back to running a literal `%U` ("missing exec"). The image had no `/usr/share/mime/mime.cache` and no `mimeinfo.cache` for `/usr/local/share/applications` at all; `build/05-configure-base.sh` now refreshes both, and `tools/deploy.sh` does the same when it updates a live device.
 
 
@@ -95,7 +98,7 @@
 
 - Fix: the real cause of Thunar's "missing exec" error was a stub `/usr/local/share/applications/mpv.desktop` (no `Exec=`) left by an earlier experiment, shadowing the real one in `/usr/share`; GIO resolves `/usr/local` first and reported "Desktop file didn't specify Exec field" for every video. Removed on the device. Added `overlay/usr/local/share/applications/play-mpv.desktop` (a "Play with mpv" Open With entry that bypasses pseudo-gui mode) and `XDG_DATA_DIRS` defaults in `/etc/zsh/zshenv` so login shells never hand GIO an empty data path.
 
-- Fix: install `tumbler`. Thunar without the freedesktop thumbnail service crashed its OpenURI path (`exo-open`, trixie exo 4.20) and opening a video failed with a missing-exec error even when mimeapps.list was correct. Fresh homes also get mpv associations now (skel mimeapps.list above); both applied on the live device.
+- Fix: install `tumbler`. Thunar without the freedesktop thumbnail service crashed its OpenURI path (`exo-open`, trixie exo 4.20) and opening a video failed with a missing-exec error even when mimeapps.list was correct. Fresh homes also get mpv associations now (skel mimeapps.list above); both applied on the live device. (Superseded: the crash was the missing MIME database, not the missing thumbnailer -- see the MIME fix below -- so `tumbler` is dropped again and Thunar no longer shows thumbnails.)
 
 - Fix: fresh homes now ship `~/.config/mimeapps.list` (`overlay/etc/skel/.config`) with mpv as the default for every video type. Thunar had no handler and its launcher fell back to executing a literal `%U` ("missing exec"); double-clicking a video now opens mpv. Applied on the live device too, and `/etc/skel/.config/mimeapps.list` updated there.
 
