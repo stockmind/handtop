@@ -59,8 +59,6 @@ ratios, not the digits:
 
 | Path | 540p HEVC | 1080p HEVC | 1080p H.264 |
 |---|---|---|---|
-| zero-copy, `vo=null` (decode only) | 233 fps | 99 fps | 51 fps |
-| copy, `vo=null` | 142 fps | 48 fps | 24 fps |
 | zero-copy, `vo=gpu` `--profile=fast` | 79 fps | 51 fps | 43 fps |
 | zero-copy, `vo=dmabuf-wayland` | 94 fps | 62 fps | 50 fps |
 | zero-copy, `vo=gpu` (default scaler) | 79 fps | 23 fps | 18 fps |
@@ -98,6 +96,34 @@ decoding via hevc-drm`) and skips it when the VO has no usable interop.
 subtitles — so it remains an option rather than the default. The software path is
 unchanged and still the unstable one (next section).
 
+### Versus the software path (what an image without `04c` does)
+
+Without the patched FFmpeg mpv has only software decoding, so that is the honest
+before/after baseline. Same harness, 120 frames, `vo=gpu --profile=fast`,
+measured 2026-10-21 on the device (mpv 0.40; `--hwdec=no` on the patched build —
+its software path is the same decoders Debian ships):
+
+| 120 frames, `vo=gpu --profile=fast` | software | `hwdec=drm` (zero-copy) |
+|---|---|---|
+| 540p HEVC | 35.9 fps, 120 % CPU | 36.7 fps, 69 % CPU |
+| 1080p HEVC | 30.3 fps, 266 % CPU | 36.1 fps, 75 % CPU |
+| 1080p H.264 | 29.0 fps, 271 % CPU | 35.5 fps, 76 % CPU |
+
+CPU is `(user+sys)/wall` for the whole process. The saving is the point: roughly
+3.5 CPUs at 1080p, whichever codec. The fps column saturates near 36 fps in this
+harness because the `vo=gpu`/panfrost path, not the decoder, is the limit — the
+gain there is headroom (audio, subtitles, the desktop, thermals), not raw decode
+rate. Decode-only runs show the same from the other side: with `vo=null`
+`--hwdec=drm-copy` (VPU plus a download per frame) does 94 / 32 / 23 fps against
+software's 154 / 68 / 48 fps, at about a third of the CPU — which is why
+zero-copy, not the VPU alone, is what turns the saving into a playback win.
+`vo=null` cannot present `drm_prime` frames, so `--hwdec=drm` falls back to
+software there and is not a valid way to measure the zero-copy path.
+
+The power draw could not be compared directly: the AXP2202 fuel gauge on this
+board reports the same ~423 mA with the SoC idle and with four cores pegged, so
+CPU time is the only usable proxy.
+
 ### The Mesa crash on the software path (pre-existing)
 
 `--hwdec=no` with a GPU VO segfaults intermittently, and it is *not* caused by
@@ -115,8 +141,8 @@ The same loop crashes 1/5 with Debian's **stock** libavcodec installed, and
 `gdb` puts the fault in Mesa's panfrost driver on mpv's `vo` thread
 (`libgallium-25.0.7-2+deb13u1.so`), not in any `libav*`/`libsw*` library.
 Software decoding produces `yuv420p` frames; the hardware copy path produces
-`nv12`, which Mesa handles fine. That is why `/etc/mpv/mpv.conf` defaults to
-`hwdec=v4l2request-copy`.
+`nv12`, which Mesa handles fine. That is why `/etc/mpv/mpv.conf` defaults to `hwdec=auto-safe`: zero-copy
+`drm` first, `v4l2request-copy` only when the VO has no usable interop.
 
 ### Fixed: a stale second ffmpeg under /usr/local
 
