@@ -30,7 +30,7 @@
     <keybind key="W-e"><action name="Execute" command="thunar" /></keybind>
     <keybind key="W-x"><action name="Execute" command="rg35xxh-power-menu" /></keybind>
     <keybind key="W-m"><action name="Execute" command="sh -c 'foot -e goblin'" /></keybind>
-    <keybind key="W-p"><action name="Execute" command="sh -c 'foot -e goblin-play'" /></keybind>
+    <keybind key="W-p"><action name="Execute" command="sh -c 'foot -e goblin'" /></keybind>
     <keybind key="A-F4"><action name="Close" /></keybind>
     <keybind key="W-Up"><action name="ToggleMaximize" /></keybind>
     <keybind key="Print"><action name="Execute" command="sh -c 'mkdir -p ~/Pictures &amp;&amp; grim ~/Pictures/screenshot-$(date +%Y%m%d-%H%M%S).png'" /></keybind>

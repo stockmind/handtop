@@ -1,8 +1,0 @@
-#!/bin/sh
-# goblin-play — launch Jellyfin browser mode of unified goblin TUI.
-if [ -f /etc/default/goblin-dash ]; then
-    . /etc/default/goblin-dash
-    export JELLYFIN_URL="${DASH_JELLYFIN:-}"
-    export JELLYFIN_KEY="${DASH_API_KEY:-}"
-fi
-exec goblin play

@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- Change: `goblin` is now one Jellyfin client and nothing else. The menu,
+  dashboard, music and app-runner modes are gone, as are the dead
+  `goblin-play` wrapper and `goblin-play-tui.py`; the whole 80x24 terminal
+  goes to one compact list (one line per item, no borders), with a one-line
+  top bar (`Home › Film` + free space, battery, CPU %, temperature) and a
+  one-line key legend. Keypad-first: A=play/open, B=back, Y=save, X=delete
+  (twice), /=search, Q=quit. `Y` saves a single episode, a whole season or a
+  whole series to `~/Offline`; `X` deletes the local copy again.
+
+- Fix: the Jellyfin client streams and downloads **transcoded** media now.
+  The old URL (`/Videos/{id}/stream?Container=mp4&VideoCodec=h264&…`) served
+  the *original* file — the parameters were decoration — and the resulting
+  416-wide stream is one of the shapes that renders blue. The client now asks
+  for `stream.mp4?static=false&videoCodec=h264&audioCodec=aac&maxWidth=1280&
+  maxHeight=720&videoBitrate=4000000`, which really transcodes (a 1080p HEVC
+  source comes back as 1280x720 h264).
+
+- Fix: the blue video. mpv's zero-copy path (`--hwdec=drm`) cannot import
+  every dmabuf: panfrost rejects frames whose width is not a multiple of 64
+  pixels (`MESA: panfrost: rejecting image due to unsupported offset or stride
+  alignment`) and the video area stays a flat blue rectangle — 416-wide and
+  odd-aspect transcodes hit it constantly. The client starts mpv with
+  `--hwdec=drm-copy` instead (0 dropped frames at 720p); local 1080p files
+  keep zero-copy, where the width is 1920 and panfrost accepts it. See
+  `docs/video-decode.md`.
+
 - Fix: MPEG-2 and VP8 play on the VPU too. mpv only tries hardware for the codecs on its built-in whitelist, so both stayed on the CPU ("codec mpeg2video is not on whitelist") even though Cedrus decodes them; `/etc/mpv/mpv.conf` now sets `hwdec-codecs=h264,hevc,mpeg2video,vp8` (the option replaces the default list, so H.264/HEVC stay listed). Measured 2026-10-21, 120 frames, `vo=gpu --profile=fast`: MPEG-2 1080i 88.8 → 45.6 % CPU, VP8 720p 92.1 → 48.1 %, same fps — battery and headroom, not frame rate.
 
 

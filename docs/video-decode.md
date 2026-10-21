@@ -152,6 +152,36 @@ Software decoding produces `yuv420p` frames; the hardware copy path produces
 `nv12`, which Mesa handles fine. That is why `/etc/mpv/mpv.conf` defaults to `hwdec=auto-safe`: zero-copy
 `drm` first, `v4l2request-copy` only when the VO has no usable interop.
 
+### The blue video: panfrost cannot import every dmabuf
+
+Zero-copy (`--hwdec=drm`) renders a **flat blue rectangle** for streams whose
+width is not a multiple of 64 pixels. The picture is not a decode failure: the
+decoder produces correct frames, and `MESA: panfrost: rejecting image due to
+unsupported offset or stride alignment` is logged for every frame. Panfrost
+refuses the dmabuf import, the VO keeps its clear colour, and nothing else is
+drawn.
+
+Measured 2026-10-21 on the device (`--hwdec=drm`, 24 frames each, "Mesa
+errors" counted from the mpv log):
+
+| width | Mesa rejections | picture |
+|---|---|---|
+| 416 (416x234 / 416x236 / 416x238) | 26-62 per frame | blue |
+| 544 (544x306) | 26 | blue |
+| 720 (720x404) | 26 | blue |
+| 512, 640, 704, 960, 1280 | 0 | correct |
+
+Height does not matter (1280x536 is fine, 416x240 is fine), only the width —
+i.e. the NV12 stride. 640 = 10x64, 704 = 11x64, 960 = 15x64, 1280 = 20x64 all
+work; 416 = 6.5x64, 544 = 8.5x64 and 720 = 11.25x64 do not.
+
+This is why the Jellyfin client streams **and** downloads with the **copy**
+path (`--hwdec=drm-copy`, the same frames downloaded to system memory): it
+renders every stream, and at 720p — the resolution the client asks the server
+for — it drops no frames at all (0 dropped over 15 s, measured). The copy path
+at 1080p does drop frames (21-40 over 15 s), which is why local 1080p files
+still prefer zero-copy: their width is 1920, which panfrost accepts.
+
 ### Fixed: a stale second ffmpeg under /usr/local
 
 An earlier revision of `build/04c` installed with `--prefix=/usr/local`. Images

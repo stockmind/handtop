@@ -57,6 +57,10 @@ fi
 if [ "$WHAT" = all ] || [ "$WHAT" = goblin ]; then
     stage
     scp -q overlay/usr/local/bin/goblin goblin:deploy-stage/
-    install_as_root "cp $STAGE/goblin /usr/local/bin/goblin && chmod 755 /usr/local/bin/goblin && rm -rf $STAGE"
+    # rm the pre-2026-10-21 leftovers: the old wrapper and the abandoned
+    # goblin-play-tui.py (both are in git history if they are ever needed).
+    install_as_root "cp $STAGE/goblin /usr/local/bin/goblin && chmod 755 /usr/local/bin/goblin \
+        && rm -f /usr/local/bin/goblin-play /usr/local/lib/goblin-play-tui.py \
+        && rm -rf $STAGE"
     echo "goblin TUI deployed (takes effect on next launch)"
 fi

@@ -125,54 +125,49 @@ Tested 2026-10-17 on the device: fresh profile per browser, 20 s of scrolling on
 Earlier rounds showed Firefox's rendering path (GPU/CPU WebRender, Wayland/X11), CPU governor, smooth scrolling and frame rate made no noticeable difference; full uBlock Origin alone took 110–270 MB in Firefox's extension process.
 
 
-## Goblin TUI (media browser, v0.1.4)
+## Goblin (the Jellyfin client, v0.2.0)
 
-`goblin` (unified menu/play/dashboard) drives Jellyfin with the D-pad. The
-2026-10-17 overhaul fixed the on-device navigation crash and added playlists
-and offline copies:
+`goblin` is the one media app on the handheld: a single Jellyfin client,
+keypad-first, no menu/dashboard/launcher modes. `Super+p` (or `Super+m`)
+starts it in a terminal. Everything the old suite did (menu, dashboard, play
+browser, shuffle) is gone — the client is the whole UI.
 
-* **Crash cause**: Jellyfin item ids are hex and often start with a digit;
-  Textual rejects those as widget ids (`BadIdentifier`) the moment a library
-  listed anything. Rows are plain Labels now (no per-row widget id at all —
-  also what made big lists paint fast). Back-navigation also used
-  `asyncio.run_coroutine_threadsafe(self._loop)` outside the app loop — gone,
-  handlers are plain async now.
-* **Streaming**: by default asks Jellyfin for a ≤720p h264 mp4 stream
-  (`GOBLIN_STREAM_TRANSCODE=0` opts out to the original + bitrate cap);
-  Jellyfin direct-remuxes when the source already fits, so small files cost
-  nothing and everything else is guaranteed-hardware in mpv over Wi-Fi.
-* **Playlists**: Enter plays the *filtered* list (whatever the search box
-  leaves visible) starting at the cursor; `s` shuffles it. Exit value is
-  `("PL", urls, shuffle)` and `__main__` hands mpv the whole list
-  (`--shuffle` when set). Music-video libraries work out of the box
-  (`CollectionType=musicvideos → MusicVideo`).
-* **Offline copies**: `f` saves the selected item (or every episode of a
-  series) under `~/Offline`. Server transcode to 720p mp4 is the default
-  (`GOBLIN_DL_TRANSCODE=0` opts out) when the original is >1 GB or taller than
-  720p — aurora transcodes ~16× realtime vs ~6 MB/s Wi-Fi, so it lands faster.
-  `x` removes the local copy only; the server file is never touched. Playing an
-  item that has a local copy uses it instead of streaming (✓ marks stored items).
-* **Layout**: dashboard stats are hidden in play mode (the 480-px screen goes
-  to the list); action bar = Play/Shuffle/Save/Remove.
-* **Season quirk** (Jellyfin 12.2): some season nodes hold no children — the
-  Episodes list falls back to `/Shows/{series}/Episodes?Season=N`.
-* **Search is server-side** (`SearchTerm`): libraries hold far more items than
-  one page (533 music videos), so typing filters at the server, not just the
-  loaded rows. Debounced 350 ms; Back clears the filter first; navigating down
-  resets it. The cursor position is remembered per folder and restored on Back.
-* **Pagination**: deliberately minimal — pages of 200 plus a `⬇ …and N more`
-  sentinel row that appends the next page. No infinite scroll machinery.
-* **Resume after playback**: the app saves where you were (folder path, cursor
-  row, search term) before handing mpv the playlist; `goblin-play` relaunches it
-  with that snapshot (`GoblinApp(mode="play", resume=…)`), so quitting a video
-  drops you back on the same row of the same library instead of the library
-  list. The snapshot is in memory, so a fresh `goblin` still starts at the menu;
-  only the mpv round-trip inside one run resumes.
+* **Layout**: the full 80x24 terminal goes to the list. One line per row
+  (`▶ S01E03 Name  24m  540p  ✓`), a one-line top bar
+  (`Home › Film` + `43G free  bat 71%  cpu 23%  33°C`) and a one-line key
+  legend at the bottom. No borders, no panels, no wasted rows.
+* **Keys** (keypad mode: A=Enter, B=Esc, X=Tab, Y=Space): `A` opens a folder
+  or plays from the cursor down the visible list, `B` goes back (clearing the
+  search filter first), `Y` saves, `X` deletes the saved copy (twice), `/`
+  searches, `Q` quits. Physical keyboard works the same.
+* **Transcoding**: playing and saving ask Jellyfin for
+  `stream.mp4?static=false&videoCodec=h264&audioCodec=aac&maxWidth=1280&
+  maxHeight=720&videoBitrate=4000000`. `static=false` is the part that
+  matters — without it the endpoint serves the original file and every other
+  parameter is decoration. A 1080p HEVC source comes back as 1280x720 h264,
+  which the VPU decodes and the Wi-Fi can carry.
+* **Why the copy decode path**: mpv is started with `--hwdec=drm-copy`.
+  Panfrost can only import zero-copy dmabufs whose width is a multiple of 64
+  pixels (`MESA: panfrost: rejecting image due to unsupported offset or
+  stride alignment`); anything else renders as a flat blue rectangle. 416-wide
+  and odd-aspect transcodes hit it constantly. The copy path shows every
+  frame — 0 dropped frames at 720p, where the screen is 640x480 anyway.
+* **Save**: `Y` saves the selected episode, or every episode of a season or
+  series, under `~/Offline` (never `/tmp`, which is a 128 MB tmpfs). Series
+  are expanded server-side; filenames carry `S01E03`. Files already on the
+  device are skipped, and `X` removes them again (the server copy is never
+  touched). The free space of the card is on the top bar.
+* **Search**: server-side (`SearchTerm`), debounced 400 ms, so a library with
+  hundreds of items is searchable. `B` clears the filter before leaving the
+  folder.
+* **Resume**: the client remembers the folder path, cursor row and filter, so
+  quitting a video drops you back on the same row of the same library.
 * **Headless test** (no device needed, runs against any Jellyfin):
   `python3 tools/test-goblin-tui.py` with `JELLYFIN_URL`/`JELLYFIN_KEY` env —
-  covers library listing, movie/episode/music-video playlists, filter, shuffle,
-  escape-back, and a real download→play-local→remove round-trip. Verified on
-  textual 2.1.2 (Debian trixie, what ships) and 8.x.
+  covers the library list, the status line, movie and episode playlists (with
+  the transcode URL asserted), the resume snapshot, series save targets, a
+  real save → play-local → delete round-trip, and back navigation. Verified on
+  textual 2.1.2 (Debian trixie, what ships).
 
 ## Light theme (dual theme)
 
