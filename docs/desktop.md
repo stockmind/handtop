@@ -149,6 +149,15 @@ keypad-first, no menu/dashboard/launcher modes. `Super+p` (or `Super+m`)
 starts it in a terminal. Everything the old suite did (menu, dashboard, play
 browser, shuffle) is gone — the client is the whole UI.
 
+* **Pagination**: 50 rows per page, and the next page is fetched when the
+  cursor gets within five rows of the end, so a 533-item library paints in
+  about a second instead of three (measured on the device: 50 rows = 1.2 s
+  end to end — 0.3 s API, 0.6 s mount, 0.25 s paint — against 3.2 s for 200
+  rows). The `… N more` row shows how much is left and can be selected to
+  pull the next page in.
+* **No placeholder rows**: a list row renders its own text. A row built as a
+  container (a `Label` inside a `ListItem`) shows the *class name* — "Row" —
+  until the child mounts, which is what the big libraries used to flash.
 * **Layout**: the full 80x24 terminal goes to the list. One line per row
   (`▶ S01E03 Name  24m  540p  ✓`), a one-line top bar
   (`Home › Film` + `43G free  bat 71%  cpu 23%  33°C`) and a one-line key

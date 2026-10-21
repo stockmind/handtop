@@ -60,7 +60,7 @@ CONTAINERS = {
     "musicvideos": ["MusicVideo"],
     "music": ["Audio"],
 }
-PAGE = 200
+PAGE = 50                                  # rows fetched per page
 FIELDS = "Fields=Width,Height,RunTimeTicks,ProductionYear,MediaSources"
 
 # The panel is 640x480: asking the server for that (it keeps the aspect ratio,
@@ -410,13 +410,19 @@ def row_text(item, width, local, resume=0, prefs=None):
 
 
 class Row(ListItem):
+    """One list row.
+
+    The text is rendered by the row itself: a child widget would show the
+    class name ("Row") until it mounted, which is exactly the placeholder
+    spam the big libraries showed."""
+
     def __init__(self, item, width, local=False, resume=0, prefs=None, **kwargs):
         super().__init__(**kwargs)
         self.item = item
         self.text = row_text(item, width, local, resume, prefs)
 
-    def compose(self):
-        yield Label(self.text)
+    def render(self):
+        return self.text
 
 
 class MoreRow(ListItem):
@@ -424,8 +430,8 @@ class MoreRow(ListItem):
         super().__init__(**kwargs)
         self.remaining = remaining
 
-    def compose(self):
-        yield Label(Text(f"… {self.remaining} more", style="#6b7280"))
+    def render(self):
+        return Text(f"… {self.remaining} more", style="#6b7280")
 
 
 CSS = """
@@ -435,7 +441,6 @@ Screen { background: #16181d; color: #d7dbe0; }
 #stats { width: auto; height: 1; padding: 0 1; color: #98a2b3; }
 #list { height: 1fr; padding: 0; }
 Row, MoreRow { height: 1; padding: 0 1; }
-Row > Label, MoreRow > Label { width: 100%; }
 ListView > ListItem.-highlight { background: #2b3240; }
 #search { height: 1; border: none; padding: 0 1; background: #262b35; color: #e6e9ef; display: none; }
 #hint { height: 1; background: #1f232b; padding: 0 1; color: #98a2b3; }
@@ -478,6 +483,7 @@ class Goblin(App):
         self._confirm = None     # (item id, deadline) for delete
         self._search_timer = None
         self._busy = False
+        self._loading = False
 
     # ------------------------------------------------------------- layout
     def compose(self):
@@ -629,8 +635,15 @@ class Goblin(App):
             await self.show_libraries()
 
     async def load_more(self):
-        if not self.path:
+        if not self.path or self._loading or self.offset >= self.total:
             return
+        self._loading = True
+        try:
+            await self._load_page()
+        finally:
+            self._loading = False
+
+    async def _load_page(self):
         parent_id, name, types, _ = self.path[-1]
         items, total = self.api.children(parent_id, types, self.search, start=self.offset)
         lv = self.query_one("#list", ListView)
@@ -655,6 +668,12 @@ class Goblin(App):
     def selected(self):
         node = self.query_one("#list", ListView).highlighted_child
         return node.item if isinstance(node, Row) else None
+
+    async def on_list_view_highlighted(self, event):
+        """Fetch the next page before the cursor reaches the end."""
+        index = event.list_view.index or 0
+        if index >= len(self.items) - 5 and self.offset < self.total and not self._loading:
+            await self.load_more()
 
     async def on_list_view_selected(self, event):
         node = event.item

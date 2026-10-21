@@ -29,6 +29,7 @@ goblin_app = loader.load_module()
 Goblin = goblin_app.Goblin
 Row = goblin_app.Row
 MoreRow = goblin_app.MoreRow
+MoreRow = goblin_app.MoreRow
 load_manifest = goblin_app.Goblin.manifest
 
 
@@ -169,6 +170,31 @@ async def main():
             app.play(row.item)
             entries = playlist(app)
             assert entries[0]["start"] > 30, f"no start position: {entries[0]}"
+
+    # --- Pagination: a big library comes in pages, and no placeholder rows
+    app = Goblin()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await settle(pilot)
+        await click_row(pilot, "Video Musicali")
+        rows = list(app.query(Row))
+        assert len(rows) == 50, f"expected one page of 50, got {len(rows)}"
+        sentinels = list(app.query(MoreRow))
+        assert sentinels, "no 'more' row for the rest of the library"
+        print(f"PASS pagination: {len(rows)} rows + {sentinels[0].remaining} more")
+        # walking to the end pulls the next page in
+        from textual.widgets import ListView
+        lv = app.query_one(ListView)
+        for _ in range(55):
+            await pilot.press("down")
+        for _ in range(20):
+            await pilot.pause(0.2)
+        rows = list(app.query(Row))
+        assert len(rows) > 50, f"next page not loaded ({len(rows)} rows)"
+        print(f"PASS pagination: next page loaded ({len(rows)} rows)")
+        # no "Row" placeholders: the rows render their own text
+        svg = app.export_screenshot()
+        assert ">Row<" not in svg, "rows still render the class name"
+        print("PASS no placeholder rows")
 
     # --- Subtitles: Italian first, English second, else whatever is there
     app = Goblin()

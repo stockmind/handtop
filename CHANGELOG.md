@@ -61,6 +61,16 @@
   entry is now "Goblin - Jellyfin client for the handheld" instead of the
   stale "Goblin Menu".
 
+- Fix: the big libraries no longer flash placeholder rows. A list row was a
+  `ListItem` with a `Label` inside, and until that child mounted Textual
+  renders the widget's class name - so every row showed the literal text
+  "Row". Rows render their own text now (also one widget per row instead of
+  two).
+
+- Change: the client lists 50 rows per page and fetches the next one when
+  the cursor nears the end, instead of pulling 200 rows at once. On the
+  device the 533-item music video library paints in ~1.2 s instead of ~3.2 s.
+
 - Add: subtitles. The client picks the item's subtitle track (Italian first,
   English second, otherwise whatever text track is there) and hands it to mpv
   per file, so every episode of the playlist is subtitled from the start. The
