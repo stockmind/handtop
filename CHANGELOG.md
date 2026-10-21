@@ -84,8 +84,9 @@
   opened.)
 
 - Add: the keypad controls playback. While a video plays the mpv window has
-  the focus, and the D-pad now seeks (left/right) and changes the volume
-  (up/down), `Y` pauses and `X` switches the subtitle track - only `B` was
+  the focus, and the D-pad now seeks (left/right) and changes the speed
+  (up/down, 0.25x per press; `A` puts it back to 1x - the hardware keys do
+  the volume), `Y` pauses and `X` switches the subtitle track - only `B` was
   reachable before.
 
 - Fix: a Jellyfin server that is down now says so ("cannot reach ...") in the
