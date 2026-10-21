@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix: MPEG-2 and VP8 play on the VPU too. mpv only tries hardware for the codecs on its built-in whitelist, so both stayed on the CPU ("codec mpeg2video is not on whitelist") even though Cedrus decodes them; `/etc/mpv/mpv.conf` now sets `hwdec-codecs=h264,hevc,mpeg2video,vp8` (the option replaces the default list, so H.264/HEVC stay listed). Measured 2026-10-21, 120 frames, `vo=gpu --profile=fast`: MPEG-2 1080i 88.8 → 45.6 % CPU, VP8 720p 92.1 → 48.1 %, same fps — battery and headroom, not frame rate.
+
+
 - Fix: clicking a video in Thunar works again. `/usr/local/share/applications/mpv.desktop` was a hide-stub from v0.1.0 with no `Exec=`, and it shadows Debian's real entry of the same id, so every association naming `mpv.desktop` failed with "Desktop file didn't specify Exec field". The stub is gone (it reappeared on the device through an overlay deploy) and the skel `mimeapps.list` now defaults the video types to `play-mpv.desktop` (plain `mpv -- %f`) with `mpv.desktop` as fallback. mpv is visible in the drawer again: its Debian entry is `NoDisplay=false`.
 
 - Change: `tools/deploy.sh` grows `console` and `session` targets, so a device can be brought to the image state without a reflash: the whole overlay (scripts, icons, themes, units, rules, mako/waybar/drawer configs) is copied as root with `/etc/default/goblin-dash` left alone, then Waybar/mako/swaybg/inputd/labwc are restarted. `all` runs inputd + console + session + goblin.
