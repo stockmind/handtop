@@ -67,10 +67,15 @@ async def enter(pilot):
 
 
 def playlist(app):
+    """The exit value is a list of (video url, subtitle url or None) pairs."""
     value = app.return_value
     assert isinstance(value, tuple) and value[0] == "PL", f"not a playlist: {value!r}"
     assert value[1], "empty playlist"
     return value[1]
+
+
+def urls(pairs):
+    return [u for u, _ in pairs]
 
 
 async def main():
@@ -105,10 +110,10 @@ async def main():
         app.query_one(ListView).index = 0
         first = rows[0].item
         await enter(pilot)
-        urls = playlist(app)
-        assert len(urls) == n, f"playlist {len(urls)} != visible {n}"
-        assert first["Id"] in urls[0], "playlist does not start at the cursor"
-        assert "static=false" in urls[0], f"stream is not a transcode: {urls[0]}"
+        pairs = playlist(app)
+        assert len(pairs) == n, f"playlist {len(pairs)} != visible {n}"
+        assert first["Id"] in pairs[0][0], "playlist does not start at the cursor"
+        assert "static=false" in pairs[0][0], f"stream is not a transcode: {pairs[0][0]}"
         print(f"PASS movies: {n}-item playlist, transcode URL from cursor")
 
     # --- resume reopens the same folder and cursor
@@ -136,9 +141,38 @@ async def main():
         episodes = list(app.query(Row))
         assert episodes and episodes[0].item.get("Type") == "Episode"
         await enter(pilot)
-        urls = playlist(app)
-        assert all("static=false" in u for u in urls), urls[0]
+        pairs = playlist(app)
+        assert all("static=false" in u for u, _ in pairs), pairs[0][0]
         print(f"PASS series: {len(episodes)}-episode playlist via season")
+
+    # --- Subtitles: Italian first, English second, else whatever is there
+    app = Goblin()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await settle(pilot)
+        await click_row(pilot, "Serie TV")
+        await enter(pilot)
+        await enter(pilot)
+        await settle(pilot)
+        rows = list(app.query(Row))
+        assert rows, "no episodes"
+        chosen = None
+        for row in rows:
+            track = goblin_app.subtitle_track(row.item)
+            if track:
+                chosen = track
+                break
+        if chosen is None:
+            print("SKIP subtitles (this series has none)")
+        else:
+            language = (chosen.get("Language") or "").lower()
+            print(f"PASS subtitle pick: {language or '?'} "
+                  f"({chosen.get('DisplayTitle')})")
+            pairs = None
+            app.play(rows[0].item)
+            pairs = playlist(app)
+            sub = pairs[0][1]
+            assert sub and "/Subtitles/" in sub, f"no subtitle url: {sub}"
+            print("PASS subtitle url:", sub[:90])
 
     # --- Save targets: a whole series expands to every episode
     app = Goblin()
@@ -149,7 +183,7 @@ async def main():
         targets = app.targets(series)
         episodes = app.api.series_episodes(series["Id"])
         assert len(targets) == len(episodes) > 0, (len(targets), len(episodes))
-        assert all("S" in name for _, name, _, _ in targets)
+        assert all("S" in name for _, name, _, _, _ in targets)
         print(f"PASS series save targets: {len(targets)} episodes")
 
     # --- Save one episode for real, play it locally, delete it with X twice
@@ -171,13 +205,22 @@ async def main():
         size = (OFFLINE / files[0]).stat().st_size
         assert size > 50_000, f"suspiciously small: {size}"
         print(f"PASS save: {files[0]} ({size / 1e6:.1f} MB)")
+        # the subtitle comes along as a sidecar mpv loads by itself
+        track = goblin_app.subtitle_track(item)
+        if track:
+            base = (OFFLINE / files[0]).with_suffix("")
+            sidecars = [p for p in base.parent.glob(base.name + ".*")
+                        if p.suffix in (".srt", ".ass", ".vtt")]
+            assert sidecars, f"no subtitle sidecar next to {files[0]}"
+            print(f"PASS subtitle sidecar: {sidecars[0].name} "
+                  f"({sidecars[0].stat().st_size} bytes)")
 
         await app.reload()
         await settle(pilot)
         again = [r for r in app.query(Row) if r.item.get("Id") == item["Id"]][0]
         assert again, "row vanished after save"
         app.play(item)
-        local = playlist(app)
+        local = urls(playlist(app))
         assert any("/" in u and "http" not in u and u.endswith(files[0]) for u in local), local[0]
         print("PASS play uses the saved copy")
 
@@ -197,6 +240,9 @@ async def main():
         await app.action_delete()            # second X deletes
         await settle(pilot)
         assert not (OFFLINE / files[0]).exists(), "delete left the file behind"
+        base = (OFFLINE / files[0]).with_suffix("")
+        for ext in (".srt", ".ass", ".vtt"):
+            assert not Path(str(base) + ext).exists(), f"delete left {ext} behind"
         print("PASS delete needs two X presses and removes the file")
 
     # --- Escape walks back up; status survives a resize

@@ -158,6 +158,16 @@ browser, shuffle) is gone — the client is the whole UI.
   stride alignment`); anything else renders as a flat blue rectangle. 416-wide
   and odd-aspect transcodes hit it constantly. The copy path shows every
   frame — 0 dropped frames at 720p, where the screen is 640x480 anyway.
+* **Subtitles**: the client asks the server for the item's subtitle streams
+  (`MediaSources` in the list query, no extra request) and enables the best
+  one by default — Italian first, English second, otherwise whatever text
+  track is there (forced-only tracks are skipped when a normal one exists).
+  Jellyfin serves any subtitle stream as srt/ass/vtt on the fly
+  (`/Videos/{id}/{source}/Subtitles/{index}/Stream.srt`), and the client
+  hands it to mpv as a per-file `--sub-file`, so every episode of the
+  playlist gets its own subtitles. The row shows the language that will be
+  used (`ita`, `eng`, …). A saved copy gets the subtitle as a sidecar next
+  to the video (`<name>.srt`), which mpv loads by itself.
 * **Save**: `Y` saves the selected episode, or every episode of a season or
   series, under `~/Offline` (never `/tmp`, which is a 128 MB tmpfs). Series
   are expanded server-side; filenames carry `S01E03`. Files already on the

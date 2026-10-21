@@ -20,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 from rich.text import Text
 from textual.app import App
@@ -59,7 +60,7 @@ CONTAINERS = {
     "music": ["Audio"],
 }
 PAGE = 200
-FIELDS = "Fields=Width,Height,RunTimeTicks,ProductionYear"
+FIELDS = "Fields=Width,Height,RunTimeTicks,ProductionYear,MediaSources"
 
 
 # ---------------------------------------------------------------- device stats
@@ -140,6 +141,52 @@ def safe_name(name):
     return re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip()[:90] or "media"
 
 
+TEXT_SUBS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
+SUB_FORMAT = {"ass": "ass", "ssa": "ass", "webvtt": "vtt", "mov_text": "srt"}
+# Which subtitle to use: Italian first, English second, whatever else is there.
+SUB_PREFERENCE = {"ita": 3, "it": 3, "italian": 3, "eng": 2, "en": 2, "english": 2}
+
+
+def subtitle_track(item):
+    """The subtitle stream to use: Italian, else English, else the first one."""
+    sources = item.get("MediaSources") or []
+    if not sources:
+        return None
+    streams = [s for s in sources[0].get("MediaStreams", [])
+               if s.get("Type") == "Subtitle"
+               and (s.get("Codec") or "").lower() in TEXT_SUBS]
+    if not streams:
+        return None
+
+    def rank(stream):
+        language = (stream.get("Language") or "").lower()
+        title = (stream.get("DisplayTitle") or "").lower()
+        score = SUB_PREFERENCE.get(language, 0)
+        if not score:
+            for word, value in (("italian", 3), ("english", 2)):
+                if word in title:
+                    score = value
+                    break
+        if stream.get("IsForced"):
+            score -= 2
+        return score
+
+    best = max(streams, key=rank)
+    return best if rank(best) > 0 else streams[0]
+
+
+def subtitle_language(track):
+    """Short language code of a subtitle track ('ita', 'eng', ...)."""
+    language = (track.get("Language") or "").lower()
+    if len(language) == 3:
+        return language
+    title = (track.get("DisplayTitle") or "").lower()
+    for word, code in (("italian", "ita"), ("english", "eng")):
+        if word in title:
+            return code
+    return language or "sub"
+
+
 def api_size(item):
     """Bytes of the default media source, when the query asked for it."""
     sources = item.get("MediaSources") or []
@@ -187,6 +234,20 @@ class Jellyfin:
         data = self.get("/Items", params) or {}
         return data.get("Items", []), data.get("TotalRecordCount", 0)
 
+    def subtitle_url(self, item):
+        """URL of the subtitle track to use, or None.
+
+        Jellyfin serves any subtitle stream as a file in any text format
+        (srt/ass/vtt), so mpv can load it as a sidecar track."""
+        track = subtitle_track(item)
+        if track is None:
+            return None
+        source = item["MediaSources"][0]
+        codec = (track.get("Codec") or "").lower()
+        return (f"{self.url}/Videos/{item['Id']}/{source['Id']}"
+                f"/Subtitles/{track['Index']}/Stream.{SUB_FORMAT.get(codec, 'srt')}"
+                f"?api_key={self.key}")
+
     def series_episodes(self, series_id):
         """Every episode of a series in season/episode order (Save series)."""
         out, start = [], 0
@@ -230,6 +291,9 @@ def row_text(item, width, local):
         height = item.get("Height")
         if height and kind != "Audio":
             meta.append(f"{height}p")
+        track = subtitle_track(item)
+        if track:
+            meta.append((track.get("Language") or "?")[:3].lower())
     right = "  ".join(meta)
     mark = "✓" if local else ""
 
@@ -289,7 +353,7 @@ class Goblin(App):
         ("escape", "back", "back"),
         ("space", "save", "save"),
         ("x", "delete", "delete"),
-        ("/", "search", "search"),
+        ("slash", "search", "search"),
         ("q", "quit", "quit"),
     ]
 
@@ -507,14 +571,14 @@ class Goblin(App):
                      if isinstance(node, Row) and node.item.get("Type") in PLAYABLE]
         if item not in playables:
             playables = [item]
-        urls = [self.url(i) for i in playables]
+        media = [self.media(i) for i in playables]
         start = playables.index(item)
         self.play_state = {
             "path": [tuple(e) for e in self.path],
             "index": lv.index or 0,
             "search": self.search,
         }
-        self.exit(("PL", urls[start:] + urls[:start]))
+        self.exit(("PL", media[start:] + media[:start]))
 
     def transcode_url(self, item_id):
         # static=false is what makes Jellyfin transcode. Without it this
@@ -524,17 +588,23 @@ class Goblin(App):
                 f"&maxWidth=1280&maxHeight=720&videoBitrate=4000000&audioBitrate=128000"
                 f"&api_key={self.api.key}")
 
-    def url(self, item):
+    def media(self, item):
+        """(video url, subtitle url or None) for one item."""
         files = self.local_files(item)
         if files:
-            return str(OFFLINE / files[0])
+            local = OFFLINE / files[0]
+            # A saved copy has its subtitle next to it; mpv loads that itself.
+            if any(local.with_suffix(ext).exists()
+                   for ext in (".srt", ".ass", ".vtt")):
+                return str(local), None
+            return str(local), self.api.subtitle_url(item)
         if item.get("Type") == "Audio":
             return (f"{self.api.url}/Audio/{item['Id']}/stream"
-                    f"?static=true&api_key={self.api.key}")
+                    f"?static=true&api_key={self.api.key}"), None
         if self.STREAM_TRANSCODE:
-            return self.transcode_url(item["Id"])
+            return self.transcode_url(item["Id"]), self.api.subtitle_url(item)
         return (f"{self.api.url}/Videos/{item['Id']}/stream"
-                f"?static=true&api_key={self.api.key}")
+                f"?static=true&api_key={self.api.key}"), self.api.subtitle_url(item)
 
     def action_search(self):
         box = self.query_one("#search", Input)
@@ -595,6 +665,12 @@ class Goblin(App):
                 removed += 1
             except OSError:
                 pass
+            base = (OFFLINE / name).with_suffix("")
+            for ext in (".srt", ".ass", ".vtt"):
+                try:
+                    Path(str(base) + ext).unlink()
+                except OSError:
+                    pass
         self.save_manifest(manifest)
         await self.reload()
         self.hint(f"Deleted {removed} file(s)")
@@ -607,7 +683,7 @@ class Goblin(App):
         if not targets:
             self.hint(f"Nothing to save for a {item.get('Type', '?').lower()}")
             return
-        need = sum(size for _, _, size, _ in targets)
+        need = sum(size for _, _, size, _, _ in targets)
         if need and free_bytes() < need * 1.02:
             self.hint(f"Not enough space: {human_bytes(need)} needed, "
                       f"{human_bytes(free_bytes())} free")
@@ -653,7 +729,7 @@ class Goblin(App):
                 name = f"{name} ({ep['ProductionYear']})"
             transcode, ext = self.dl_choice(ep)
             out.append((ep["Id"], f"{safe_name(name)}.{ext}", api_size(ep),
-                        "tc" if transcode else "orig"))
+                        "tc" if transcode else "orig", self.api.subtitle_url(ep)))
         return out
 
     def dl_choice(self, item):
@@ -670,7 +746,7 @@ class Goblin(App):
         manifest = self.manifest()
         done = skipped = 0
         errors = []
-        for index, (item_id, name, _, kind) in enumerate(targets, 1):
+        for index, (item_id, name, _, kind, subtitle) in enumerate(targets, 1):
             self.call_from_thread(self.hint, f"Saving {index}/{len(targets)}: {name[:42]}")
             dest = OFFLINE / name
             if dest.exists() and dest.stat().st_size > 0:
@@ -688,12 +764,23 @@ class Goblin(App):
                 os.replace(part, dest)
                 manifest[item_id] = [name]
                 done += 1
+                if subtitle:
+                    # sidecar with the same base name: mpv loads it by itself
+                    self.fetch(subtitle, dest.with_suffix(
+                        os.path.splitext(urlparse(subtitle).path)[1] or ".srt"))
             except Exception as exc:                 # reported in the UI
                 errors.append(f"{name}: {exc}")
                 part.unlink(missing_ok=True)
-        manifest[top["Id"]] = [name for _, name, _, _ in targets]
+        manifest[top["Id"]] = [name for _, name, _, _, _ in targets]
         self.save_manifest(manifest)
         return done, skipped, errors
+
+    def fetch(self, url, dest):
+        """Save a small file (a subtitle) next to the video."""
+        request = urllib.request.Request(
+            url, headers={"Authorization": f'MediaBrowser Token="{self.api.key}"'})
+        with urllib.request.urlopen(request, timeout=60) as response, open(dest, "wb") as fh:
+            shutil.copyfileobj(response, fh)
 
     # ------------------------------------------------------------- navigation
     async def _resume(self):
@@ -749,10 +836,17 @@ def main():
             # to mpv: B (Esc) quits it and the client comes back.
             # /etc/mpv/input-handtop.conf: mpv's built-in Esc binding is
             # "cycle pause", but B is the "close the video" key here.
-            subprocess.run(["mpv", "--fullscreen", "--force-window=yes",
-                            "--idle=no", "--terminal=no",
-                            "--input-conf=/etc/mpv/input-handtop.conf",
-                            "--hwdec=drm-copy"] + result[1])
+            # Per file: --sub-file before the file applies to that file only,
+            # so every episode in the playlist gets its own subtitles.
+            command = ["mpv", "--fullscreen", "--force-window=yes",
+                       "--idle=no", "--terminal=no",
+                       "--input-conf=/etc/mpv/input-handtop.conf",
+                       "--hwdec=drm-copy"]
+            for url, subtitle in result[1]:
+                if subtitle:
+                    command.append(f"--sub-file={subtitle}")
+                command.append(url)
+            subprocess.run(command)
             resume = app.play_state
             continue
         return 0

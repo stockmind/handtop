@@ -9,6 +9,12 @@
   binding is "cycle pause", so `/etc/mpv/input-handtop.conf` rebinds it to
   `quit` for the client.
 
+- Add: subtitles. The client picks the item's subtitle track (Italian first,
+  English second, otherwise whatever text track is there) and hands it to mpv
+  per file, so every episode of the playlist is subtitled from the start. The
+  row shows the language that will be used. A saved copy keeps its subtitle
+  as a sidecar next to the video, and deleting the copy removes it again.
+
 - Change: `goblin` is now one Jellyfin client and nothing else. The menu,
   dashboard, music and app-runner modes are gone, as are the dead
   `goblin-play` wrapper and `goblin-play-tui.py`; the whole 80x24 terminal
