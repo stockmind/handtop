@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add: `goblin` (the media TUI) resumes where you were after playback. Quitting mpv reopens the same library folder with the cursor on the same row (and the search filter still applied) instead of dropping back to the library list; a fresh start still lands on the menu.
+
+- Add: `SIGRTMIN+1` to the input daemon re-reads a force-gamepad flag (`$XDG_RUNTIME_DIR/rg35xxh-force-gamepad`): present → gamepad mode, absent → desktop mode. Game launchers (e.g. Halo's) use it so the handheld is a controller exactly while the game runs, whichever mode it started in; it shares the External Controller app's `request_gamepad`/`request_desktop` path, so held buttons and keypad mode unwind properly. `SIGUSR2` remains the External Controller app's.
+
+- Change: keypad mode (fork) is folded into upstream v0.2.0's input daemon: it has its own taskbar icon now (generated with `tools/icons`, dark/light/shake), its own `rg35xxh-keys-mode` flag and tooltip, and both external mode requests leave it cleanly (held arrow keys are released, no stray keys in the desktop).
+
 - Add: `goblin-run`, an instant text app launcher built on bemenu (~0.85s to show vs ~5s for the GTK icon drawer, which cold-starts and re-scans every launch). Lists all `.desktop` apps by name; type to filter, Enter launches. Bound to `Super+r`; also added as a desktop entry. bemenu is now in the desktop package list.
 
 - Add: `.desktop` entries for the goblin tools (Dashboard, Play, Menu) so they appear in nwg-drawer under Apps. (The drawer's own 640×480 sizing now comes from upstream v0.2.0: 4 columns, 56px icons, `-spacing 4`.)

@@ -115,6 +115,21 @@ async def main():
         assert movie_id in urls[0], "ordered playlist does not start at the cursor"
         print(f"PASS movie ordered playlist ({len(urls)} files), starts at cursor")
 
+    # --- Resume: relaunching with play_state must reopen the same folder/cursor
+    assert app.play_state and app.play_state["stack"], "no nav state captured on play"
+    app2 = GoblinApp(mode="play", resume=app.play_state)
+    async with app2.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(); await pilot.pause()
+        kinds = {m.item_type for m in app2.query("MediaItem")}
+        assert kinds == {"Movie"}, f"resume landed on {kinds}, expected Movie"
+        from textual.widgets import ListView as _LVr
+        lv2 = app2.query_one(_LVr)
+        assert lv2.index == app.play_state["index"], \
+            f"resume cursor {lv2.index} != saved {app.play_state['index']}"
+        crumb = str(app2.query_one("#breadcrumb").render())
+        assert "Film" in crumb, f"resume breadcrumb wrong: {crumb[:60]}"
+        print("PASS resume reopens the played folder with cursor restored")
+
     # --- TV path (fresh app each leg because selecting exits)
     app = GoblinApp(mode="play")
     async with app.run_test(size=(80, 24)) as pilot:

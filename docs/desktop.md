@@ -162,6 +162,12 @@ and offline copies:
   resets it. The cursor position is remembered per folder and restored on Back.
 * **Pagination**: deliberately minimal — pages of 200 plus a `⬇ …and N more`
   sentinel row that appends the next page. No infinite scroll machinery.
+* **Resume after playback**: the app saves where you were (folder path, cursor
+  row, search term) before handing mpv the playlist; `goblin-play` relaunches it
+  with that snapshot (`GoblinApp(mode="play", resume=…)`), so quitting a video
+  drops you back on the same row of the same library instead of the library
+  list. The snapshot is in memory, so a fresh `goblin` still starts at the menu;
+  only the mpv round-trip inside one run resumes.
 * **Headless test** (no device needed, runs against any Jellyfin):
   `python3 tools/test-goblin-tui.py` with `JELLYFIN_URL`/`JELLYFIN_KEY` env —
   covers library listing, movie/episode/music-video playlists, filter, shuffle,

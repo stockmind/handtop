@@ -281,6 +281,7 @@ class GoblinApp(App):
     TITLE = "Goblin"
     CSS = CSS
     
+    
     BINDINGS = [
         # up/down/enter/space are handled natively by ListView and its focused
         # Button; app-level duplicates here had no matching actions.
@@ -292,9 +293,13 @@ class GoblinApp(App):
         ("x", "remove_item", "Remove"),
     ]
     
-    def __init__(self, mode="menu"):
+    def __init__(self, mode="menu", resume=None):
         super().__init__()
         self.mode = mode
+        # Navigation snapshot from a previous play session (see _capture_nav):
+        # {"stack": [(id,name,types)...], "index": n, "search": q} -> reopen there.
+        self.resume = resume
+        self.play_state = None
         
         # Config was seeded from /etc/default/goblin-dash at import time.
         
@@ -341,10 +346,39 @@ class GoblinApp(App):
     async def on_mount(self):
         if self.mode == "play":
             await self.show_libraries()
+            if self.resume:
+                await self._resume_into(self.resume)
         elif self.mode == "dashboard":
             await self.show_dashboard()
         else:
             await self.show_menu()
+
+    def _capture_nav(self):
+        """Snapshot where we are so a relaunch after mpv can reopen here."""
+        try:
+            lv = self.query_one("#items-view", ListView)
+            index = lv.index or 0
+        except Exception:
+            index = 0
+        self.play_state = {"stack": [tuple(e) for e in self.nav_stack],
+                           "index": index, "search": self.applied_search}
+
+    async def _resume_into(self, st):
+        stack = st.get("stack") or []
+        for i, entry in enumerate(stack):
+            pid, name, types = entry[0], entry[1], entry[2]
+            last = i == len(stack) - 1
+            await self.show_children(pid, name, types,
+                                     search=(st.get("search") or "") if last else "")
+        if not stack:
+            return
+        box = self.query_one("#search-box", Input)
+        if st.get("search"):
+            box.value = st["search"]
+        lv = self.query_one("#items-view", ListView)
+        n = sum(1 for c in lv.children if isinstance(c, (MediaItem, LoadMoreItem)))
+        lv.index = min(st.get("index") or 0, max(n - 1, 0))
+        lv.focus()
     
     async def show_menu(self):
         self.mode = "menu"
@@ -616,6 +650,7 @@ class GoblinApp(App):
         start = items.index(mi) if mi in items else 0
         if not shuffle:
             urls = urls[start:] + urls[:start]
+        self._capture_nav()
         self.exit(("PL", urls, shuffle))
 
     async def action_shuffle_play(self):
@@ -627,6 +662,7 @@ class GoblinApp(App):
             self.notify("Nothing to play", severity="warning")
             return
         urls = [self._resolve_url(m) for m in items]
+        self._capture_nav()
         self.exit(("PL", urls, True))
 
     async def on_list_view_selected(self, event):
@@ -820,16 +856,26 @@ if __name__ == "__main__":
     import asyncio
     
     mode = sys.argv[1] if len(sys.argv) > 1 else "menu"
-    app = GoblinApp(mode)
-    result = app.run()
-    
-    if result == "RUN_APP":
-        subprocess.run(["goblin-run"])
-    elif isinstance(result, tuple) and result and result[0] == "PL":
-        # ("PL", [urls], shuffle) — play the filtered list; mpv --shuffle randomizes it.
-        _, urls, shuffle = result
-        cmd = ["mpv", "--force-window=yes", "--idle=no"] + (["--shuffle"] if shuffle else []) + urls
-        subprocess.run(cmd)
-    elif result:
-        cmd = ["mpv", "--force-window=yes", "--idle=no", result]
-        subprocess.run(cmd)
+    resume = None
+    while True:
+        app = GoblinApp(mode, resume=resume)
+        result = app.run()
+
+        if isinstance(result, tuple) and result and result[0] == "PL":
+            # ("PL", [urls], shuffle) — play the filtered list; mpv --shuffle randomizes it.
+            _, urls, shuffle = result
+            cmd = ["mpv", "--force-window=yes", "--idle=no"] + (["--shuffle"] if shuffle else []) + urls
+            subprocess.run(cmd)
+            # Back where we left off, not back to square one: reopen the media
+            # browser at the same folder/cursor so something else can be queued.
+            mode, resume = "play", app.play_state
+            continue
+        if result == "RUN_APP":
+            subprocess.run(["goblin-run"])
+            mode, resume = "menu", None
+            continue
+        if result:                        # legacy single-url exit
+            subprocess.run(["mpv", "--force-window=yes", "--idle=no", result])
+            mode, resume = "play", app.play_state
+            continue
+        break                             # plain quit
