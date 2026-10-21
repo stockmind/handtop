@@ -4,7 +4,7 @@
 
 - Add: `goblin` (the media TUI) resumes where you were after playback. Quitting mpv reopens the same library folder with the cursor on the same row (and the search filter still applied) instead of dropping back to the library list; a fresh start still lands on the menu.
 
-- Add: `SIGRTMIN+1` to the input daemon re-reads a force-gamepad flag (`$XDG_RUNTIME_DIR/rg35xxh-force-gamepad`): present → gamepad mode, absent → desktop mode. Game launchers (e.g. Halo's) use it so the handheld is a controller exactly while the game runs, whichever mode it started in; it shares the External Controller app's `request_gamepad`/`request_desktop` path, so held buttons and keypad mode unwind properly. `SIGUSR2` remains the External Controller app's.
+- Add: the input daemon follows a force-gamepad flag (`$XDG_RUNTIME_DIR/rg35xxh-force-gamepad`, polled every 200 ms): present → gamepad mode, absent → desktop mode. A game launcher (e.g. Halo's) only creates/removes the file, no signal or pid needed, and the handheld is a controller exactly while the game runs, whichever mode it started in. It shares the External Controller app's `request_gamepad`/`request_desktop` path, so held buttons and keypad mode unwind properly. A manual mode change is respected until the flag changes again.
 
 - Change: keypad mode (fork) is folded into upstream v0.2.0's input daemon: it has its own taskbar icon now (generated with `tools/icons`, dark/light/shake), its own `rg35xxh-keys-mode` flag and tooltip, and both external mode requests leave it cleanly (held arrow keys are released, no stray keys in the desktop).
 

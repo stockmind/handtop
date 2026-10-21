@@ -76,7 +76,7 @@ ICON_FRAMES = [max(-2, min(2, round(SPRING_AMP_PX * _spring(t)))) or (1 if _spri
                for t in _PEAKS]                               # px; frames exist for -2..2
 SPRING_PULSES = [round(SPRING_FLOOR + (1 - SPRING_FLOOR) * math.exp(-SPRING_DECAY * t), 2) for t in _PEAKS]
 INPUTMODE_FRAME = "rg35xxh-inputmode-frame"
-SIG_FORCE_GAMEPAD = signal.SIGRTMIN + 1   # game launchers: re-read the force-gamepad flag
+MODE_SYNC_MS = 200       # poll interval for the force-gamepad flag (game launchers)
 # Hiding the pointer outside desktop mode: labwc has no "hide cursor" action, but it hides the
 # pointer after touch input until the next real pointer motion. So on entering gamepad / BT
 # Controller mode a short-lived virtual touchscreen taps once at the top-left corner, onto our own
@@ -168,6 +168,7 @@ class Daemon:
         self.motor_refresh_timer = None
         self.bt_watch = None
         self.icon_mode = "desktop"  # mode whose icon the taskbar shows (lags during the shake)
+        self.force_pad = None       # last force-gamepad flag state (None: not read yet)
         self.touch = None           # short-lived virtual touchscreen (pointer hiding)
         self.touch_win = None       # its tap target: a tiny transparent overlay window
         self.anim = None
@@ -774,14 +775,13 @@ class Daemon:
 
     # ---------------------------------------------------------------- run
     def _sync_mode(self):
-        """SIGRTMIN+1: follow the force-gamepad flag (written by a game launcher, e.g. Halo's).
-        SIGUSR2 belongs to the External Controller app; this one only reads the flag, so the
-        sender may signal before, after or instead of touching the file."""
-        if os.path.exists(runtime_flag("rg35xxh-force-gamepad")):
-            out = self.core.request_gamepad()
-        else:
-            out = self.core.request_desktop()
-        self._run(out)
+        """Follow the force-gamepad flag (written by a game launcher, e.g. Halo's), polled every
+        200 ms: present -> gamepad mode, absent -> desktop mode. Only a change acts, so keypad
+        mode and manual mode switches are left alone; the launcher needs no signal, no pid."""
+        want = os.path.exists(runtime_flag("rg35xxh-force-gamepad"))
+        if want != self.force_pad:
+            self.force_pad = want
+            self._run(self.core.request_gamepad() if want else self.core.request_desktop())
         return True
 
     def _quit(self):
@@ -976,7 +976,7 @@ class Daemon:
         GLib.timeout_add(10, self._tick)
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, self._recenter)
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR2, self._request_bt)
-        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, SIG_FORCE_GAMEPAD, self._sync_mode)
+        GLib.timeout_add(MODE_SYNC_MS, self._sync_mode)
         self._loop = None
         try:
             if self.osk:

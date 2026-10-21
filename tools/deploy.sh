@@ -26,6 +26,34 @@ if [ "$WHAT" = all ] || [ "$WHAT" = inputd ]; then
     echo "inputd deployed (check: ssh goblin tail -5 .local/state/session/inputd.log)"
 fi
 
+if [ "$WHAT" = all ] || [ "$WHAT" = console ]; then
+    # Everything else the image would install: scripts, icons, themes, units, rules, configs.
+    # /etc/default/goblin-dash is device state (the user's Jellyfin key), the repo only has the
+    # template, so it is never overwritten. Services are on-demand, units only need a reload.
+    stage
+    tar -C overlay --exclude=etc/default/goblin-dash --owner=0 --group=0 --numeric-owner \
+        -czf - . | ssh goblin "cat > $STAGE/overlay.tgz"
+    install_as_root "tar -xzf $STAGE/overlay.tgz -C / && rm -rf $STAGE \
+        && systemctl daemon-reload && udevadm control --reload-rules"
+    echo "overlay deployed (scripts, icons, themes, units, rules)"
+fi
+
+if [ "$WHAT" = all ] || [ "$WHAT" = session ]; then
+    # Running desktop bits pick the new files up: Waybar/mako/swaybg (theme), inputd (respawned
+    # by the session autostart loop in ~2 s), labwc config. rg35xxh-themed execs the component,
+    # so kill the old one first and detach the new one (setsid), or ssh would hang on it.
+    ssh goblin 'bash -c "export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0
+        pkill -f \"rg35xxh_inputd.daemo[n]\" || true
+        pkill -x waybar || true; sleep 0.3
+        setsid rg35xxh-themed waybar >/dev/null 2>&1 &
+        pkill -x mako || true; sleep 0.2
+        setsid rg35xxh-themed mako >/dev/null 2>&1 &
+        pkill -x swaybg || true
+        setsid rg35xxh-themed swaybg >/dev/null 2>&1 &
+        labwc --reconfigure >/dev/null 2>&1 || true"'
+    echo "session restarted (waybar/mako/swaybg/inputd/labwc)"
+fi
+
 if [ "$WHAT" = all ] || [ "$WHAT" = goblin ]; then
     stage
     scp -q overlay/usr/local/bin/goblin goblin:deploy-stage/
