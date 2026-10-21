@@ -214,6 +214,26 @@ browser, shuffle) is gone — the client is the whole UI.
   folder.
 * **Resume**: the client remembers the folder path, cursor row and filter, so
   quitting a video drops you back on the same row of the same library.
+* **A user token for the client**: the config wants a *user* access token,
+  not an API key — an API key creates an anonymous Jellyfin session, and the
+  server refuses to store a playback position for it. A user token can be
+  minted without knowing the password, with the server's QuickConnect flow:
+
+  ```sh
+  K=<api key>                       # any admin key
+  B=http://server:8096
+  UID=$(curl -s -H "Authorization: MediaBrowser Token=\"$K\"" "$B/Users" | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["Id"])')
+  CODE=$(curl -s -X POST -H "Authorization: MediaBrowser Token=\"$K\"" -H 'Content-Type: application/json' -d '{}' "$B/QuickConnect/Initiate" | python3 -c 'import json,sys;print(json.load(sys.stdin)["Code"])')
+  curl -s -X POST -H "Authorization: MediaBrowser Token=\"$K\"" "$B/QuickConnect/Authorize?code=$CODE&userId=$UID"
+  SECRET=$(curl -s -X POST -H "Authorization: MediaBrowser Token=\"$K\"" -H 'Content-Type: application/json' -d '{}' "$B/QuickConnect/Initiate" | python3 -c 'import json,sys;print(json.load(sys.stdin)["Secret"])')
+  curl -s -X POST -H 'Content-Type: application/json' -d "{\"Secret\":\"$SECRET\"}" "$B/Users/AuthenticateWithQuickConnect"
+  ```
+
+  The last call returns `AccessToken` — put it in `/etc/default/goblin-dash`
+  as `DASH_API_KEY`. With it the server logs the session as the user
+  ("User admin started playback"), stores the position, and the web UI shows
+  the handheld's progress. Without a user token the client still tracks the
+  position itself and shows it as `»55:01`.
 * **Headless test** (no device needed, runs against any Jellyfin):
   `python3 tools/test-goblin-tui.py` with `JELLYFIN_URL`/`JELLYFIN_KEY` env —
   covers the library list, the status line, movie and episode playlists (with
