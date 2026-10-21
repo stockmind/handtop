@@ -113,7 +113,9 @@ keeps its subtitle as a sidecar next to the video, which mpv loads by itself.
 episode, a season, a whole series, a movie, a music video; whatever the
 selection covers. The download runs **detached**: the list stays usable
 while it works, the key line shows the progress, and the saved marks appear
-when it is done. Three files are saved at a time, which is 1.65× the
+when it is done. Pressing `Y` again while a download runs **queues** the
+request instead of refusing it — the key line says how many jobs are ahead,
+and they drain one after the other. Three files are saved at a time, which is 1.65× the
 throughput on the handheld's Wi-Fi (a single stream is limited by the
 connection, not by the server). Files that are already there are skipped;
 `X` `X` removes them again — the server's copy is never touched. The free

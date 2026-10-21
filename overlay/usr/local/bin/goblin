@@ -11,6 +11,7 @@ Playing and saving always ask Jellyfin for h264/aac <=720p with
 """
 import json
 import os
+import queue
 import re
 import shutil
 import socket
@@ -493,6 +494,7 @@ class Goblin(App):
         self._search_timer = None
         self._busy = False
         self._loading = False
+        self._jobs = queue.Queue()      # save requests waiting their turn
         self._scroll_timer = None
 
     # ------------------------------------------------------------- layout
@@ -898,15 +900,12 @@ class Goblin(App):
         self.hint(f"Deleted {removed} file(s)")
 
     async def action_save(self):
-        """Start a save and let it run in the background.
+        """Queue a save and let it run in the background.
 
-        The download is a worker thread; the list stays usable while it runs
-        and refreshes itself (with the saved marks) when it is done."""
+        The download is a worker thread; the list stays usable while it
+        works, and a second request is queued rather than refused."""
         item = self.selected()
         if item is None:
-            return
-        if self._busy:
-            self.hint("A download is already running")
             return
         targets = self.targets(item)
         if not targets:
@@ -917,23 +916,55 @@ class Goblin(App):
             self.hint(f"Not enough space: {human_bytes(need)} needed, "
                       f"{human_bytes(free_bytes())} free")
             return
-        self._busy = True
-        self.hint(f"Saving {len(targets)} item(s) in the background…")
-        self.run_worker(lambda: self.download(item, targets),
-                        group="dl", exclusive=True, thread=True)
+        waiting = self._jobs.qsize()
+        self._jobs.put((item, targets))
+        if not self._busy:
+            self._busy = True
+            self.run_worker(self._drain_jobs, group="dl", exclusive=True, thread=True)
+        if waiting:
+            self.hint(f"Queued ({waiting} job(s) ahead): {item.get('Name', '?')[:40]}")
+        else:
+            self.hint(f"Saving {len(targets)} item(s) in the background…")
 
-    def _download_done(self, result):
-        """The download finished - called in the app's thread."""
-        self._busy = False
+    def _drain_jobs(self):
+        """Worker thread: save the queued items one after the other."""
+        while True:
+            try:
+                item, targets = self._jobs.get_nowait()
+            except queue.Empty:
+                break
+            done, skipped, errors = self.download(item, targets)
+            try:
+                self.call_from_thread(self._job_done, (done, skipped, errors))
+            except RuntimeError:
+                pass                     # the app is gone, the files are not
+        try:
+            self.call_from_thread(self._queue_done)
+        except RuntimeError:
+            pass
+
+    def _job_done(self, result):
+        """One queued job finished - called in the app's thread."""
         done, skipped, errors = result
-        self.call_later(self._after_download, done, skipped, errors)
+        self.call_later(self._after_job, done, skipped, errors)
 
-    async def _after_download(self, done, skipped, errors):
+    async def _after_job(self, done, skipped, errors):
         await self.reload()
+        left = self._jobs.qsize()
         if errors:
-            self.hint(f"Saved {done + skipped}, {len(errors)} failed: {errors[0][:45]}")
+            self.hint(f"Saved {done + skipped}, {len(errors)} failed: {errors[0][:40]}")
+        elif left:
+            self.hint(f"Saved {done} new, {skipped} already there · {left} job(s) left")
         else:
             self.hint(f"Saved {done} new, {skipped} already on device")
+
+    def _queue_done(self):
+        """The queue is empty - called in the app's thread."""
+        self._busy = False
+        if not self._jobs.empty():
+            # something was queued while the last job was finishing
+            self._busy = True
+            self.run_worker(self._drain_jobs, group="dl", exclusive=True, thread=True)
 
     def targets(self, item):
         """[(item id, filename, expected bytes, 'tc'|'orig')]."""
@@ -1027,10 +1058,6 @@ class Goblin(App):
                     pass                 # the app is gone, the download is not
         manifest[top["Id"]] = [name for _, name, _, _, _ in targets]
         self.save_manifest(manifest)
-        try:
-            self.call_from_thread(self._download_done, (done, skipped, errors))
-        except RuntimeError:
-            pass                     # the app is gone, the files are not
         return done, skipped, errors
 
     def fetch(self, url, dest):

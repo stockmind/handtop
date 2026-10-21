@@ -244,6 +244,30 @@ async def main():
         print(f"PASS movie subtitle: {with_sub[0]['Name'][:28]} -> "
               f"{targets[0][4][-40:]}")
 
+    # --- A second save is queued, not refused
+    app = Goblin()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await settle(pilot)
+        await click_row(pilot, "Video Musicali")
+        await settle(pilot)
+        rows = list(app.query(Row))
+        first, second = rows[0].item, rows[1].item
+        from textual.widgets import ListView
+        lv = app.query_one(ListView)
+        lv.index = 0
+        await app.action_save()
+        lv.index = 1
+        await app.action_save()          # queued behind the first one
+        for _ in range(240):
+            await pilot.pause(0.5)
+            manifest = load_manifest(app)
+            if manifest.get(first["Id"]) and manifest.get(second["Id"]):
+                break
+        manifest = load_manifest(app)
+        assert manifest.get(first["Id"]), "the first job did not run"
+        assert manifest.get(second["Id"]), "the queued job was dropped"
+        print("PASS queued saves: both jobs finished")
+
     # --- Subtitles: Italian first, English second, else whatever is there
     app = Goblin()
     async with app.run_test(size=(80, 24)) as pilot:

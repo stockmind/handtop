@@ -71,6 +71,10 @@
   the cursor nears the end, instead of pulling 200 rows at once. On the
   device the 533-item music video library paints in ~1.2 s instead of ~3.2 s.
 
+- Change: a second save is queued instead of refused. The downloads wait
+  their turn in a queue (the key line shows how many jobs are ahead), so
+  several items can be marked for saving in a row.
+
 - Fix: a download no longer blocks the client. It runs detached in a worker
   thread: the list stays usable, the key line shows the progress, and the
   saved marks appear when it is done.
