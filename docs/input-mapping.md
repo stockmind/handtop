@@ -25,7 +25,8 @@ Implemented by a custom input daemon that grabs the "H700 Gamepad" exclusively a
 | R3 (right stick click) | Paste | Passed through |
 | Start (tap) | Switch to gamepad mode | Passed through |
 | Start (hold 1 s) | — | Switch to desktop mode |
-| Select | Switch to keypad mode (hold 1 s) | Passed through |
+| Select (hold 1 s) | Switch to keypad mode | Passed through |
+| Select + Start + L1 + R1 | — | BT Controller mode only: back to desktop mode (ends BT Controller mode). Holding Start does not exit there |
 | F (tap) | — | — |
 | F + Vol+/− | Brightness | Brightness |
 | Vol+/− | System volume | System volume |
@@ -49,6 +50,11 @@ Implemented by a custom input daemon that grabs the "H700 Gamepad" exclusively a
 
 ## Implementation
 
+- Signals: `SIGUSR1` re-centres the sticks (Re-center sticks app), `SIGUSR2` switches to an external controller mode (External Controller app, see `bt-controller.md`): gamepad mapping, events sent to `/run/rg35xxh-extpad.sock` (BT or USB service, whichever runs) instead of the local virtual pad; vibration comes back from the USB service. Mode flags `rg35xxh-bt-mode` / `rg35xxh-wired-mode`.
+- Mode-change feedback (`_mode_feedback` in `daemon.py`): the taskbar icon shakes and the motor wobbles with it, both driven by the daemon on one clock from one damped spring, x(t) = A·e^(−3.85 t)·sin(2π·8.33 t). Every 60 ms (half a period) the old mode's icon is shown at the next swing peak (drawing offset 2, −2, 1, −1, 1, −1 px; frame file `$XDG_RUNTIME_DIR/rg35xxh-inputmode-frame` + `SIGRTMIN+8` to Waybar), and the motor gives a 40 ms pulse whose strength follows the spring's decaying envelope (93 % → 57 %), delayed ~70 ms to match Waybar's redraw; then the new icon appears (~360 ms). The motor is an ERM on one PWM line (`rocknix-singleadc-joypad`, 1 kHz; strength = duty cycle; no braking), so the pulses blur into a decaying wobble. Scale or disable with `haptic_strength` (0–1) in `[settings]`. Shutdown and re-centre keep the long 450 ms buzz.
+- Pointer hidden outside desktop mode: labwc has no "hide cursor" action, but it hides the pointer after touch input until the next real pointer motion. On entering gamepad or BT Controller mode the daemon shows a 2x2 px transparent overlay window at the top-left corner, creates a short-lived virtual touchscreen, taps once on that window (so the tap reaches nothing else; tapping the taskbar border opened tray icons), then removes both. The pointer is warped there and hidden, and shows again as soon as it is moved in desktop mode (or by a real mouse).
+- Mode flags in `$XDG_RUNTIME_DIR`: `rg35xxh-gamepad-mode`, `rg35xxh-keys-mode` (keypad mode), `rg35xxh-bt-mode` (read by autosleep and the taskbar input-mode icon: Waybar `image#inputmode` runs `rg35xxh-inputmode`, which prints the icon path from `/usr/local/share/rg35xxh/icons/`; refreshed with `SIGRTMIN+8`).
+
 - Daemon `rg35xxh-inputd` runs inside the labwc session as the desktop user (restarted automatically if it exits); log: `~/.local/state/session/inputd.log`.
 - Access: user is in group `input`; udev rule gives that group `/dev/uinput` and the red status LED.
 - Gamepad mode presents **"Microsoft X-Box 360 pad"** (045e:028e) so SDL/Moonlight use the standard Xbox mapping. Mapping by position: bottom (B) → A, right (A) → B, left (Y) → X, top (X) → Y; L2/R2 → full-scale triggers; D-pad → hat.
@@ -56,7 +62,7 @@ Implemented by a custom input daemon that grabs the "H700 Gamepad" exclusively a
 - Power held 1–3 s and released: cancelled (no menu, no shutdown).
 - Copy/paste: Ctrl+Shift+C/V when the active window is a terminal (foot, xterm, …), else Ctrl+C/V.
 - On-screen keyboard: US layout, 5 rows (`~ 1–0 ⌫ / Tab q–p - / a–l ; ' \ / ⇧ z–m , . / ↑ / Ctrl Alt Space = [ ] ← ↓ → Hide`); can also be clicked with the pointer. Physical L1/R1/R2 still give Esc/Enter/Backspace while it is open.
-- Config (`input.conf`): `[settings]` speeds, dead zone, scroll curve (`scroll_log_k`), Vol repeat timing, hold times; `[desktop]` button actions (`none, click_left/right/middle, key:KEY_*, copy, paste, osk_toggle, mode_gamepad, power_menu`); `[hardware]` axis inversion. The boot-partition copy overrides `/etc/rg35xxh/input.conf` completely, so it must be refreshed when defaults change.
+- Config (`input.conf`): `[settings]` speeds, dead zone, scroll curve (`scroll_log_k`), Vol repeat timing, hold times; `[desktop]` button actions (`none, click_left/right/middle, key:KEY_*, copy, paste, osk_toggle, mode_gamepad, mode_keys, power_menu`); `[hardware]` axis inversion. The boot-partition copy overrides `/etc/rg35xxh/input.conf` completely, so it must be refreshed when defaults change.
 
 ## Stick drift and re-centring (2026-10-16)
 

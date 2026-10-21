@@ -7,7 +7,7 @@
   </core>
 
   <theme>
-    <name></name>
+    <name>Handtop</name>
     <cornerRadius>4</cornerRadius>
     <font place="ActiveWindow"><name>Noto Sans</name><size>9</size><weight>bold</weight></font>
     <font place="InactiveWindow"><name>Noto Sans</name><size>9</size></font>
@@ -40,8 +40,6 @@
     <keybind key="XF86MonBrightnessUp"><action name="Execute" command="brightnessctl set 10%+" /></keybind>
     <keybind key="XF86MonBrightnessDown"><action name="Execute" command="brightnessctl set 10%-" /></keybind>
     <keybind key="W-r"><action name="Execute" command="goblin-run" /></keybind>
-    <keybind key="W-m"><action name="Execute" command="goblin-tui menu" /></keybind>
-    <keybind key="W-p"><action name="Execute" command="goblin-tui play" /></keybind>
   </keyboard>
 
   <mouse>

@@ -4,7 +4,7 @@
 
 - Add: `goblin-run`, an instant text app launcher built on bemenu (~0.85s to show vs ~5s for the GTK icon drawer, which cold-starts and re-scans every launch). Lists all `.desktop` apps by name; type to filter, Enter launches. Bound to `Super+r`; also added as a desktop entry. bemenu is now in the desktop package list.
 
-- Add: `.desktop` entries for the goblin tools (Dashboard, Play, Menu) so they appear in nwg-drawer under Apps. Drawer itself now uses 5 columns with 48px icons and tight margins to fit 640×480 without horizontal scrollbars.
+- Add: `.desktop` entries for the goblin tools (Dashboard, Play, Menu) so they appear in nwg-drawer under Apps. (The drawer's own 640×480 sizing now comes from upstream v0.2.0: 4 columns, 56px icons, `-spacing 4`.)
 
 - Fix: `goblin-dash` now exports the sourced environment so Jellyfin now-playing actually appears when `/etc/default/goblin-dash` is set.
 
@@ -35,6 +35,24 @@
 - Fix: the desktop user could not open the dma-buf heaps (`/dev/dma_heap/*` are `root:root 0600`), so ffmpeg logged `Unable to open any dma_heap device` and every dmabuf-based hardware path was unavailable. New udev rule `72-rg35xxh-dma-heap.rules` grants group `video` access.
 - Docs: rewrote `docs/video-decode.md` with the measurements above; `tools/check-video-decode.sh` now requires a real decode (Cedrus VPU engaged, 0 decode errors, exit 0) instead of a capability listing — that listing is what let the earlier broken build through. The same tool now also asserts the zero-copy path (`mpv --hwdec=auto-safe` selecting the `drm` hwdec and using the drmprime EGL dmabuf interop), and `docs/desktop.md` no longer calls zero-copy a gap.
 - Add: `build/patches/mpv-v4l2request-drmprime.patch` + `tools/build-mpv-v4l2request.sh` (route B): ~20 lines in mpv's `vd_lavc.c` that make the original `--hwdec=v4l2request` zero-copy by creating the device that decoder wants when the VO only offers a differently typed interop. Kept as the alternative to the shipped FFmpeg-side route; the image build does not rebuild mpv. The tool builds the package in a throwaway clone of the rootfs so `apt-get build-dep mpv` cannot overwrite the patched FFmpeg libraries.
+
+## v0.2.0
+
+- **BT Controller mode** (requested on Reddit by boldiatti): Apps → External Controller turns the handheld into a Bluetooth LE gamepad ("Handtop Gamepad") for a PC or phone; paired devices reconnect automatically; Select + Start + L1 + R1 stops it (Moonlight's quit combo; a long Start press goes to the other device). Classic-Bluetooth accessories on the handheld pause while it is on. Tested with Windows 11. See `docs/bt-controller.md`.
+- **Status screen** while BT Controller mode is on: connection state and the PC's name, a live pixel-art drawing of the handheld's controls, reports/s and signal strength, battery, how to stop.
+- **Taskbar battery icon**: 20x11 pixel art with 5 bars (one per 20 %), red bars at 0-20 %, and a charging animation with a lightning bolt (the "+" after the percentage is gone). Also on the BT Controller status screen. Light variants follow the theme.
+- **Light theme** (Apps → Theme, or `rg35xxh-theme dark|light`): dark (default) or light, switched live: taskbar and its icons, wallpaper colour, app drawer (with light app icons), power menu, notifications, window title bars and GTK apps. Terminal, volume/brightness bars, on-screen keyboard and the External Controller status screen stay dark for now. New `rg35xxh-themed` starts Waybar/mako/swaybg in the current theme; window decorations moved to a labwc theme, `Handtop` (`/usr/share/themes/Handtop[-Light]`).
+- App drawer: the 4th column no longer runs past the right edge of the screen.
+- The mouse pointer is hidden in gamepad and BT Controller modes (it comes back when moved in desktop mode).
+- **Wired Controller mode** (Apps → External Controller → USB cable): the handheld becomes a wired Xbox 360 controller for a PC (XInput, ~1000 reports/s, game vibration on the handheld's motor, charges meanwhile). Right USB-C port (OTG2/DC) only; one external connection at a time. New kernel module `usb_f_fs_xinput.ko` (build/06c-ffs-xinput.sh).
+- External Controller app (was BT Controller): choose Bluetooth or USB cable. New pixel-art app icon; the Theme app's icon is redrawn the same way (both exactly 56 px, the drawer's icon size).
+- **Vibration safety:** the handheld's motor driver could freeze the whole system when given never-ending vibration effects (e.g. "infinite" on a web controller tester), forcing a 10 s power-off. The input daemon now only plays timed effects (0.5 s, refreshed every 0.4 s while still wanted), rounds strength to 8 levels and updates the motor at most 10 times a second; game vibration in gamepad mode goes through the same path. Stress-tested at 100 requests/s.
+- External Controller app: if the chosen service fails to start, it says so instead of switching modes and opening the status screen.
+- BT Controller mode is its own input mode: the controls go only to the other device; apps on the handheld don't see a controller (unlike gamepad mode).
+- **Taskbar input-mode icon** (pixel art, 23 px): desktop (mouse), gamepad, BT Controller and Wired Controller (an RG35XX H drawing with coloured X/A/B/Y, plus BT waves or a USB plug). External modes have rainbow-striped glass. On a mode change the old icon shakes like a damped spring before the new one appears, and the handheld vibrates in step with it (`haptic_strength` in the input config; 0 turns the vibration off). Light-taskbar variants: put `light` in `~/.config/rg35xxh/inputmode-icons`. Taskbar height 30 → 32 px so the icon sits exactly centred.
+- Notifications now appear above the power menu and fullscreen apps. Fix: mako never read `/etc/xdg/mako/config` (it was started without `-c`), so Handtop's notification style was not applied either; it is now (a `~/.config/mako/config` still takes precedence).
+- Input daemon: `SIGUSR2` switches to BT Controller mode (used by the External Controller app).
+- Adds `python3-dbus`.
 
 ## v0.1.3
 
