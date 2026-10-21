@@ -75,6 +75,14 @@
   their turn in a queue (the key line shows how many jobs are ahead), so
   several items can be marked for saving in a row.
 
+- Fix: a saved position is actually resumed. Three things were in the way: a
+  transcode cannot be seeked into (the server produces one growing file), so
+  a resumed item is now streamed from the original with the bitrate capped;
+  the client kept its own book of what it watched, because the server does not
+  always keep the position a client reports; and the `»27:31` marker was
+  pushed off the screen, because the row width counted characters while a CJK
+  title takes two cells each.
+
 - Fix: a download no longer blocks the client. It runs detached in a worker
   thread: the list stays usable, the key line shows the progress, and the
   saved marks appear when it is done.

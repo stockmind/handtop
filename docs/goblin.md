@@ -102,6 +102,13 @@ as `»27:31`; playing starts there. Coming back from a video (or from a
 download) restores the folder, the pages that were loaded and the row under
 the cursor.
 
+Two things make it work: the client keeps its own book of what it watched
+(`~/.local/state/goblin/positions.json`), because the server does not always
+keep the position a client reports; and a resumed item is streamed from the
+**original** file (bitrate capped) instead of the transcode — a transcode is
+one growing file that cannot be seeked into, so the video would start at the
+beginning no matter what position was asked for.
+
 **Subtitles.** The language comes from **your Jellyfin profile**, not from the
 client: *Settings → Playback → Subtitles* in the web UI sets the preferred
 languages and the mode, and the client follows them (preferred language →

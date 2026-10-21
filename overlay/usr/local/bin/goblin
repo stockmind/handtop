@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlparse
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual.app import App
 from textual.containers import Horizontal
@@ -79,6 +80,11 @@ AUDIO_BITRATE = int(os.environ.get("GOBLIN_AUDIO_BITRATE", "96000"))
 # GOBLIN_SUB_LANGUAGES=ita,eng
 SUB_LANGUAGES = [x.strip() for x in
                  os.environ.get("GOBLIN_SUB_LANGUAGES", "").split(",") if x.strip()]
+# The bitrate cap for a direct-play stream: a resumed item is played from the
+# original file, because a transcode cannot be seeked into.
+DIRECT_BITRATE = int(os.environ.get("GOBLIN_DIRECT_BITRATE", "8000000"))
+# The smallest position worth resuming from (seconds).
+RESUME_MINIMUM = float(os.environ.get("GOBLIN_RESUME_MINIMUM", "10"))
 # How many files to save at once. The server transcodes much faster than the
 # Wi-Fi can carry, so a few in parallel make a series land in a fraction of
 # the time.
@@ -159,6 +165,31 @@ def human_time(ticks):
         return ""
     hours, mins = divmod(int(ticks / 600_000_000), 60)
     return f"{hours}h{mins:02d}" if hours else f"{mins}m"
+
+
+def state_path():
+    """Where the client keeps its own record of what was watched."""
+    directory = os.environ.get("GOBLIN_STATE_DIR",
+                               str(Path.home() / ".local" / "state" / "goblin"))
+    return Path(directory) / "positions.json"
+
+
+def load_positions():
+    """{item id: seconds} of the positions the client saw."""
+    try:
+        return {k: float(v) for k, v in json.loads(state_path().read_text()).items()}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def save_positions(positions):
+    """Keep the 200 most recent positions (the newest first)."""
+    try:
+        path = state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(positions))
+    except (OSError, TypeError):
+        pass
 
 
 def safe_name(name):
@@ -368,6 +399,18 @@ class Jellyfin:
 
 # ---------------------------------------------------------------- widgets
 
+def fit(text, width):
+    """Cut text to a number of terminal cells (CJK characters take two)."""
+    if cell_len(text) <= width:
+        return text
+    out = ""
+    for char in text:
+        if cell_len(out + char) > width - 1:
+            break
+        out += char
+    return out + "…"
+
+
 def row_text(item, width, local, resume=0, prefs=None):
     """One compact row: marker, code, name, right-aligned meta, saved mark."""
     kind = item.get("Type", "")
@@ -394,16 +437,18 @@ def row_text(item, width, local, resume=0, prefs=None):
         height = item.get("Height")
         if height and kind != "Audio":
             meta.append(f"{height}p")
-        track = subtitle_track(item)
+        track = subtitle_track(item, prefs)
         if track:
             meta.append((track.get("Language") or "?")[:3].lower())
     right = "  ".join(meta)
     mark = "✓" if local else ""
     resume_mark = f"»{int(resume // 60)}:{int(resume % 60):02d}" if resume else ""
 
-    name_w = max(12, width - 3 - len(code) - len(right) - len(mark) - len(resume_mark) - 4)
-    if len(name) > name_w:
-        name = name[: name_w - 1] + "…"
+    # the cells, not the characters: a CJK title takes two cells each and
+    # would push the resume marker off the screen
+    name_w = max(12, width - 3 - cell_len(code) - cell_len(right)
+                 - cell_len(mark) - cell_len(resume_mark) - 4)
+    name = fit(name, name_w)
 
     text = Text()
     text.append(marker + " ", style="#7ee787" if kind in PLAYABLE else "#7aa2f7")
@@ -507,12 +552,16 @@ class Goblin(App):
         yield Static(self.HINT, id="hint")
 
     async def on_mount(self):
+        book = load_positions()
         self.set_interval(5.0, self.tick)
         self.tick()
-        # "continue watching": what the server stored, plus what we tracked
-        # ourselves (the server cannot store it for an API-key session, so
-        # our own position is the fresher one and wins).
-        self.resume_at = {**self.api.resume_positions(), **self.resume_at}
+        # "continue watching": what the server stored, plus what this client
+        # saw itself. The server does not always keep the position we report
+        # (an API-key session is anonymous), so the local book is the one
+        # that counts - and it is the fresher of the two.
+        self.resume_at = {**self.api.resume_positions(),
+                           **{k: int(v * 10_000_000) for k, v in book.items()},
+                           **self.resume_at}
         self.prefs = self.api.preferences()      # subtitle mode and languages
         await self.show_libraries()
         if self.resume:
@@ -572,7 +621,9 @@ class Goblin(App):
 
     async def render_rows(self, restore=True):
         lv = self.query_one("#list", ListView)
-        width = max(30, self.size.width - 2)
+        # the list keeps room for its scrollbar, so the rightmost mark
+        # (the resume point) is not hidden under it
+        width = max(30, self.size.width - 4)
         manifest = self.manifest()
         rows = []
         for item in self.items:
@@ -691,7 +742,7 @@ class Goblin(App):
         for node in list(lv.children):
             if isinstance(node, MoreRow):
                 await node.remove()
-        width = max(30, self.size.width - 2)
+        width = max(30, self.size.width - 4)
         manifest = self.manifest()
         new = []
         for item in items:
@@ -736,7 +787,8 @@ class Goblin(App):
             playables = [item]
         entries = []
         for entry in playables:
-            url, subtitle = self.media(entry)
+            start = self.start_position(entry, exact=entry is item)
+            url, subtitle = self.media(entry, start)
             source = ((entry.get("MediaSources") or [{}])[0]).get("Id", "")
             entries.append({
                 "id": entry.get("Id", ""),
@@ -744,8 +796,9 @@ class Goblin(App):
                 "name": entry.get("Name", ""),
                 "url": url,
                 "sub": subtitle,
-                "start": self.start_position(entry),
-                "width": self.output_width(entry, self.STREAM_TRANSCODE),
+                "start": start,
+                # a direct play is the source width, a transcode the cap
+                "width": self.output_width(entry, transcoded=not start),
             })
         start = playables.index(item)
         self.play_state = {
@@ -771,11 +824,25 @@ class Goblin(App):
         runtime = (item.get("RunTimeTicks") or 0) / 10_000_000
         if runtime and seconds > runtime * 0.95:
             return 0                      # watched to the end: start over
-        return seconds if seconds > 30 else 0
+        # The server stores every position, so a short one is a real position
+        # too: ignoring it would make the client disagree with the web UI.
+        return seconds if seconds > RESUME_MINIMUM else 0
 
-    def start_position(self, item):
-        """Where playback starts: the stored position, or after the intro."""
+    def start_position(self, item, exact=False):
+        """Where playback starts: the stored position, or after the intro.
+
+        The resume list is capped, so for the item that is actually played the
+        server is asked directly if the list did not have it."""
         seconds = self.resume_seconds(item)
+        if not seconds and exact:
+            seconds = self.api.position(item.get("Id", ""))
+            runtime = (item.get("RunTimeTicks") or 0) / 10_000_000
+            if runtime and seconds > runtime * 0.95:
+                seconds = 0
+            if seconds > RESUME_MINIMUM:
+                self.resume_at[item["Id"]] = int(seconds * 10_000_000)
+            else:
+                seconds = 0
         if seconds:
             return seconds
         if not SKIP_INTRO:
@@ -812,8 +879,13 @@ class Goblin(App):
             return MAX_WIDTH                     # the width binds: exactly the cap
         return 0                                 # the height binds: unknown
 
-    def media(self, item):
-        """(video url, subtitle url or None) for one item."""
+    def media(self, item, start=0):
+        """(video url, subtitle url or None) for one item.
+
+        A transcode cannot be seeked into - the server produces one growing
+        file - so an item with a saved position is played from the original
+        (bitrate capped), which mpv can seek in. Everything else is
+        transcoded down to the panel."""
         files = self.local_files(item)
         if files:
             local = OFFLINE / files[0]
@@ -825,10 +897,15 @@ class Goblin(App):
         if item.get("Type") == "Audio":
             return (f"{self.api.url}/Audio/{item['Id']}/stream"
                     f"?static=true&api_key={self.api.key}"), None
+        if start:
+            return (f"{self.api.url}/Videos/{item['Id']}/stream.mp4?static=true"
+                    f"&MaxStreamingBitrate={DIRECT_BITRATE}"
+                    f"&api_key={self.api.key}"), self.api.subtitle_url(item, self.prefs)
         if self.STREAM_TRANSCODE:
             return self.transcode_url(item["Id"]), self.api.subtitle_url(item, self.prefs)
-        return (f"{self.api.url}/Videos/{item['Id']}/stream"
-                f"?static=true&api_key={self.api.key}"), self.api.subtitle_url(item, self.prefs)
+        return (f"{self.api.url}/Videos/{item['Id']}/stream.mp4?static=true"
+                f"&MaxStreamingBitrate={DIRECT_BITRATE}"
+                f"&api_key={self.api.key}"), self.api.subtitle_url(item, self.prefs)
 
     def action_search(self):
         box = self.query_one("#search", Input)
@@ -1337,6 +1414,10 @@ def main():
             played = player.run()
             if played:
                 positions[played["id"]] = int(player.position * 10_000_000)
+                # the device's own book: the server may not keep it
+                book = {k: v / 10_000_000 for k, v in positions.items()}
+                save_positions(dict(sorted(book.items(),
+                                           key=lambda kv: -kv[1])[:200]))
             resume = app.play_state
             continue
         return 0

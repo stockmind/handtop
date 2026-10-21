@@ -114,9 +114,14 @@ async def main():
         entries = playlist(app)
         assert len(entries) == n, f"playlist {len(entries)} != visible {n}"
         assert first["Id"] == entries[0]["id"], "playlist does not start at the cursor"
-        assert "static=false" in entries[0]["url"], f"no transcode: {entries[0]['url']}"
-        # the transcode is capped to the panel
-        assert "maxWidth=640" in entries[0]["url"], entries[0]["url"]
+        # no saved position: a transcode, capped to the panel
+        if not entries[0]["start"]:
+            assert "static=false" in entries[0]["url"], entries[0]["url"]
+            assert "maxWidth=640" in entries[0]["url"], entries[0]["url"]
+        else:
+            # a saved position: the original file, which mpv can seek into
+            assert "static=true" in entries[0]["url"], entries[0]["url"]
+            assert entries[0]["start"] > 0, entries[0]
         # the user's Jellyfin preferences decide the subtitle
         assert app.prefs, "no preferences read from the Jellyfin profile"
         print(f"PASS preferences: mode={app.prefs['mode']!r} "
@@ -229,6 +234,21 @@ async def main():
             f"resume lost the cursor: {lv.index} != {app.play_state['index']}"
         assert len(app2.query(Row)) > lv.index, "resume did not pull the pages back"
         print(f"PASS resume keeps row {lv.index} with {len(app2.query(Row))} rows")
+
+    # --- A saved position is played from the original (a transcode cannot be
+    #     seeked into), and playback starts there
+    app = Goblin()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await settle(pilot)
+        await click_row(pilot, "Film")
+        await settle(pilot)
+        movie = app.query(Row).first().item
+        app.resume_at[movie["Id"]] = 900_000_000          # 90 s
+        app.play(movie)
+        entries = playlist(app)
+        assert entries[0]["start"] == 90, entries[0]
+        assert "static=true" in entries[0]["url"], entries[0]["url"]
+        print("PASS a saved position seeks into the original file")
 
     # --- Subtitles: every kind of media gets one, not just series
     app = Goblin()
