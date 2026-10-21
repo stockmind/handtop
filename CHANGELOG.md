@@ -35,6 +35,13 @@
   exactly what the screen can show. `GOBLIN_MAX_WIDTH`/`GOBLIN_MAX_HEIGHT`
   raise it for the HDMI monitor.
 
+- Fix: long lists no longer stutter. A download that finished used to rebuild
+  the whole list (every row remounted, the scroll thrown away) while the user
+  was scrolling in it; it now only repaints the rows it changed. A page that
+  arrives keeps the view where it was, the page size is 25 rows (mounting a
+  row costs the A53 ~17 ms) and the next page is fetched while the cursor is
+  still ten rows away.
+
 - Change: the subtitle language is no longer hardcoded. The client reads the
   user's Jellyfin preferences (`SubtitleLanguagePreference`, `SubtitleMode`)
   and picks a track accordingly: a preferred language, else the media's
