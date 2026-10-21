@@ -149,7 +149,7 @@ Earlier rounds showed Firefox's rendering path (GPU/CPU WebRender, Wayland/X11),
 > version.
 
 `goblin` is the one media app on the handheld: a single Jellyfin client,
-keypad-first, no menu/dashboard/launcher modes. `Super+p` (or `Super+m`)
+keypad-first, no menu/dashboard/launcher modes. `Super+p`
 starts it in a terminal. Everything the old suite did (menu, dashboard, play
 browser, shuffle) is gone — the client is the whole UI.
 

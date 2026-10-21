@@ -29,7 +29,6 @@
     <keybind key="W-Return"><action name="Execute" command="foot" /></keybind>
     <keybind key="W-e"><action name="Execute" command="thunar" /></keybind>
     <keybind key="W-x"><action name="Execute" command="rg35xxh-power-menu" /></keybind>
-    <keybind key="W-m"><action name="Execute" command="sh -c 'foot -e goblin'" /></keybind>
     <keybind key="W-p"><action name="Execute" command="sh -c 'foot -e goblin'" /></keybind>
     <keybind key="A-F4"><action name="Close" /></keybind>
     <keybind key="W-Up"><action name="ToggleMaximize" /></keybind>
@@ -39,7 +38,6 @@
     <keybind key="XF86AudioMute"><action name="Execute" command="wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle" /></keybind>
     <keybind key="XF86MonBrightnessUp"><action name="Execute" command="brightnessctl set 10%+" /></keybind>
     <keybind key="XF86MonBrightnessDown"><action name="Execute" command="brightnessctl set 10%-" /></keybind>
-    <keybind key="W-r"><action name="Execute" command="goblin-run" /></keybind>
   </keyboard>
 
   <mouse>

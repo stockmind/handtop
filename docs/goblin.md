@@ -5,7 +5,7 @@ Jellyfin client in a terminal. It browses the library, plays what you pick
 fullscreen, keeps your place, follows the subtitle preferences of your
 Jellyfin account, and saves episodes to the SD card.
 
-Start it with `Super+p` (or `Super+m`) — it opens in a terminal window.
+Start it with `Super+p` — it opens in a terminal window.
 
 ![The client on the handheld](img/device-home.png)
 

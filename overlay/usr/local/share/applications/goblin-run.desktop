@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Goblin Run
-Comment=Fast text app launcher
-Exec=goblin-run
-Icon=system-search
-Terminal=false
-Categories=Xfce;Utility;
-Keywords=launcher;run;search;apps;

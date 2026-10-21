@@ -92,6 +92,10 @@
 - Fix: a Jellyfin server that is down now says so ("cannot reach ...") in the
   key line instead of showing an empty list.
 
+- Removed: `goblin-run`, the quick text launcher for applications. The
+  icon drawer (nwg-drawer) is the way in; the `Super+r` binding, the script,
+  its drawer entry and the `bemenu` package are gone.
+
 - Add: subtitles. The client picks the item's subtitle track (Italian first,
   English second, otherwise whatever text track is there) and hands it to mpv
   per file, so every episode of the playlist is subtitled from the start. The
