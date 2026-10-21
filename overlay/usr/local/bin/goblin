@@ -1165,15 +1165,29 @@ class Player:
             time.sleep(0.3)
         return False
 
-    def width_ok(self):
-        """Is the width the VPU will really produce 64-pixel aligned?
+    def check_width(self, process):
+        """Keep the blue frames out.
 
-        The prediction can be wrong (the server rounds widths), and a frame
-        panfrost cannot import shows up as a blue rectangle, so the first
-        frame is checked and the copy path takes over if it has to."""
+        A frame panfrost cannot import (a stride that is not 64-pixel
+        aligned) shows as a blue rectangle. The width is predicted when the
+        playlist is built, but the server rounds widths, so the width that is
+        really playing is checked here - and if it does not fit, the video
+        restarts on the copy path, which renders every width."""
+        if not self.entries:
+            return process
+        entry = self.entries[self.index]
+        if self.decode_path(entry.get("width")) != "drm":
+            return process                      # already the copy path
         params = self.ask("video-params")
-        width = (params or {}).get("w") if isinstance(params, dict) else None
-        return not width or width % 64 == 0
+        width = params.get("w") if isinstance(params, dict) else None
+        if not width or width % 64 == 0:
+            return process
+        process.terminate()
+        process.wait()
+        self.fallback = True
+        self.entries = self.entries[self.index:]  # carry on where we are
+        self.entries[0] = {**self.entries[0], "start": self.position}
+        return subprocess.Popen(self.command())
 
     def run(self):
         """Run mpv until it exits, reporting the position on the way."""
@@ -1185,14 +1199,8 @@ class Player:
         self.connect()
         if self.zero_copy():
             self.wait_for_params()
-            if not self.width_ok():
-                # the prediction was wrong: restart on the copy path, which
-                # renders every width (the zero-copy one shows blue)
-                process.terminate()
-                process.wait()
-                self.fallback = True
-                process = subprocess.Popen(self.command())
-                self.connect()
+            process = self.check_width(process)
+            self.connect()
         if self.entries:
             self.client.post("/Sessions/Playing", {
                 "ItemId": self.entries[0]["id"],
@@ -1207,7 +1215,11 @@ class Player:
             index = self.ask("playlist-pos")
             position = self.ask("time-pos")
             if isinstance(index, int) and index < len(self.entries):
-                self.index = index
+                if index != self.index:
+                    self.index = index
+                    # a new file starts: its width has to fit as well
+                    process = self.check_width(process)
+                    self.connect()
             if isinstance(position, (int, float)):
                 self.position = float(position)
                 item = self.entries[self.index]

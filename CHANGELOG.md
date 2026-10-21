@@ -76,10 +76,12 @@
   and the rebuilt list is scrolled to it (a resize re-cuts the rows instead
   of rebuilding the list, which threw both the cursor and the scroll away).
 
-- Fix: the blue frame cannot last. The client checks the width of the first
-  decoded frame over mpv's IPC socket and restarts the video on the copy
+- Fix: the blue frame cannot last. The client checks the width of every
+  file that plays over mpv's IPC socket and restarts the video on the copy
   path if the width is not 64-pixel aligned after all - the case where
-  panfrost cannot import the frame.
+  panfrost cannot import the frame. (The width prediction was wrong for
+  exactly the square and portrait music videos, the ones most likely to be
+  opened.)
 
 - Add: subtitles. The client picks the item's subtitle track (Italian first,
   English second, otherwise whatever text track is there) and hands it to mpv
