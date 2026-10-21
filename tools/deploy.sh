@@ -33,8 +33,15 @@ if [ "$WHAT" = all ] || [ "$WHAT" = console ]; then
     stage
     tar -C overlay --exclude=etc/default/goblin-dash --owner=0 --group=0 --numeric-owner \
         -czf - . | ssh goblin "cat > $STAGE/overlay.tgz"
+    # The desktop entries in the overlay are only registered with GIO when their
+    # directory has a mimeinfo.cache; without it a fresh home has no handler for
+    # a video file (Thunar runs a literal "%U"). Same two commands the image
+    # build runs (build/05-configure-base.sh).
     install_as_root "tar -xzf $STAGE/overlay.tgz -C / && rm -rf $STAGE \
-        && systemctl daemon-reload && udevadm control --reload-rules"
+        && systemctl daemon-reload && udevadm control --reload-rules \
+        && update-mime-database /usr/share/mime \
+        && update-desktop-database /usr/local/share/applications \
+        && update-desktop-database /usr/share/applications"
     echo "overlay deployed (scripts, icons, themes, units, rules)"
 fi
 

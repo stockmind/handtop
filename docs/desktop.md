@@ -20,7 +20,7 @@ Sway (ROCKNIX's default) is a keyboard-driven tiling WM — unsuitable for gamep
 ## Hardware acceleration
 
 - OpenGL/GLES via Panfrost (Mesa) for the compositor and GL apps (browser rendering, Moonlight).
-- **Hardware video decode for Moonlight** (H.264/HEVC, up to 1080p60) via the Cedrus V4L2 stateless decoder — see `video-decode.md`. The system FFmpeg and mpv use the same VPU through the same patchset and have rendered **zero-copy** since 2026-10-17 (`hwdec=auto-safe` selects the `drm` registration of those decoders, whose dmabufs mpv's DRM PRIME interop takes directly): 1080p HEVC and H.264 play with 0 dropped frames over 10 s, 540p with room to spare. Browsers never reach the VPU: Chromium's VA-API route was built and measured (it decodes on Cedrus, then renders green frames), so browser video stays software-decoded — `video-decode.md`.
+- **Hardware video decode for Moonlight** (H.264/HEVC, up to 1080p60) via the Cedrus V4L2 stateless decoder — see `video-decode.md`. Other players (mpv, browsers) still decode on the CPU.
 
 ## Shell components: Waybar + nwg-drawer + wlogout
 
@@ -35,7 +35,7 @@ Chosen over LXQt-on-labwc (heavier) and sfwbar (smaller community) for low RAM a
 
 ### Session details (implemented)
 
-- Boot → getty auto-login on tty1 → labwc. Logging out restarts the session; after 3 failed starts a shell is left on tty1. The launcher is `/etc/profile.d/zz-rg35xxh-session.sh`, sourced from `/etc/profile`. Debian's zsh does not read `/etc/profile`, so the overlay ships `/etc/zsh/zprofile` with `emulate sh -c 'source /etc/profile'` — that is what makes the desktop start on the zsh login shell the image now uses (and why switching `rg` to zsh once silently broke it: 2026-10-17, bare tty1 shell after a reboot). Bash login shells are unaffected, so the same image works with either.
+- Boot → getty auto-login on tty1 → labwc. Logging out restarts the session; after 3 failed starts a shell is left on tty1.
 - System-wide defaults in `/etc/xdg/` (labwc, waybar, mako, foot, kanshi); per-user overrides go in `~/.config/`.
 - Normal windows open **maximized** (640×480 screen); dialogs keep their size.
 - Panel: `☰ Apps` (launcher) · open windows · tray · volume · network · battery · clock · `⏻` (power menu).
@@ -45,12 +45,6 @@ Chosen over LXQt-on-labwc (heavier) and sfwbar (smaller community) for low RAM a
 - Audio: speaker starts at 100 % on a fresh system (`/etc/wireplumber/wireplumber.conf.d/50-rg35xxh.conf`; WirePlumber default is 40 %); the codec DAC and Line Out are set to 100 % by `rg35xxh-hwinit`.
 - Memory: zram swap (50 % of RAM, zstd, priority 100) plus a 2 GB swap file `/swapfile` on the SD card (priority 10, created on first boot by `rg35xxh-swapfile`). Chromium flags in `/etc/chromium.d/50-rg35xxh`; uBlock Origin Lite force-installed by policy (`/etc/chromium/policies/managed/ublock-origin-lite.json`, downloaded on first launch).
 - Component logs: `~/.local/state/session/*.log`, labwc: `~/.local/state/labwc.log`.
-
-### Shell (zsh)
-
-- The login shell is **zsh** (`/usr/bin/zsh`, from `base.list`). `build/04d-ohmyzsh.sh` installs Oh My Zsh plus `zsh-autosuggestions` and `zsh-syntax-highlighting` into `/etc/skel/.oh-my-zsh` (all pinned to the revisions the handheld runs), `/etc/skel/.zshrc` loads them with a starship prompt (`starship` is in `dev.list`), and `10-image.sh` copies `/etc/skel` into a fresh `/home/rg` — so a reflash keeps the shell environment. `~/.zshrc` is the file to edit for per-user changes (it also adds `~/.opencode/bin` and `~/.local/bin` to `PATH`).
-- `overlay/etc/zsh/zprofile` (`emulate sh -c 'source /etc/profile'`) is load-bearing: it is what runs `/etc/profile.d/zz-rg35xxh-session.sh` (desktop) and `dev-tools.sh` (tool `PATH`) for a zsh login shell.
-- Oh My Zsh is only a convenience: if `~/.oh-my-zsh` is missing the shell still starts (the `.zshrc` then prints a source error) and the desktop is unaffected.
 
 ### External display (mini HDMI) — verified 2026-10-08
 
@@ -92,7 +86,7 @@ Selection rule: light apps for 1 GB RAM; Qt apps preferred where equal, since mo
 | Clipboard | `wl-clipboard` | Required by L3/R3 copy/paste |
 | Brightness / volume | `brightnessctl`, `wireplumber` (`wpctl`) | Used by F + Vol and Vol keys |
 | Screenshots | `grim`, `slurp` | |
-| Viewers | `imv` (images), `qpdfview` (PDF), `mpv` (video, CPU decode) | |
+| Viewers | `imv` (images), `qpdfview` (PDF), `mpv` (video, VPU decode — see [video-decode.md](video-decode.md)) | |
 | Archives | `xarchiver` | |
 | System | `htop`, `git`, `zram-tools`, `systemd-timesyncd` | zram = compressed RAM swap |
 | Fonts | `fonts-noto-core`, `fonts-noto-cjk`, `fonts-noto-color-emoji` | CJK and emoji rendering |
@@ -100,6 +94,23 @@ Selection rule: light apps for 1 GB RAM; Qt apps preferred where equal, since mo
 Locale `en_US.UTF-8`, timezone UTC (change with `sudo timedatectl set-timezone Area/City`).
 
 Heavy web browsing is the expected weak point (1 GB RAM).
+
+### File associations
+
+`/usr/local/share/applications/mpv.desktop` is a full entry — `Exec=mpv -- %U`,
+an icon, and the video and audio types it handles — with `NoDisplay=true`: it
+is the handler for those types and stays out of the drawer.
+
+Two caches decide whether GIO knows that:
+
+- `/usr/share/mime/mime.cache` (shared-mime-info) holds the content types,
+- `/usr/local/share/applications/mimeinfo.cache` (desktop-file-utils) holds
+  which application handles which type.
+
+Without them GIO can still guess the type of a file but cannot map it to an
+application, so Thunar has no handler and falls back to running a literal `%U`
+("missing exec"). The image build refreshes both (`build/05-configure-base.sh`);
+an in-place update of the overlay has to do the same.
 
 ## Tailscale (added 2026-10-09)
 
@@ -124,66 +135,6 @@ Tested 2026-10-17 on the device: fresh profile per browser, 20 s of scrolling on
 
 Earlier rounds showed Firefox's rendering path (GPU/CPU WebRender, Wayland/X11), CPU governor, smooth scrolling and frame rate made no noticeable difference; full uBlock Origin alone took 110–270 MB in Firefox's extension process.
 
-
-## Goblin (the Jellyfin client, v0.2.0)
-
-`goblin` is the one media app on the handheld: a single Jellyfin client,
-keypad-first, no menu/dashboard/launcher modes. `Super+p` (or `Super+m`)
-starts it in a terminal. Everything the old suite did (menu, dashboard, play
-browser, shuffle) is gone — the client is the whole UI.
-
-* **Layout**: the full 80x24 terminal goes to the list. One line per row
-  (`▶ S01E03 Name  24m  540p  ✓`), a one-line top bar
-  (`Home › Film` + `43G free  bat 71%  cpu 23%  33°C`) and a one-line key
-  legend at the bottom. No borders, no panels, no wasted rows.
-* **Keys** (keypad mode: A=Enter, B=Esc, X=Tab, Y=Space): `A` opens a folder
-  or plays from the cursor down the visible list, `B` goes back (clearing the
-  search filter first), `Y` saves, `X` deletes the saved copy (twice), `/`
-  searches, `Q` quits. Physical keyboard works the same.
-* **Video**: mpv takes over with `--fullscreen`, so the film fills the
-  640x480 panel; the client is gone while it plays, so the keyboard belongs
-  to mpv. `B` (Esc) closes the video and the client comes back on the same
-  folder and row (mpv's own Esc binding is "cycle pause", so
-  `/etc/mpv/input-handtop.conf` rebinds it to `quit` for the client; the
-  built-in bindings stay in place).
-* **Transcoding**: playing and saving ask Jellyfin for
-  `stream.mp4?static=false&videoCodec=h264&audioCodec=aac&maxWidth=1280&
-  maxHeight=720&videoBitrate=4000000`. `static=false` is the part that
-  matters — without it the endpoint serves the original file and every other
-  parameter is decoration. A 1080p HEVC source comes back as 1280x720 h264,
-  which the VPU decodes and the Wi-Fi can carry.
-* **Why the copy decode path**: mpv is started with `--hwdec=drm-copy`.
-  Panfrost can only import zero-copy dmabufs whose width is a multiple of 64
-  pixels (`MESA: panfrost: rejecting image due to unsupported offset or
-  stride alignment`); anything else renders as a flat blue rectangle. 416-wide
-  and odd-aspect transcodes hit it constantly. The copy path shows every
-  frame — 0 dropped frames at 720p, where the screen is 640x480 anyway.
-* **Subtitles**: the client asks the server for the item's subtitle streams
-  (`MediaSources` in the list query, no extra request) and enables the best
-  one by default — Italian first, English second, otherwise whatever text
-  track is there (forced-only tracks are skipped when a normal one exists).
-  Jellyfin serves any subtitle stream as srt/ass/vtt on the fly
-  (`/Videos/{id}/{source}/Subtitles/{index}/Stream.srt`), and the client
-  hands it to mpv as a per-file `--sub-file`, so every episode of the
-  playlist gets its own subtitles. The row shows the language that will be
-  used (`ita`, `eng`, …). A saved copy gets the subtitle as a sidecar next
-  to the video (`<name>.srt`), which mpv loads by itself.
-* **Save**: `Y` saves the selected episode, or every episode of a season or
-  series, under `~/Offline` (never `/tmp`, which is a 128 MB tmpfs). Series
-  are expanded server-side; filenames carry `S01E03`. Files already on the
-  device are skipped, and `X` removes them again (the server copy is never
-  touched). The free space of the card is on the top bar.
-* **Search**: server-side (`SearchTerm`), debounced 400 ms, so a library with
-  hundreds of items is searchable. `B` clears the filter before leaving the
-  folder.
-* **Resume**: the client remembers the folder path, cursor row and filter, so
-  quitting a video drops you back on the same row of the same library.
-* **Headless test** (no device needed, runs against any Jellyfin):
-  `python3 tools/test-goblin-tui.py` with `JELLYFIN_URL`/`JELLYFIN_KEY` env —
-  covers the library list, the status line, movie and episode playlists (with
-  the transcode URL asserted), the resume snapshot, series save targets, a
-  real save → play-local → delete round-trip, and back navigation. Verified on
-  textual 2.1.2 (Debian trixie, what ships).
 
 ## Light theme (dual theme)
 

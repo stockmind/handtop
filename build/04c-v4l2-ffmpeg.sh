@@ -54,24 +54,24 @@ KWIBOO_URL="$FFMPEG_V4L2REQ_URL"
 SRC="$WORK/src/kwiboo-ffmpeg"
 
 # Build-time headers.
-DEV_PKGS="libdrm-dev libudev-dev zlib1g-dev libdav1d-dev
+DEV_PKGS=(libdrm-dev libudev-dev zlib1g-dev libdav1d-dev
           libgnutls28-dev libx264-dev libmp3lame-dev libopus-dev
-          libvorbis-dev libvpx-dev libass-dev libfreetype6-dev libxml2-dev"
+          libvorbis-dev libvpx-dev libass-dev libfreetype6-dev libxml2-dev)
 
 # Runtime side of the same features. The replacement libav* link against these,
 # so they have to be in the image; installing them explicitly also keeps them
 # there (the ones that only Debian's libav* pulled in would otherwise be
 # candidates for autoremove).
-RUNTIME_PKGS="libgnutls30t64 libx264-164 libmp3lame0 libopus0 libvorbis0a
-               libvpx9 libass9 libfreetype6 libxml2 libunibreak6"
+RUNTIME_PKGS=(libgnutls30t64 libx264-164 libmp3lame0 libopus0 libvorbis0a
+               libvpx9 libass9 libfreetype6 libxml2 libunibreak6)
 
 # dpkg-owned libraries we overwrite. Holding them keeps an upgrade from
 # replacing them and silently dropping the VPU path again.
-HOLD_PKGS="libavcodec61 libavdevice61 libavfilter10 libavformat61
-            libavutil59 libpostproc58 libswresample5 libswscale8"
+HOLD_PKGS=(libavcodec61 libavdevice61 libavfilter10 libavformat61
+           libavutil59 libpostproc58 libswresample5 libswscale8)
 
 chroot_mount
-in_chroot "apt-get update -qq && apt-get install -y -qq --no-install-recommends $DEV_PKGS $RUNTIME_PKGS"
+in_chroot "apt-get update -qq && apt-get install -y -qq --no-install-recommends ${DEV_PKGS[*]} ${RUNTIME_PKGS[*]}"
 chroot_umount
 
 [ -e "$SRC" ] && safe_rm -r "$SRC"
@@ -146,7 +146,7 @@ fi
 # Hold the libraries we replace: without this an upgrade reinstalls Debian's
 # ones and the VPU path disappears without a word.
 hold=""
-for p in $HOLD_PKGS; do
+for p in "${HOLD_PKGS[@]}"; do
   in_chroot "dpkg -s $p >/dev/null 2>&1" && hold="$hold $p"
 done
 [ -n "$hold" ] || die "none of the libav packages are installed, cannot hold them"
@@ -155,7 +155,7 @@ for p in $hold; do
   in_chroot "apt-mark showhold" | grep -qw "$p" || die "apt-mark hold did not take for $p"
 done
 
-in_chroot "apt-get purge -y -qq $DEV_PKGS && apt-get autoremove -y -qq --purge && apt-get clean"
+in_chroot "apt-get purge -y -qq ${DEV_PKGS[*]} && apt-get autoremove -y -qq --purge && apt-get clean"
 safe_rm -r "$ROOTFS"/var/lib/apt/lists/*
 mkdir -p "$ROOTFS/var/lib/apt/lists/partial"
 echo "kwiboo-ffmpeg $KWIBOO_PIN installed to /usr."
