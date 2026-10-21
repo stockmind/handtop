@@ -463,6 +463,7 @@ class Daemon:
                     if self.osk and self.osk.visible:
                         self.osk.toggle()
                     self._hide_cursor()                   # no pointer outside desktop mode
+                    set_flag("rg35xxh-keys-mode", False)  # keypad mode (fork) does not span modes
                     if self.bt:
                         flag, title, text, _icon = EXT_MODES[self.ext]
                         set_flag(flag, True)
@@ -470,7 +471,6 @@ class Daemon:
                     else:
                         self._create_pad()
                         set_flag("rg35xxh-gamepad-mode", True)
-                        set_flag("rg35xxh-keys-mode", False)
                         spawn("notify-send", "-t", "2500", "Gamepad mode", "Hold Start for 1 s to return to desktop mode")
                 else:
                     if self.bt:
