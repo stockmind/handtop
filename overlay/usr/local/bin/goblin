@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 from rich.text import Text
 from textual.app import App
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.widgets import Input, Label, ListItem, ListView, Static
 
 
@@ -484,6 +485,7 @@ class Goblin(App):
         self._search_timer = None
         self._busy = False
         self._loading = False
+        self._scroll_timer = None
 
     # ------------------------------------------------------------- layout
     def compose(self):
@@ -578,6 +580,20 @@ class Goblin(App):
         lv.index = None
         lv.index = min(index, last)
         lv.focus()
+        # The list was just rebuilt: the cursor is set but the view is still
+        # at the top. A timer (unlike a refresh callback) always fires.
+        self._scroll_timer = self.set_timer(0.15, self._scroll_to_cursor)
+
+    def _scroll_to_cursor(self):
+        """Bring the cursor row into view (the rebuild leaves it behind)."""
+        try:
+            lv = self.query_one("#list", ListView)
+        except NoMatches:          # the app is on its way out
+            return
+        index = lv.index
+        if index is None or index >= len(lv.children):
+            return
+        lv.scroll_to_widget(lv.children[index], animate=False, immediate=True)
 
     async def show_libraries(self):
         self.remember_cursor()
@@ -589,8 +605,12 @@ class Goblin(App):
         self.hint()
         await self.render_rows(restore=False)
 
-    async def show_level(self, entry, search=""):
-        """Show the children of the last path entry."""
+    async def show_level(self, entry, search="", restore_index=None):
+        """Show the children of the last path entry.
+
+        The cursor is remembered per folder, and the pages it needs are
+        pulled back in, so returning from a download or from a video lands
+        on the same row instead of the top of the list."""
         parent_id, name, types, fallback = entry
         self.search = search
         self.items, self.total = self.api.children(parent_id, types, search)
@@ -603,6 +623,10 @@ class Goblin(App):
             self.items = data.get("Items", [])
             self.total = len(self.items)
         self.offset = len(self.items)
+        want = restore_index if restore_index is not None else self.cursor.get(parent_id, 0)
+        while want >= len(self.items) and self.offset < self.total:
+            await self._load_page()
+        self.cursor[parent_id] = want
         trail = [e[1] for e in self.path[:-1]] + [name]
         self.crumb("Home › " + " › ".join(trail))
         await self.render_rows()
@@ -629,6 +653,7 @@ class Goblin(App):
         return True
 
     async def reload(self):
+        self.remember_cursor()
         if self.path:
             await self.show_level(self.path[-1], self.search)
         else:
@@ -642,6 +667,7 @@ class Goblin(App):
             await self._load_page()
         finally:
             self._loading = False
+        self._scroll_timer = None
 
     async def _load_page(self):
         parent_id, name, types, _ = self.path[-1]
@@ -969,11 +995,12 @@ class Goblin(App):
     # ------------------------------------------------------------- navigation
     async def _resume(self):
         state = self.resume
-        for entry in state.get("path", []):
+        index = state.get("index")
+        entries = state.get("path", [])
+        for position, entry in enumerate(entries):
             self.path.append(tuple(entry))
-            await self.show_level(self.path[-1], state.get("search", ""))
-        if self.path and state.get("index") is not None:
-            self.query_one("#list", ListView).index = state["index"]
+            await self.show_level(self.path[-1], state.get("search", ""),
+                                  index if position == len(entries) - 1 else None)
 
     async def action_back(self):
         box = self.query_one("#search", Input)
@@ -994,10 +1021,23 @@ class Goblin(App):
         self.exit()
 
     async def on_resize(self):
-        if self.items and self.query_one("#list", ListView).children:
-            index = self.query_one("#list", ListView).index
-            await self.render_rows(restore=False)
-            self.query_one("#list", ListView).index = index
+        """Re-cut the rows for the new width.
+
+        Rebuilding the list here would throw the cursor and the scroll away,
+        so the existing rows are re-textured instead."""
+        if not self.items:
+            return
+        lv = self.query_one("#list", ListView)
+        width = max(30, self.size.width - 2)
+        manifest = self.manifest()
+        for child in lv.children:
+            if not isinstance(child, Row):
+                continue
+            item = child.item
+            files = manifest.get(item.get("Id"), [])
+            local = bool(files) and any((OFFLINE / f).exists() for f in files)
+            child.text = row_text(item, width, local, self.resume_seconds(item), self.prefs)
+            child.refresh()
 
 
 class Player:
@@ -1018,6 +1058,7 @@ class Player:
         self.request_id = 0
         self.position = 0.0
         self.index = 0
+        self.fallback = False        # the copy path took over
 
     @staticmethod
     def decode_path(width):
@@ -1037,7 +1078,10 @@ class Player:
                    "--input-conf=/etc/mpv/input-handtop.conf",
                    f"--input-ipc-server={self.socket_path}"]
         for entry in self.entries:
-            command.append(f"--hwdec={self.decode_path(entry.get('width'))}")
+            path = self.decode_path(entry.get("width"))
+            if self.fallback:
+                path = "drm-copy"
+            command.append(f"--hwdec={path}")
             if entry.get("sub"):
                 command.append(f"--sub-file={entry['sub']}")
             if entry.get("start"):
@@ -1107,6 +1151,30 @@ class Player:
                 return end
         return None
 
+    def zero_copy(self):
+        """True when every file of the playlist may use the zero-copy path."""
+        return all(self.decode_path(e.get("width")) == "drm" for e in self.entries)
+
+    def wait_for_params(self, seconds=6):
+        """Wait for the first decoded frame, so its width can be read."""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            params = self.ask("video-params")
+            if isinstance(params, dict) and params.get("w"):
+                return True
+            time.sleep(0.3)
+        return False
+
+    def width_ok(self):
+        """Is the width the VPU will really produce 64-pixel aligned?
+
+        The prediction can be wrong (the server rounds widths), and a frame
+        panfrost cannot import shows up as a blue rectangle, so the first
+        frame is checked and the copy path takes over if it has to."""
+        params = self.ask("video-params")
+        width = (params or {}).get("w") if isinstance(params, dict) else None
+        return not width or width % 64 == 0
+
     def run(self):
         """Run mpv until it exits, reporting the position on the way."""
         try:
@@ -1115,6 +1183,16 @@ class Player:
             pass
         process = subprocess.Popen(self.command())
         self.connect()
+        if self.zero_copy():
+            self.wait_for_params()
+            if not self.width_ok():
+                # the prediction was wrong: restart on the copy path, which
+                # renders every width (the zero-copy one shows blue)
+                process.terminate()
+                process.wait()
+                self.fallback = True
+                process = subprocess.Popen(self.command())
+                self.connect()
         if self.entries:
             self.client.post("/Sessions/Playing", {
                 "ItemId": self.entries[0]["id"],

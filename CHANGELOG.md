@@ -71,6 +71,16 @@
   the cursor nears the end, instead of pulling 200 rows at once. On the
   device the 533-item music video library paints in ~1.2 s instead of ~3.2 s.
 
+- Fix: the cursor and the pages come back after a download or a video. The
+  cursor is remembered per folder, the pages it needs are pulled back in,
+  and the rebuilt list is scrolled to it (a resize re-cuts the rows instead
+  of rebuilding the list, which threw both the cursor and the scroll away).
+
+- Fix: the blue frame cannot last. The client checks the width of the first
+  decoded frame over mpv's IPC socket and restarts the video on the copy
+  path if the width is not 64-pixel aligned after all - the case where
+  panfrost cannot import the frame.
+
 - Add: subtitles. The client picks the item's subtitle track (Italian first,
   English second, otherwise whatever text track is there) and hands it to mpv
   per file, so every episode of the playlist is subtitled from the start. The

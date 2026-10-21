@@ -189,6 +189,13 @@ while the copy path scales with the pixel count. That is why the client
 streams at the panel resolution *and* uses zero-copy when it can: 16 % CPU
 instead of the 62 % the old 720p copy stream cost, and no blue frames.
 
+The prediction can be wrong (the server rounds widths when the height
+constraint binds), and a frame panfrost cannot import is a blue rectangle —
+so the client checks the width of the first decoded frame over mpv's IPC
+socket and restarts the video on the copy path if it turns out unaligned.
+The blue can therefore only ever last a moment, and the copy path renders
+every width.
+
 ### The Mesa crash on the software path (pre-existing)
 
 `--hwdec=no` with a GPU VO segfaults intermittently, and it is *not* caused by

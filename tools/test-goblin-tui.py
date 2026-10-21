@@ -196,6 +196,40 @@ async def main():
         assert ">Row<" not in svg, "rows still render the class name"
         print("PASS no placeholder rows")
 
+    # --- The cursor and its pages come back after a reload (download) and
+    #     after a video (the resume snapshot)
+    app = Goblin()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await settle(pilot)
+        await click_row(pilot, "Video Musicali")
+        from textual.widgets import ListView
+        lv = app.query_one(ListView)
+        for _ in range(55):
+            await pilot.press("down")
+        for _ in range(20):
+            await pilot.pause(0.2)
+        index = lv.index
+        assert index and index > 50, f"did not get past the first page: {index}"
+        print(f"PASS cursor walked to row {index}")
+        await app.reload()                       # what a download does
+        await settle(pilot)
+        assert app.query_one(ListView).index == index, \
+            f"cursor lost on reload: {app.query_one(ListView).index} != {index}"
+        assert len(app.query(Row)) > index, "the pages were not pulled back in"
+        print(f"PASS reload keeps row {index} with {len(app.query(Row))} rows")
+        app.play_state = {"path": [tuple(e) for e in app.path],
+                          "index": index, "search": app.search}
+
+    app2 = Goblin(resume=app.play_state)
+    async with app2.run_test(size=(80, 24)) as pilot:
+        await settle(pilot)
+        from textual.widgets import ListView
+        lv = app2.query_one(ListView)
+        assert lv.index == app.play_state["index"], \
+            f"resume lost the cursor: {lv.index} != {app.play_state['index']}"
+        assert len(app2.query(Row)) > lv.index, "resume did not pull the pages back"
+        print(f"PASS resume keeps row {lv.index} with {len(app2.query(Row))} rows")
+
     # --- Subtitles: Italian first, English second, else whatever is there
     app = Goblin()
     async with app.run_test(size=(80, 24)) as pilot:

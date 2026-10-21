@@ -185,6 +185,11 @@ browser, shuffle) is gone — the client is the whole UI.
   pixels of 720p, a quarter of the bitrate, and still a picture the 640x480
   screen shows pixel for pixel. `GOBLIN_MAX_WIDTH`/`GOBLIN_MAX_HEIGHT` raise
   it for the HDMI monitor (1280x720 for a 4 Mbit/s stream).
+* **Coming back where you were**: the cursor is remembered per folder, and so
+  are the pages it needs — after a download or after a video, the list comes
+  back with the same rows loaded and the same row under the cursor (the
+  rebuilt list is scrolled to it; a resize re-cuts the rows instead of
+  rebuilding them, which would throw the cursor away).
 * **Resume**: the client reads the stored position of every item
   (`/Users/{id}/Items/Resume`) and shows it on the row as `»55:01`; playing
   starts there (`--start`, per file). Positions the server does not know —
