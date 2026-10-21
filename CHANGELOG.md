@@ -49,6 +49,13 @@
   frames; the old 720p copy stream cost 62 %. The blue frames (panfrost
   rejecting a stride it cannot import) cannot happen on the aligned path.
 
+- Fix: the decode-path rule handles tall sources too. The client now works
+  out the width the server will really produce (the source if it fits, exactly
+  the cap if the width constraint binds, "unknown" if the height constraint
+  binds) instead of assuming the cap: in your library 778 of 782 items play
+  zero-copy, and the four square/portrait music videos fall back to the copy
+  path, where the width cannot be predicted.
+
 - Add: an icon for the app drawer: `app-goblin.png` (the handheld with a
   play triangle, 56 px pixel art with a `-light` variant), and the drawer
   entry is now "Goblin - Jellyfin client for the handheld" instead of the

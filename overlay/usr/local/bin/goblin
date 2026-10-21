@@ -734,16 +734,23 @@ class Goblin(App):
     def output_width(self, item, transcoded=True):
         """Width of the pixels that will reach the screen.
 
-        The server scales the source to the cap, so a wide source arrives
-        exactly MAX_WIDTH wide (640 = 10 x 64). Panfrost can only import
-        zero-copy frames whose stride is 64-pixel aligned, so this decides
-        whether mpv may use the VPU directly."""
-        source = item.get("Width") or 0
-        if not source:
+        The server scales the source into the cap box, so the width of the
+        result is one of: the source (it fits), exactly MAX_WIDTH (the width
+        constraint binds), or something rounded (the height constraint binds -
+        not worth predicting). Panfrost can only import zero-copy frames
+        whose stride is 64-pixel aligned, so this decides whether mpv may use
+        the VPU directly; 0 means "unknown", and the copy path is used."""
+        source_w = item.get("Width") or 0
+        source_h = item.get("Height") or 0
+        if not source_w or not source_h:
             return 0
         if not transcoded:
-            return source
-        return min(source, MAX_WIDTH)
+            return source_w
+        if source_w <= MAX_WIDTH and source_h <= MAX_HEIGHT:
+            return source_w                       # it fits, the server keeps it
+        if MAX_WIDTH / source_w <= MAX_HEIGHT / source_h:
+            return MAX_WIDTH                     # the width binds: exactly the cap
+        return 0                                 # the height binds: unknown
 
     def media(self, item):
         """(video url, subtitle url or None) for one item."""
