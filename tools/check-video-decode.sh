@@ -18,9 +18,14 @@ set -u
 
 FILE="${1:-}"
 if [ -z "$FILE" ]; then
+  # Cedrus has no AV1 decoder here (docs/video-decode.md): decoding AV1 would fail and look
+  # like a broken VPU, so skip AV1 candidates instead of picking the first file blindly.
   for d in "$HOME/Downloads" /usr/share/mpv /usr/share; do
     [ -d "$d" ] || continue
-    FILE=$(find "$d" -maxdepth 3 -type f \( -iname '*.mkv' -o -iname '*.mp4' -o -iname '*.webm' \) 2>/dev/null | head -1)
+    while IFS= read -r -d '' f; do
+      [ "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$f" 2>/dev/null)" = av1 ] && continue
+      FILE="$f"; break
+    done < <(find "$d" -maxdepth 3 -type f \( -iname '*.mkv' -o -iname '*.mp4' -o -iname '*.webm' \) -print0 2>/dev/null)
     [ -n "$FILE" ] && break
   done
 fi

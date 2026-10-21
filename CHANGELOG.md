@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Change: `tools/deploy.sh` grows `console` and `session` targets, so a device can be brought to the image state without a reflash: the whole overlay (scripts, icons, themes, units, rules, mako/waybar/drawer configs) is copied as root with `/etc/default/goblin-dash` left alone, then Waybar/mako/swaybg/inputd/labwc are restarted. `all` runs inputd + console + session + goblin.
+
+- Fix: `tools/check-video-decode.sh` no longer picks a file the hand-held cannot decode. It skipped the first video found even when that was AV1 (no Cedrus AV1 decoder), so the gate reported a broken VPU on a healthy device; it now walks the candidates, skips AV1, and handles filenames with spaces.
+
 - Add: `goblin` (the media TUI) resumes where you were after playback. Quitting mpv reopens the same library folder with the cursor on the same row (and the search filter still applied) instead of dropping back to the library list; a fresh start still lands on the menu.
 
 - Add: the input daemon follows a force-gamepad flag (`$XDG_RUNTIME_DIR/rg35xxh-force-gamepad`, polled every 200 ms): present → gamepad mode, absent → desktop mode. A game launcher (e.g. Halo's) only creates/removes the file, no signal or pid needed, and the handheld is a controller exactly while the game runs, whichever mode it started in. It shares the External Controller app's `request_gamepad`/`request_desktop` path, so held buttons and keypad mode unwind properly. A manual mode change is respected until the flag changes again.
