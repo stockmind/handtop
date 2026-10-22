@@ -212,12 +212,14 @@ browser, shuffle) is gone — the client is the whole UI.
   honoured — an intro or recap in the first minutes is skipped over
   automatically while the video plays (`GOBLIN_SKIP_INTRO=0` turns it off).
   This server has no segment detection installed, so it is a no-op here.
-* **Why the copy decode path**: mpv is started with `--hwdec=drm-copy`.
-  Panfrost can only import zero-copy dmabufs whose width is a multiple of 64
-  pixels (`MESA: panfrost: rejecting image due to unsupported offset or
-  stride alignment`); anything else renders as a flat blue rectangle. 416-wide
-  and odd-aspect transcodes hit it constantly. The copy path shows every
-  frame — 0 dropped frames at 720p, where the screen is 640x480 anyway.
+* **The decode path**: mpv is started with `--hwdec=drm` — zero-copy, the
+  decoder's dmabufs go straight to the GPU. Every width works: the Cedrus
+  driver gives the picture a 64-byte aligned stride, which is what panfrost
+  needs to import it (before 2026-10-22 the stride was 16-byte aligned, so
+  panfrost refused anything whose width was not a multiple of 64 and the
+  video area stayed a flat blue rectangle — 416-wide and odd-aspect
+  transcodes hit it constantly). Measured on the device at 640×360: **16 %
+  CPU** with zero-copy against 28 % for the copy path, and 0 dropped frames.
 * **Subtitles**: the client follows the **user's Jellyfin preferences**
   (`GET /Users/{id}` → `Configuration.SubtitleLanguagePreference` and
   `SubtitleMode`), so nothing about languages is hardcoded: set

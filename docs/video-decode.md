@@ -139,14 +139,14 @@ The power draw could not be compared directly: the AXP2202 fuel gauge on this
 board reports the same ~423 mA with the SoC idle and with four cores pegged, so
 CPU time is the only usable proxy.
 
-### The blue video: panfrost cannot import every dmabuf
+### The blue video: the driver's stride, and the fix
 
-Zero-copy (`--hwdec=drm`) renders a **flat blue rectangle** for streams whose
-width is not a multiple of 64 pixels. The picture is not a decode failure: the
-decoder produces correct frames, and `MESA: panfrost: rejecting image due to
-unsupported offset or stride alignment` is logged for every frame. Panfrost
-refuses the dmabuf import, the VO keeps its clear colour, and nothing else is
-drawn.
+Zero-copy (`--hwdec=drm`) used to render a **flat blue rectangle** for streams
+whose width is not a multiple of 64 pixels. The picture was not a decode
+failure: the decoder produced correct frames, and `MESA: panfrost: rejecting
+image due to unsupported offset or stride alignment` was logged for every
+frame. Panfrost refused the dmabuf import, the VO kept its clear colour, and
+nothing else was drawn.
 
 Measured 2026-10-21 on the device (`--hwdec=drm`, 24 frames each, "Mesa
 errors" counted from the mpv log):
@@ -158,21 +158,40 @@ errors" counted from the mpv log):
 | 720 (720x404) | 26 | blue |
 | 512, 640, 704, 960, 1280 | 0 | correct |
 
-Height does not matter (1280x536 is fine, 416x240 is fine), only the width —
-i.e. the NV12 stride. 640 = 10x64, 704 = 11x64, 960 = 15x64, 1280 = 20x64 all
-work; 416 = 6.5x64, 544 = 8.5x64 and 720 = 11.25x64 do not. Common widths
-(1280, 1920, 640, 512) are fine; odd ones (854, 1366, 720) are not.
+Height did not matter (1280x536 was fine, 416x240 was fine), only the width —
+i.e. the NV12 stride.
 
-`--hwdec=drm-copy` renders every width — the frames are downloaded to system
-memory, so Mesa never imports a dmabuf — and at 720p it drops no frames at all
-(0 dropped over 15 s, measured). The copy path at 1080p does drop frames
-(21-40 over 15 s), which is why 1080p files prefer zero-copy.
+**The cause was the driver, not the GPU.** Mali (this SoC has a Mali-G31,
+Utgard) wants a linear surface whose stride *and* plane offsets are 64-byte
+aligned, and panfrost enforces that. The Cedrus driver aligned the decoded
+picture to **16** bytes (`ALIGN(width, 16)` in `cedrus_prepare_format()`),
+which is a multiple of 64 only when the width is a multiple of 64 — hence
+416 = 6.5x64, 544 = 8.5x64 and 720 = 11.25x64 failed while 640 = 10x64,
+704 = 11x64, 960 = 15x64 and 1280 = 20x64 worked.
 
-### The client picks the path per file
+The VPU's output stride is programmable (`VE_PRIMARY_FB_LINE_STRIDE`), so
+`build/kernel/0002-cedrus-64-byte-stride.patch` aligns the capture stride to
+64 bytes and programs the register from the negotiated `bytesperline`, so the
+driver and the hardware cannot disagree about the layout. The chroma plane
+then starts at `stride * height`, which is 64-byte aligned too.
 
-The server scales the source to the panel (640 wide, and 640 = 10 x 64), so
-**zero-copy works** for the transcode; the copy path is only used when the
-width is not 64-aligned (a source narrower than 640 keeps its own width).
+Measured 2026-10-22 on the device with the patched module:
+
+| width | Mesa rejections | picture |
+|---|---|---|
+| 416, 544, 720, 854, 1366 | 0 | correct |
+
+The picture was checked against the software-decoded frame: the zero-copy
+screen and the software screen differ by 88 dB PSNR (the OSD clock), i.e.
+they are the same picture — the VPU writes the frame with the 64-byte stride
+and panfrost imports it. The 416-wide H.264 file decodes on the VPU at
+16.6x real time with 0 errors, and the 1080p H.264/HEVC, 960x540 and 540p
+HEVC files are unchanged.
+
+### Zero-copy for every width
+
+The client streams at the panel resolution and uses zero-copy; nothing
+depends on the width any more.
 
 Measured 2026-10-21 on the device (h264, 24 fps, 20 s, `vo=gpu --profile=fast`,
 CPU as % of one core):
@@ -186,15 +205,12 @@ CPU as % of one core):
 
 Zero-copy is flat (the VPU and the GPU do the work, the CPU barely moves),
 while the copy path scales with the pixel count. That is why the client
-streams at the panel resolution *and* uses zero-copy when it can: 16 % CPU
-instead of the 62 % the old 720p copy stream cost, and no blue frames.
+streams at the panel resolution *and* uses zero-copy: 16 % CPU instead of the
+62 % the old 720p copy stream cost, and no blue frames.
 
-The prediction can be wrong (the server rounds widths when the height
-constraint binds), and a frame panfrost cannot import is a blue rectangle —
-so the client checks the width of the first decoded frame over mpv's IPC
-socket and restarts the video on the copy path if it turns out unaligned.
-The blue can therefore only ever last a moment, and the copy path renders
-every width.
+The copy path stays available as a fallback (`--hwdec=drm-copy`, and
+`hwdec=auto-safe` keeps it behind the zero-copy method), but the client no
+longer has to predict or check the width.
 
 ### The Mesa crash on the software path (pre-existing)
 
@@ -449,7 +465,7 @@ runs the whole plan over SSH with screenshots pulled back to `work/va-shots/`.
 | Piece | What | Where |
 |---|---|---|
 | Decoder hardware | Allwinner Cedar video engine (same as H6): MPEG-2, H.264, H.265 8/10-bit, VP8. No VP9 yet (separate upstream series), no AV1 (not in hardware). | `video-codec@1c0e000` |
-| Kernel driver | Cedrus, V4L2 **stateless** (request API) → `/dev/video0`, `/dev/media0` | `sunxi-cedrus.ko` in `/usr/lib/modules/7.2.0/extra/`, loaded automatically from the DT node |
+| Kernel driver | Cedrus, V4L2 **stateless** (request API) → `/dev/video0`, `/dev/media0` | `sunxi-cedrus.ko` in `/usr/lib/modules/7.2.0/extra/`, loaded automatically from the DT node; our patch gives the decoded picture a 64-byte aligned stride, which is what the GPU needs to import it (see "The blue video") |
 | Device tree | ROCKNIX DTB + overlay adding the video-engine node | `/boot/firmware/dtb.img` (original kept as `dtb-rocknix.img`) |
 | Memory | Decoder buffers come from CMA: `cma=256M` on the kernel command line (ROCKNIX default is 32 MB). Unused CMA stays available to normal programs. 1080p streaming uses ~140 MB. | `extlinux/extlinux.conf` |
 | Heap access | dma-buf heaps are `root:root 0600` in the kernel; the overlay's `72-rg35xxh-dma-heap.rules` gives group `video` access, otherwise ffmpeg logs `Unable to open any dma_heap device` and no dmabuf path can allocate. | `overlay/etc/udev/rules.d/` |
@@ -472,6 +488,12 @@ Upstream series "[PATCH v3 0/7] arm64: allwinner: h616: Support Video Engine" (C
 
 - **Patch 4/7** (driver, 4 lines): H616 compatible → existing H6 variant. `build/kernel/0001-cedrus-add-h616-variant.patch`.
 - **Patch 7/7** (DT node): as an overlay, `build/dts/rg35xxh-video-engine.dtso`, **without the `iommus` property** (see below).
+
+On top of those, one patch of our own on the driver:
+`build/kernel/0002-cedrus-64-byte-stride.patch` — the capture stride is
+aligned to 64 bytes instead of 16, and the VPU's framebuffer line stride
+register is programmed from the negotiated `bytesperline`. Without it the
+GPU cannot import the decoded picture (see "The blue video").
 
 Review notes: all phandles/IDs the node uses exist in 7.2 (`ve_sram`, `sram_c`, `iommu`, `CLK_BUS_VE`/`CLK_VE`/`CLK_MBUS_VE`, `RST_BUS_VE`); `sunxi_sram` already supports `sun50i-h616-ve-sram`; the request API is always built in 7.2.
 

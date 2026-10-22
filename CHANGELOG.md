@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Fix: the blue video is gone — zero-copy works for every picture width.
+  The VPU decodes into a picture whose stride the Cedrus driver aligned to 16
+  bytes, and Mali (this SoC has a Mali-G31) only imports linear surfaces
+  whose stride and plane offsets are 64-byte aligned. Panfrost refused
+  every picture whose width was not a multiple of 64 ("rejecting image due
+  to unsupported offset or stride alignment"), the VO kept its clear colour
+  and the video area stayed a flat blue rectangle — 416-wide and odd-aspect
+  transcodes hit it constantly. The VPU's framebuffer line stride is
+  programmable, so `build/kernel/0002-cedrus-64-byte-stride.patch` aligns
+  the capture stride to 64 bytes and programs the register from the
+  negotiated `bytesperline`. Measured on the device with the patched
+  module: 416, 544, 720, 854 and 1366 wide all import without a single
+  Mesa rejection, and the zero-copy picture matches the software-decoded
+  frame (88 dB PSNR, the difference being the OSD clock).
+
+- Change: the client always plays zero-copy. It used to predict the width
+  of every file, start mpv on the copy path for the widths it could not
+  predict, and check the width of the frame that was really playing over
+  mpv's IPC socket to switch over if the prediction was wrong. With the
+  driver's stride fixed none of that is needed: every file is started with
+  `--hwdec=drm`.
+
 - Change: `tumbler` is dropped again. It was installed to work around Thunar's "missing exec" error, but that error is the missing MIME database: with the caches refreshed, `exo-open` (what Thunar calls) opens a video with no thumbnail service running at all, and without the caches it fails with tumbler running too. On a 1 GB device the thumbnail service is RAM and CPU for a cosmetic feature, so it goes.
 
 

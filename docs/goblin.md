@@ -215,14 +215,14 @@ QuickConnect flow (three `curl` calls; the recipe is in
 `/etc/mpv/input-handtop.conf` holds the pad bindings during playback (it is
 read *in addition* to mpv's own bindings).
 
-The decode path is chosen per file: **zero-copy** (`--hwdec=drm`) when the
-width is 64-pixel aligned — which the panel-sized transcode always is (640 =
-10 × 64) — and the **copy path** (`--hwdec=drm-copy`) otherwise, because
-panfrost cannot import a dmabuf with a stride it does not like, and the
-video area would stay a flat blue rectangle. The client also checks the
-width of the frame that is really playing and switches to the copy path if
-the prediction was wrong. Measured on the device at 640×360: **16 % CPU**
-with zero-copy against 28 % for the copy path, and 0 dropped frames.
+The decode path is **zero-copy** (`--hwdec=drm`) for every file: the Cedrus
+driver gives the decoded picture a 64-byte aligned stride, so panfrost can
+import the dmabuf whatever the width is (the driver used to align the
+stride to 16 bytes, and panfrost then refused every picture whose width was
+not a multiple of 64 — the video area stayed a flat blue rectangle, and the
+client had to fall back to the copy path). Measured on the device at
+640×360: **16 % CPU** with zero-copy against 28 % for the copy path, and 0
+dropped frames.
 
 ---
 

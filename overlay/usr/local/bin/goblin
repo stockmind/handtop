@@ -823,7 +823,6 @@ class Goblin(App):
                 "url": url,
                 "sub": subtitle,
                 "start": start,
-                "width": self.output_width(entry),
             })
         start = playables.index(item)
         self.play_state = {
@@ -882,27 +881,6 @@ class Goblin(App):
             if end and end < 300 and start < 30 and end < (runtime or 1e9) * 0.1:
                 return end
         return 0
-
-    def output_width(self, item, transcoded=True):
-        """Width of the pixels that will reach the screen.
-
-        The server scales the source into the cap box, so the width of the
-        result is one of: the source (it fits), exactly MAX_WIDTH (the width
-        constraint binds), or something rounded (the height constraint binds -
-        not worth predicting). Panfrost can only import zero-copy frames
-        whose stride is 64-pixel aligned, so this decides whether mpv may use
-        the VPU directly; 0 means "unknown", and the copy path is used."""
-        source_w = item.get("Width") or 0
-        source_h = item.get("Height") or 0
-        if not source_w or not source_h:
-            return 0
-        if not transcoded:
-            return source_w
-        if source_w <= MAX_WIDTH and source_h <= MAX_HEIGHT:
-            return source_w                       # it fits, the server keeps it
-        if MAX_WIDTH / source_w <= MAX_HEIGHT / source_h:
-            return MAX_WIDTH                     # the width binds: exactly the cap
-        return 0                                 # the height binds: unknown
 
     def media(self, item, start=0):
         """(video url, subtitle url or None) for one item.
@@ -1233,14 +1211,6 @@ class Player:
         self.request_id = 0
         self.position = 0.0
         self.index = 0
-        self.fallback = False        # the copy path took over
-
-    @staticmethod
-    def decode_path(width):
-        """Zero-copy needs a 64-pixel aligned stride, the copy path does not."""
-        if width and width % 64 == 0:
-            return "drm"
-        return "drm-copy"
 
     def command(self):
         # --input-terminal=no: mpv must not touch the tty. It saves the
@@ -1253,10 +1223,10 @@ class Player:
                    "--input-conf=/etc/mpv/input-handtop.conf",
                    f"--input-ipc-server={self.socket_path}"]
         for entry in self.entries:
-            path = self.decode_path(entry.get("width"))
-            if self.fallback:
-                path = "drm-copy"
-            command.append(f"--hwdec={path}")
+            # Zero-copy for every width: the Cedrus driver gives the picture a
+            # 64-byte aligned stride, so panfrost can import it (see
+            # docs/video-decode.md, "The blue video").
+            command.append("--hwdec=drm")
             if entry.get("sub"):
                 command.append(f"--sub-file={entry['sub']}")
             if entry.get("start"):
@@ -1326,20 +1296,6 @@ class Player:
                 return end
         return None
 
-    def zero_copy(self):
-        """True when every file of the playlist may use the zero-copy path."""
-        return all(self.decode_path(e.get("width")) == "drm" for e in self.entries)
-
-    def wait_for_params(self, seconds=6):
-        """Wait for the first decoded frame, so its width can be read."""
-        deadline = time.time() + seconds
-        while time.time() < deadline:
-            params = self.ask("video-params")
-            if isinstance(params, dict) and params.get("w"):
-                return True
-            time.sleep(0.3)
-        return False
-
     def seek_to(self, entry):
         """Jump to the saved position.
 
@@ -1355,30 +1311,6 @@ class Player:
         except OSError:
             pass
 
-    def check_width(self, process):
-        """Keep the blue frames out.
-
-        A frame panfrost cannot import (a stride that is not 64-pixel
-        aligned) shows as a blue rectangle. The width is predicted when the
-        playlist is built, but the server rounds widths, so the width that is
-        really playing is checked here - and if it does not fit, the video
-        restarts on the copy path, which renders every width."""
-        if not self.entries:
-            return process
-        entry = self.entries[self.index]
-        if self.decode_path(entry.get("width")) != "drm":
-            return process                      # already the copy path
-        params = self.ask("video-params")
-        width = params.get("w") if isinstance(params, dict) else None
-        if not width or width % 64 == 0:
-            return process
-        process.terminate()
-        process.wait()
-        self.fallback = True
-        self.entries = self.entries[self.index:]  # carry on where we are
-        self.entries[0] = {**self.entries[0], "start": self.position}
-        return subprocess.Popen(self.command())
-
     def run(self):
         """Run mpv until it exits, reporting the position on the way."""
         try:
@@ -1387,10 +1319,6 @@ class Player:
             pass
         process = subprocess.Popen(self.command())
         self.connect()
-        if self.zero_copy():
-            self.wait_for_params()
-            process = self.check_width(process)
-            self.connect()
         if self.entries:
             self.seek_to(self.entries[0])
         if self.entries:
@@ -1409,10 +1337,7 @@ class Player:
             if isinstance(index, int) and index < len(self.entries):
                 if index != self.index:
                     self.index = index
-                    # a new file starts: its width has to fit as well, and
-                    # it may have a position of its own
-                    process = self.check_width(process)
-                    self.connect()
+                    # a new file starts: it may have a position of its own
                     self.seek_to(self.entries[self.index])
             if isinstance(position, (int, float)):
                 self.position = float(position)
