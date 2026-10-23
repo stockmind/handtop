@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """goblin-tv — browse YouTube and Twitch, play through goblin-watch.
 
-Twitch has a "featured" list for free (top live streams, then top categories),
-YouTube only has search: type a query and press Enter. Enter on a row plays it
-with goblin-watch, which decodes on the VPU. Recently played items are kept in
-~/.local/state/goblin-tv/recent.json and shown under "Recent".
+Twitch opens on the top live streams; `3` lists the top categories. YouTube has
+no "featured" list without cookies, so `1` shows a few topic shortcuts and the
+search box. The box does two jobs: typing filters whatever list is on screen,
+Enter searches the current source (YouTube videos, Twitch channels).
 
-Keys: 1 YouTube search · 2 Twitch streams · 3 Twitch categories · 4 Recent
-      5 switch 480p/720p · Enter play / open category · Esc back · r refresh
-      q quit. Type in the filter box to narrow whatever list is shown.
+Enter on a row plays it with goblin-watch, which decodes on the VPU; B/Esc
+closes the stream and comes back to the same list. Recently played items live in
+~/.local/state/goblin-tv/recent.json.
+
+Keys: 1 YouTube · 2 Twitch streams · 3 Twitch categories · 4 Recent
+      5 480p/720p · Enter search/play · Esc back · r refresh · q quit
 """
 import json
 import os
@@ -25,6 +28,9 @@ TWITCH_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 RECENT_FILE = os.path.expanduser("~/.local/state/goblin-tv/recent.json")
 RECENT_MAX = 50
 HEIGHTS = (480, 720)
+
+# What `1` shows before a query is typed: one Enter on a row searches that topic.
+TOPICS = ("Music", "Gaming", "News", "Movies", "Comedy", "Technology", "Sport")
 
 
 def gql(query):
@@ -76,6 +82,31 @@ def youtube_search(query, count=30):
     return items
 
 
+def twitch_search(query, count=30):
+    """Twitch channel search: live channels first, offline ones marked."""
+    inner = ('channels{edges{item{ ... on User { login displayName '
+             'stream{ title viewersCount game{name} } } }}}')
+    data = gql('{ searchFor(userQuery:%s, platform:"web"){ %s } }'
+               % (json.dumps(query), inner))["searchFor"]["channels"]["edges"]
+    items = []
+    for edge in data:
+        user = edge["item"]
+        stream = user.get("stream")
+        if stream:
+            meta = (f"{fmt_viewers(stream['viewersCount'])} viewers · "
+                    f"{stream['game']['name']} · {stream['title']}")
+        else:
+            meta = "offline"
+        items.append({
+            "title": user["displayName"],
+            "meta": meta,
+            "url": "https://www.twitch.tv/" + user["login"],
+            "live": bool(stream),
+        })
+    items.sort(key=lambda item: not item["live"])
+    return items[:count]
+
+
 def twitch_streams(game=None, count=30):
     if game:
         inner = ('streams(first:%d){edges{node{title viewersCount '
@@ -110,6 +141,11 @@ def twitch_games(count=30):
     return items
 
 
+def youtube_topics():
+    return [{"kind": "topic", "title": topic, "meta": "search YouTube", "url": None}
+            for topic in TOPICS]
+
+
 def load_recent():
     try:
         with open(RECENT_FILE) as handle:
@@ -130,7 +166,6 @@ def save_recent(items):
 class Tv(App):
     CSS = """
     #q { dock: top; }
-    #filter { dock: top; }
     #title { padding: 0 1; color: $text-muted; }
     ListView { padding: 0 1; }
     #status { dock: bottom; padding: 0 1; color: $text-muted; }
@@ -142,30 +177,30 @@ class Tv(App):
         ("4", "recent", "Recent"),
         ("5", "quality", "480p/720p"),
         ("escape", "back", "Back"),
-        ("/", "filter_focus", "Filter"),
+        ("/", "focus_search", "Search"),
         ("r", "refresh", "Refresh"),
         ("q", "quit", "Quit"),
     ]
 
     def __init__(self):
         super().__init__()
-        self.all_items = []          # everything the last load returned
-        self.items = []              # what the filter lets through
-        self.mode = "twitch"
+        self.all_items = []
+        self.items = []
+        self.mode = "youtube"
+        self.query = ""
         self.game = None
         self.height = 480
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static("", id="title")
-        yield Input(placeholder="YouTube search, then Enter", id="q")
-        yield Input(placeholder="filter…", id="filter")
+        yield Input(placeholder="type to filter · Enter searches YouTube", id="q")
         yield ListView(id="list")
         yield Static("", id="status")
         yield Footer()
 
     def on_mount(self):
-        self.action_twitch()
+        self.action_youtube()
 
     # ---- loading -------------------------------------------------------
     @work(thread=True, exclusive=True, group="load")
@@ -176,15 +211,15 @@ class Tv(App):
         except Exception as error:                     # network, yt-dlp, GQL
             self.call_from_thread(self.set_status, f"{label}: {error}")
             return
-        self.call_from_thread(self.fill, items, label)
+        self.call_from_thread(self.fill, items, label, True)
 
-    def fill(self, items, label):
+    def fill(self, items, label, focus_list=False):
         self.all_items = items
         self.query_one("#title", Static).update(label)
-        self.apply_filter()
+        self.apply_filter(focus_list)
 
-    def apply_filter(self):
-        needle = self.query_one("#filter", Input).value.strip().lower()
+    def apply_filter(self, focus_list=False):
+        needle = self.query_one("#q", Input).value.strip().lower()
         if needle:
             self.items = [item for item in self.all_items
                           if needle in item["title"].lower()
@@ -199,9 +234,10 @@ class Tv(App):
             line = Text(item["title"])
             line.append("   " + item["meta"], style="dim")
             view.append(ListItem(Label(line, markup=False)))
-        view.focus()
-        self.call_after_refresh(self.highlight_first)
-        suffix = f" (filtered from {len(self.all_items)})" if needle else ""
+        if focus_list:
+            view.focus()                  # Enter must select a row
+            self.call_after_refresh(self.highlight_first)
+        suffix = f" · filtered from {len(self.all_items)}" if needle else ""
         self.set_status(f"{len(self.items)} entries{suffix} — Enter plays, {self.height}p")
 
     def highlight_first(self):
@@ -215,56 +251,66 @@ class Tv(App):
     # ---- actions -------------------------------------------------------
     def action_twitch(self):
         self.mode, self.game = "twitch", None
-        self.query_one("#q", Input).display = False
+        self.placeholder("Twitch: type to filter · Enter searches channels")
         self.load(twitch_streams, "Twitch · top live streams")
 
     def action_games(self):
         self.mode, self.game = "games", None
-        self.query_one("#q", Input).display = False
+        self.placeholder("Twitch categories: type to filter")
         self.load(twitch_games, "Twitch · top categories")
 
     def action_recent(self):
         self.mode, self.game = "recent", None
-        self.query_one("#q", Input).display = False
-        self.fill(load_recent(), "Recent")
+        self.placeholder("Recent: type to filter")
+        self.fill(load_recent(), "Recent", True)
 
     def action_youtube(self):
-        self.mode = "youtube"
-        self.query_one("#q", Input).display = True
+        # Focus the list, not the box: Enter must pick a topic row. `/` (or Tab)
+        # moves to the search box, which is also where typing goes once it has
+        # focus.
+        self.mode, self.game = "youtube", None
+        self.placeholder("YouTube: / to search · Enter on a topic")
+        self.query_one("#q", Input).value = ""
+        self.fill(youtube_topics(), "YouTube · pick a topic, or / to search", True)
+
+    def placeholder(self, text):
+        self.query_one("#q", Input).placeholder = text
+
+    def action_focus_search(self):
         self.query_one("#q", Input).focus()
 
     def action_quality(self):
         self.height = HEIGHTS[1] if self.height == HEIGHTS[0] else HEIGHTS[0]
-        self.set_status(f"quality {self.height}p (485 when playing)")
+        self.set_status(f"quality {self.height}p")
 
     def action_refresh(self):
         {"twitch": self.action_twitch, "games": self.action_games,
-         "recent": self.action_recent}.get(self.mode, self.action_youtube)()
-
-    def action_filter_focus(self):
-        self.query_one("#filter", Input).focus()
+         "recent": self.action_recent, "youtube": self.action_youtube}.get(
+            self.mode, self.action_twitch)()
 
     def action_back(self):
-        if self.query_one("#filter", Input).has_focus:
-            self.query_one("#filter", Input).value = ""
+        if self.query_one("#q", Input).has_focus:
+            self.query_one("#q", Input).value = ""
+            self.apply_filter()
             self.query_one(ListView).focus()
         elif self.game:
             self.action_games()
         else:
             self.query_one(ListView).focus()
 
+    # ---- search: Enter in the box searches the current source ----------
     def on_input_submitted(self, event):
-        if event.input.id != "q":
+        needle = event.value.strip()
+        if not needle:
             return
-        query = event.value.strip()
-        if not query:
-            return
-        self.mode = "youtube"
-        self.load(lambda: youtube_search(query), f"YouTube · “{query}”")
+        if self.mode == "youtube":
+            self.load(lambda: youtube_search(needle), f"YouTube · “{needle}”")
+        else:
+            self.load(lambda: twitch_search(needle), f"Twitch · channels “{needle}”")
+        self.query_one("#q", Input).value = needle
 
     def on_input_changed(self, event):
-        if event.input.id == "filter":
-            self.apply_filter()
+        self.apply_filter()
 
     def on_list_view_selected(self, event):
         index = event.list_view.index
@@ -274,6 +320,9 @@ class Tv(App):
         if item.get("kind") == "game":
             self.game = item["name"]
             self.load(lambda: twitch_streams(item["name"]), f"Twitch · {item['title']}")
+            return
+        if item.get("kind") == "topic":
+            self.load(lambda: youtube_search(item["title"]), f"YouTube · {item['title']}")
             return
         self.play(item)
 

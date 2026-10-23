@@ -298,11 +298,15 @@ Not themed yet (stay dark): terminal (foot), volume/brightness bar (`rg35xxh-osd
 
 A keypad-first browser for YouTube and Twitch, with the same feel as `goblin`:
 Twitch opens on the top live streams (viewers + game), `3` lists the top
-categories and Enter opens a category's streams; `1` focuses a YouTube search
-box (type, Enter, then Enter on a row); `4` shows what you played last (kept in
-`~/.local/state/goblin-tv/recent.json`). `/` focuses a filter box that narrows
-whatever list is on screen by title, channel or game as you type; Esc clears it.
-`5` switches playback between 480p and 720p. Enter plays through `goblin-watch`
+categories and Enter opens a category's streams; `1` shows YouTube (a few topic shortcuts, since YouTube has no
+cookie-free "featured" list); `4` shows what you played last (kept in
+`~/.local/state/goblin-tv/recent.json`). One box does search and filter:
+**typing narrows the list on screen** by title/channel/game, and **Enter searches
+the current source** — YouTube videos on `1`, Twitch channels on `2`/`3`
+(`searchFor(userQuery:)`, live ones first, offline ones marked). `/` (or Tab)
+focuses the box, B/Esc clears it without losing the list.
+`5` switches playback between 480p and 720p. Focus stays where you put it: the
+list takes it after a load so Enter plays, the box keeps it while you type. Enter plays through `goblin-watch`
 — mpv on the VPU, H.264 preferred — and the keys while it plays are the same as
 in `goblin` (`/etc/mpv/input-handtop.conf`): **B/Esc closes the stream and drops
 you back into the list you were in**, D-pad left/right seeks 15 s, up/down changes

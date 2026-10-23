@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fix: Streams searches Twitch, keeps the cursor where you put it, and shows
+  YouTube. One box now does both jobs — typing filters the visible list, Enter
+  searches the current source: YouTube videos under `1`, **Twitch channels**
+  under `2`/`3` (public GQL `searchFor(userQuery:)`, live channels first, offline
+  ones marked and sorted last). `1` lands on a few topic shortcuts (Music,
+  Gaming, …) instead of an empty screen, `/` focuses the box, B/Esc clears it.
+  The focus bug came from rebuilding the list on every keystroke and focusing it
+  each time; the list now takes focus only after a load.
+
 - Feature: **Streams** (`goblin-tv`), a keypad-first browser next to `goblin`:
   Twitch opens on the top live streams, `3` lists the top categories and Enter
   drills into a category; `1` searches YouTube (yt-dlp), Enter plays any row
