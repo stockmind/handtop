@@ -50,7 +50,21 @@
   </mouse>
 
   <windowRules>
+    <!-- These Handtop apps open on the handheld's screen when a monitor is connected too (no
+         effect when the handheld screen is off, e.g. Monitor only). One rule per app id; the
+         Display picker and the controller status screen pick their screen themselves. -->
+    <windowRule identifier="rg35xxh-theme"><action name="MoveToOutput" output="DSI-1" /></windowRule>
+    <windowRule identifier="rg35xxh-external-controller"><action name="MoveToOutput" output="DSI-1" /></windowRule>
     <!-- Small 640x480 screen: open normal windows maximized; dialogs keep their size. -->
     <windowRule type="normal"><action name="Maximize" /></windowRule>
   </windowRules>
+  <!-- The input daemon's pointer (stick / D-pad) moves exactly as sent: no libinput acceleration.
+       Its speed is set in /etc/rg35xxh/input.conf, and it follows the pointer across screens to
+       pick the speed of the one it is on (display_speed_scale), which needs 1:1 motion. -->
+  <libinput>
+    <device category="rg35xxh virtual mouse">
+      <accelProfile>flat</accelProfile>
+      <pointerSpeed>0</pointerSpeed>
+    </device>
+  </libinput>
 </labwc_config>

@@ -27,6 +27,39 @@ Taken unmodified from the official image
 | nwg-drawer v0.7.5 | MIT | https://github.com/nwg-piotr/nwg-drawer, built by `build/04b-nwg-drawer.sh` |
 | FFmpeg 7.1.3 with the V4L2 request-API patchset, plus a local patch registering the decoders under the DRM device type | GPL-2.0-or-later | https://github.com/Kwiboo/FFmpeg, commit `fad85d9c76611c09b561167ab405c667a0dcdeb7` (branch `v4l2-request-n7.1.3`) + `build/patches/ffmpeg-v4l2request-drm.patch`, built by `build/04c-v4l2-ffmpeg.sh` |
 
+## Data from other projects
+
+| What | License | Source |
+|---|---|---|
+| Xbox Wireless Controller (model 1914) BLE HID report descriptor, 283 bytes, in `overlay/usr/local/sbin/rg35xxh-btpad` | MIT | [Mystfit/ESP32-BLE-CompositeHID](https://github.com/Mystfit/ESP32-BLE-CompositeHID), `XboxDescriptors.h` (`XboxOneS_1914_HIDDescriptor`), read from a physical controller; matches the BLE dump in [DJm00n/ControllersInfo](https://github.com/DJm00n/ControllersInfo). How Windows picks its driver (PnP ID, product IDs): [WikDra/esp32-hid-gamepad-bridge](https://github.com/WikDra/esp32-hid-gamepad-bridge) (MIT) |
+| wlr-layer-shell protocol description, `src/osd/protocol/wlr-layer-shell-unstable-v1.xml` (used to build `rg35xxh-osd`) | HPND-style (notice inside the file) | [wlroots/wlr-protocols](https://gitlab.freedesktop.org/wlroots/wlr-protocols), Copyright © 2017 Drew DeVault |
+
+Original notice of ESP32-BLE-CompositeHID (MIT):
+
+```
+Software License Agreement (MIT License)
+
+Copyright (c) 2021 lemmingDev - https://github.com/lemmingDev
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ## Packages
 
 - **Debian 13 "trixie"** packages, unmodified from deb.debian.org; licenses in `/usr/share/doc/*/copyright` on the device. The FFmpeg libraries are the exception: `libavcodec61`, `libavdevice61`, `libavfilter10`, `libavformat61`, `libavutil59`, `libpostproc58`, `libswresample5` and `libswscale8` are replaced by the build above and held with `apt-mark`, so an upgrade cannot overwrite them.
