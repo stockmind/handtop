@@ -322,7 +322,7 @@ passes a device of a type other than the codec's first-listed configuration is
 rejected today); it is kept as a local patch until that is settled upstream.
 
 
-## Chromium and the VPU: the VA-API route (evaluated, not shipped)
+## Chromium and the VPU: the VA-API route
 
 When the browser swap landed (v0.1.3) Chromium video was still CPU-decoded
 (~195 % of one core at 1080p24 on the 640×480 session). The question was whether
@@ -376,9 +376,9 @@ browser:
 HEVC decodes the same way (`decoding hevc via /dev/video0 [cedrus]`, 56 % of one
 core).
 
-**The picture is green.** In every screenshot the video area is a flat green
-rectangle — a YUV (0,0,0) surface that was decoded into and never written to the
-screen. `grim` photographs mpv's VPU-decoded output (`hwdec=drm`) and Chromium's
+**The picture is green** (fixed on 2026-10-23, see "Chromium is fixed" below).
+In every 2026-10-17 screenshot the video area was a flat green rectangle — a
+YUV (0,0,0) surface that was never written to the screen. `grim` photographs mpv's VPU-decoded output (`hwdec=drm`) and Chromium's
 *software*-decoded video correctly, so it is not a capture artefact; the green
 survives every flag combination:
 
@@ -399,19 +399,21 @@ consumer on the image cannot even cross-check the driver: `ffmpeg -hwaccel vaapi
 fails earlier, at device setup (`Cannot allocate memory`; CMA is 256 MB, ~60 MB
 free), and Debian's mpv is built without VA-API (`Unsupported hwdec: vaapi`).
 
-**Verdict.** The VPU stays reachable through FFmpeg's own `v4l2request` hwaccel —
-so mpv, the `ffmpeg` CLI and Moonlight all reach it — while Chromium video
-stays software-decoded (it plays 1080p24 in real time at ~2 cores). Revisit if
-Chromium's dmabuf import on panfrost or the driver's DRM PRIME export is fixed;
-the backend is unmaintained upstream and unpackaged in Debian, so it would have
-to be built in the image either way. VLC 3 also went green on this driver, but
-for a different reason — a composite descriptor its GL converter rejects, fixed
-in "Watching video with VLC" above; Chromium asks for separate layers and still
-shows green, so that one is the stale-backing case described here.
+**Verdict (2026-10-17).** The VPU stays reachable through FFmpeg's own
+`v4l2request` hwaccel — mpv, the `ffmpeg` CLI and Moonlight all reach it —
+while Chromium video stays software-decoded (it plays 1080p24 in real time at
+~2 cores). VLC 3 also went green on this driver, but for a different reason: a
+composite descriptor its GL converter rejects. Chromium asks for separate
+layers, gets them, and still shows green, so that one is the stale-backing case
+described below.
+
+Both were fixed in the driver on 2026-10-23 ("Chromium is fixed", and
+"Watching video with VLC"); Chromium video now runs on the VPU too.
 
 ### Revisit plan (researched 2026-10-17, device offline; try in this order)
 
-The driver (Ondrej Jirman's fork, tag 1.3 ≈ master) documents supported clients
+The driver (Ondrej Jirman's fork, tag 1.3 at the time of this note) documents
+supported clients
 as **mpv and Firefox only** — Chromium is never mentioned. Its design notes say
 surfaces exported before their first decode (which is exactly how Chromium
 probes formats) get a *throwaway* dma-buf backing that is dropped when the
@@ -457,11 +459,39 @@ runs the whole plan over SSH with screenshots pulled back to `work/va-shots/`.
   decoder; strace shows libva + our driver *are* opened (GPU-process probe),
   yet the RDD decoder never initializes through them (zero driver-trace lines).
   Debian's ESR does not engage ffmpeg-vaapi in this environment out of the box.
-- **Verdict**: browser VA display on goblin remains open; mpv stays the video
-  path (and works zero-copy-ish via `v4l2request-copy`). Next candidates, in
-  order: plan step 4 (`cma=320M` ffmpeg-vaapi bit-exact check to exonerate the
-  driver fully outside browsers), then filing the Chromium stale-backing case
-  upstream with these traces.
+- **Verdict (2026-10-17)**: browser VA display remains open; the green is
+  Chromium consuming a stale backing.
+
+### Chromium is fixed (2026-10-23)
+
+The stale-backing theory was right, and the driver now works around it
+(`build/patches/libva-v4l2-request-fixes.patch`, item 3). Evidence, from
+instrumenting the driver while Chromium played a 1080p24 H.264 file:
+
+```
+v4l2r-entry: export sid=67108864 keep=0        <- 22 exports, once, at init
+v4l2r-bind:  sid=67108864 keep_backing (pitch 1920, cap 0)
+v4l2r-copy:  sid=67108864 plane=0 3133440 bytes pitch 1920->1920
+```
+
+- Chromium calls `vaExportSurfaceHandle()` **22 times at start-up** (its frame
+  pool), before any frame has been decoded, and then never again — it keeps the
+  EGL imports per surface id.
+- Before the fix those exports were throwaway standalone backings, dropped as
+  soon as the decode context bound the surface to a CAPTURE buffer. Chromium
+  kept sampling the freed, zeroed buffer: YUV(0,0,0), flat green, forever.
+  (Earlier instrumentation of `vaDeriveImage` showed the same thing on the other
+  entry point: 22/22 derivations with `bound=0` and `ysum=0`.)
+- Now the backing is kept (`keep_backing`) and, at every decode completion
+  (DQBUF of the CAPTURE buffer, in `decode.c`), copied into it. Chromium shows
+  the correct picture, subtitles included.
+
+Cost: one NV12 copy per frame (3.1 MB at 1080p ≈ 75 MB/s at 24 fps) for the
+surfaces that were imported pre-decode — Chromium only; VLC and mpv export after
+decode and take the zero-copy path unchanged. Chromium CPU 102–176 % of one core
+and RSS 875–1033 MB across three 10 s runs (vs 201–232 % / 756–922 MB software).
+The spread is the browser, not the video path. Firefox still does not engage
+its VA-API decoder here, so it stays software.
 
 ## Watching video with VLC (3.0.24, XWayland, zero-copy)
 
@@ -489,7 +519,8 @@ over 8 s (1440×1080 HEVC source is a 6 s clip, looped):
 
 mpv is 18 % on the H.264 file (its `vo=gpu` does more work than VLC's bare GL
 surface), so VLC is not the slow path any more. Zero dropped frames, no late
-pictures in either codec.
+pictures in either codec. The full picture, including RAM, GPU and battery, is
+in "Player resource matrix" below.
 
 Quirks worth knowing:
 
@@ -503,7 +534,7 @@ Quirks worth knowing:
 - `--vout=xcb_x11` is the copy fallback (VAOP→I420 via `vaapi_filters`, 94 %
   CPU): slower, but it needs no dmabuf interop, so keep it as a diagnosis tool.
 
-### The two interop fixes (`build/patches/libva-v4l2-request-interop.patch`)
+### The driver fixes (`build/patches/libva-v4l2-request-fixes.patch`)
 
 1. **`vaAcquireBufferHandle()`/`vaReleaseBufferHandle()` were stubs** returning
    `VA_STATUS_ERROR_UNIMPLEMENTED`. VLC 3 probes its dmabuf path before it
@@ -522,9 +553,78 @@ Quirks worth knowing:
    decoded luma (`ysum` ≈ 1.2 M, non-zero across the plane) while the screen was
    green, which is what ruled out a wrong plane offset or modifier.
 
-**This is not the Chromium green.** Chromium asks for separate layers and gets
-them; it consumes a stale backing (see the section above), which this patch does
-not change.
+3. **The third fix is for Chromium, not VLC** (VLC re-exports every frame and
+   never hits it): a surface backing that a client imported *before* the surface
+   was decoded is kept for the surface's lifetime and every decoded frame is
+   copied into it, instead of being dropped when the decode context takes over.
+   That is what un-greens Chromium — details in "Chromium" above.
+
+**Why tag 1.3 and not upstream master.** Master (`f54d8d2`, "surface: simplify
+backing") replaces this with a better design: each surface owns one CAPTURE
+buffer for its whole life, queued with `V4L2_MEMORY_DMABUF`, so its memory is
+stable from creation and no copy is needed. It cannot run here: master requires
+`V4L2_CAP_VIDEO_M2M_MPLANE`, cedrus advertises only `V4L2_CAP_VIDEO_M2M`
+(single-planar), and the driver fails to initialise with
+`libva-v4l2request: no V4L2 Request API decoder found`. Revisit when the kernel
+driver grows multiplane support.
+
+## Player resource matrix (measured 2026-10-23)
+
+`tools/bench-video-players.py` (run on the device) loops a 1080p24 H.264 file,
+skips the first 7 s, then samples for 12 s: CPU is process-tree ticks over that
+window (one core = 100 %), RAM is tree `VmRSS`, GPU is the Mali devfreq
+frequency 4×/s (governor is `simple_ondemand`, so frequency tracks load) and
+battery is the AXP20x `current_now`. The panel is 640×480, so only the video
+decode/upload differs between rows.
+
+| configuration | decode | display | CPU (1 core) | RAM | GPU | picture |
+|---|---|---|---|---|---|---|
+| mpv `hwdec=auto-safe` | VPU (`drm`) | dmabuf→GL, zero-copy | **20 %** | 132 MB | 420 MHz (idle) | correct |
+| mpv `hwdec=v4l2request-copy` | VPU | CPU download | 114 % | 143 MB | 420 MHz | correct |
+| mpv `hwdec=no` | CPU | — | 152 % | 185 MB | 420 MHz | correct |
+| VLC `--avcodec-hw=vaapi` | VPU (VA-API) | dmabuf→EGL, zero-copy | **11 %** | 132 MB | 420 MHz (2 % at 648) | correct |
+| VLC `--vout=xcb_x11` | VPU | VAOP→I420 copy | 94 % | 84 MB | 420 MHz | correct |
+| VLC `--avcodec-hw=none` | CPU | — | 228 % | 240 MB | 420 MHz | correct |
+| `ffmpeg -hwaccel v4l2request -f null` | VPU | none, frames downloaded | 104 % | 75 MB | — | 27 fps (1.12×) |
+| `ffmpeg -f null` | CPU | none | 376 % | 102 MB | — | 57 fps (2.39×) |
+| Chromium (default) | CPU | — | 201–232 % | 756–922 MB | 420 MHz | correct |
+| Chromium + `LIBVA_DRIVER_NAME=v4l2_request` | VPU (VA-API) | dmabuf→GL, kept backing | 102–176 % | 875–1033 MB | 420 MHz | correct |
+
+HEVC (6 s clips, looped):
+
+| configuration | CPU (one core) | software, same file |
+|---|---|---|
+| VLC zero-copy, HEVC 1080p | **22 %** | 207 % |
+| VLC zero-copy, HEVC 540p | **13 %** | 81 % |
+| mpv zero-copy, HEVC 1080p (120-frame runs, earlier) | ~75 % at 36 fps | ~266 % |
+
+What the numbers say:
+
+- **The GPU is not the bottleneck at this panel size.** Mali stayed at its
+  minimum 420 MHz in every run (VLC zero-copy occasionally 430–477 MHz, ≤4 % of
+  samples at 648 MHz), including Chromium's software path. Playback here is
+  CPU/VPU-bound; the GPU only composites 640×480.
+- **Battery draw cannot separate the paths.** `current_now` read 416–427 mA in
+  all ten scenarios, software decode at 376 % CPU included — the AXP2202 gauge
+  on this board is as broken as `docs/power-and-sleep.md` records. CPU time is
+  the only usable energy proxy, and by it the zero-copy paths (11–20 %) are in a
+  different class from anything software (152–376 %).
+- **The VPU is cheaper, not faster.** Decode-only ffmpeg is *slower* on hardware
+  than on the CPU (27 vs 57 fps): the win is 3–4× less CPU, which buys real-time
+  playback with audio, subtitles and thermal headroom. Do not expect a higher
+  decode rate.
+- **VLC now beats mpv on CPU** (11 % vs 20 %) because its GL surface does less
+  work than `vo=gpu`; mpv remains the better player (subtitles, OSD,
+  `vo=dmabuf-wayland`, no XWayland requirement).
+- **Chromium is the odd one out**: it is the only listed configuration that
+  burns a core *and* the only one with RAM near 1 GB, and the VPU buys it only
+  ~1.2–1.7× CPU rather than 10×, because the driver has to copy each frame into
+  the backing Chromium imported before decoding ("Chromium is fixed" above). It
+  is also the only row measured over three runs, because the browser's own work
+  (layout, compositing, subtitles) moves the number around 40 %.
+- **The numbers are single runs unless a range is given** (`/proc` sampling is
+  stable for the players; the browser is not).
+
 
 ## How it works
 

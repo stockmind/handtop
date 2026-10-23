@@ -1,0 +1,267 @@
+diff --git a/src/buffer.c b/src/buffer.c
+index a8c6f25..39662db 100644
+--- a/src/buffer.c
++++ b/src/buffer.c
+@@ -12,6 +12,9 @@
+ 
+ #include <stdlib.h>
+ #include <string.h>
++#include <unistd.h>
++
++#include <va/va_drmcommon.h>
+ 
+ #include "v4l2_request.h"
+ 
+@@ -49,6 +52,7 @@ VAStatus v4l2r_CreateBuffer(VADriverContextP va_ctx, VAContextID context_id,
+ 	buffer->type = type;
+ 	buffer->element_size = size;
+ 	buffer->nb_elements = num_elements;
++	buffer->dmabuf_fd = -1;
+ 
+ 	buffer->data = malloc((size_t)size * num_elements);
+ 	if (!buffer->data) {
+@@ -130,6 +134,8 @@ VAStatus v4l2r_DestroyBuffer(VADriverContextP va_ctx, VABufferID buf_id)
+ 	/* Derived image buffers point into the CAPTURE buffer mapping. */
+ 	if (!buffer->derived)
+ 		free(buffer->data);
++	if (buffer->dmabuf_fd >= 0)
++		close(buffer->dmabuf_fd);
+ 
+ 	v4l2r_handles_free(&drv->buffers, buf_id);
+ 	pthread_mutex_unlock(&drv->mutex);
+@@ -158,15 +164,52 @@ VAStatus v4l2r_BufferInfo(VADriverContextP va_ctx, VABufferID buf_id,
+ 	return VA_STATUS_SUCCESS;
+ }
+ 
++/*
++ * Legacy buffer-handle export, for clients that predate
++ * vaExportSurfaceHandle() (VLC 3 probes the dmabuf path this way:
++ * vaDeriveImage, then vaAcquireBufferHandle() with DRM_PRIME, then EGLImage).
++ * The handle is the same dma-buf vaExportSurfaceHandle() would return; the
++ * offsets and pitches come from the VAImage the client already holds.
++ */
+ VAStatus v4l2r_AcquireBufferHandle(VADriverContextP va_ctx, VABufferID buf_id,
+ 				   VABufferInfo *buf_info)
+ {
+-	(void)va_ctx; (void)buf_id; (void)buf_info;
+-	return VA_STATUS_ERROR_UNIMPLEMENTED;
++	struct v4l2r_driver *drv = v4l2r_driver(va_ctx);
++	struct v4l2r_buffer *buffer;
++
++	if (!buf_info)
++		return VA_STATUS_ERROR_INVALID_PARAMETER;
++
++	buffer = V4L2R_BUFFER_GET(drv, buf_id);
++	if (!buffer || !buffer->derived)
++		return VA_STATUS_ERROR_INVALID_BUFFER;
++
++	if (buf_info->mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME)
++		return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
++
++	if (buffer->dmabuf_fd < 0)
++		return VA_STATUS_ERROR_OPERATION_FAILED;
++
++	buf_info->handle = (uintptr_t)buffer->dmabuf_fd;
++	buf_info->mem_type = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME;
++	buf_info->mem_size = v4l2r_buffer_bytes(buffer);
++
++	return VA_STATUS_SUCCESS;
+ }
+ 
+ VAStatus v4l2r_ReleaseBufferHandle(VADriverContextP va_ctx, VABufferID buf_id)
+ {
+-	(void)va_ctx; (void)buf_id;
+-	return VA_STATUS_ERROR_UNIMPLEMENTED;
++	struct v4l2r_driver *drv = v4l2r_driver(va_ctx);
++	struct v4l2r_buffer *buffer;
++
++	buffer = V4L2R_BUFFER_GET(drv, buf_id);
++	if (!buffer || !buffer->derived)
++		return VA_STATUS_ERROR_INVALID_BUFFER;
++
++	if (buffer->dmabuf_fd >= 0) {
++		close(buffer->dmabuf_fd);
++		buffer->dmabuf_fd = -1;
++	}
++
++	return VA_STATUS_SUCCESS;
+ }
+diff --git a/src/context.c b/src/context.c
+index d905a6b..8592da6 100644
+--- a/src/context.c
++++ b/src/context.c
+@@ -643,12 +643,18 @@ VAStatus v4l2r_context_bind_surface(struct v4l2r_context *ctx,
+ 	if (ret < 0)
+ 		return VA_STATUS_ERROR_ALLOCATION_FAILED;
+ 
+-	/* The decode context provides the real storage now; drop any
+-	 * standalone backing from pre-decode export probing. With a
+-	 * conversion chain the backing IS the presented storage - keep it
+-	 * (v4l2r_surface_convert_backing replaces a mismatched one). */
+-	if (!ctx->conv)
+-		v4l2r_surface_free_backing(surface);
++	/* The decode context provides the real storage now. A backing that a
++	 * client already imported before the first decode must not be dropped
++	 * (the client would keep sampling the stale, now-freed buffer): keep it
++	 * and copy each decoded frame into it instead. With a conversion chain
++	 * the backing IS the presented storage (v4l2r_surface_convert_backing
++	 * replaces a mismatched one). */
++	if (!ctx->conv) {
++		if (surface->backing)
++			surface->keep_backing = true;
++		else
++			v4l2r_surface_free_backing(surface);
++	}
+ 
+ 	if (starting) {
+ 		type = ctx->capture_format.type;
+diff --git a/src/decode.c b/src/decode.c
+index 777750b..c247fe0 100644
+--- a/src/decode.c
++++ b/src/decode.c
+@@ -198,6 +198,9 @@ static int dequeue_buffer(struct v4l2r_context *ctx, enum v4l2_buf_type type)
+ 			 * overlaps subsequent decodes. */
+ 			if (ctx->conv)
+ 				v4l2r_convert_kick(ctx, buffer.index);
++			else if (ctx->captures[buffer.index].surface->keep_backing)
++				v4l2r_surface_copy_backing(
++					ctx->captures[buffer.index].surface);
+ 		}
+ 	}
+ 
+diff --git a/src/image.c b/src/image.c
+index 6d5b0ef..9d43191 100644
+--- a/src/image.c
++++ b/src/image.c
+@@ -204,6 +204,7 @@ VAStatus v4l2r_DeriveImage(VADriverContextP va_ctx, VASurfaceID surface_id,
+ 	buffer->nb_elements = 1;
+ 	buffer->data = view.map[0];
+ 	buffer->derived = true;
++	buffer->dmabuf_fd = view.dmabuf_fd[0] >= 0 ? dup(view.dmabuf_fd[0]) : -1;
+ 
+ 	image->buf = buffer_id;
+ 	image_object->image = *image;
+diff --git a/src/surface.c b/src/surface.c
+index da433b2..01a3905 100644
+--- a/src/surface.c
++++ b/src/surface.c
+@@ -238,6 +238,51 @@ VAStatus v4l2r_QuerySurfaceAttributes(VADriverContextP va_ctx, VAConfigID config
+  * back for reordering, wait for the decode itself, then for any pending
+  * format conversion into the backing.
+  */
++/*
++ * Copy the decoded CAPTURE buffer into the surface's own backing. Used for
++ * surfaces a client imported before they were ever decoded (keep_backing):
++ * that import is the backing, so its contents have to keep up. Pitch-aware
++ * because CAPTURE and backing layouts can differ by rounding.
++ */
++void v4l2r_surface_copy_backing(struct v4l2r_surface *surface)
++{
++	struct v4l2r_frame_view src;
++	struct v4l2r_surface_backing *dst = surface->backing;
++	unsigned int planes, i;
++
++	if (!dst || v4l2r_surface_capture_view(surface, true, &src) != VA_STATUS_SUCCESS)
++		return;
++
++	planes = src.nb_planes < dst->nb_planes ? src.nb_planes : dst->nb_planes;
++	for (i = 0; i < planes; i++) {
++		const uint8_t *from = src.map[i];
++		uint8_t *to = dst->map[i];
++		size_t row = src.pitch < dst->pitch ? src.pitch : dst->pitch;
++		size_t rows = i ? (src.height + 1) / 2 : src.height;
++
++		/* A client that only ever took the dma-buf fd never mapped the
++		 * backing; map it here so the copy has somewhere to land. */
++		if (!to && dst->dmabuf_fd[i] >= 0) {
++			to = mmap(NULL, dst->plane_size[i], PROT_READ | PROT_WRITE,
++				  MAP_SHARED, dst->dmabuf_fd[i], 0);
++			if (to == MAP_FAILED)
++				to = NULL;
++			else
++				dst->map[i] = to;
++		}
++		if (!from || !to)
++			continue;
++		if (src.pitch == dst->pitch) {
++			size_t bytes = src.plane_size[i] < dst->plane_size[i] ?
++				       src.plane_size[i] : dst->plane_size[i];
++			memcpy(to, from, bytes);
++			continue;
++		}
++		for (size_t y = 0; y < rows; y++)
++			memcpy(to + y * dst->pitch, from + y * src.pitch, row);
++	}
++}
++
+ VAStatus v4l2r_surface_ready(struct v4l2r_surface *surface)
+ {
+ 	VAStatus status;
+@@ -605,8 +650,11 @@ VAStatus v4l2r_surface_view(struct v4l2r_driver *drv,
+ 	memset(view, 0, sizeof(*view));
+ 
+ 	/* With a conversion chain the decode CAPTURE buffer holds the raw
+-	 * decoder format; what clients see is the converted NV12 backing. */
+-	if (surface->ctx && surface->ctx->conv) {
++	 * decoder format; what clients see is the converted NV12 backing.
++	 * The same is true when a client imported the backing before the
++	 * surface was decoded (keep_backing): the decoded frame is copied into
++	 * that backing instead of exposing the CAPTURE buffer. */
++	if (surface->ctx && (surface->ctx->conv || surface->keep_backing)) {
+ 		if (!surface->backing &&
+ 		    v4l2r_surface_convert_backing(drv, surface) !=
+ 		    VA_STATUS_SUCCESS)
+@@ -723,7 +771,14 @@ static VAStatus fill_prime_descriptor(const struct v4l2r_frame_view *view,
+ 	}
+ #endif
+ 
+-	if ((flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS) && two_planes &&
++	/*
++	 * One plane per layer even when the client did not ask for separate
++	 * layers (SEPARATE_LAYERS is a hint, not a requirement). VLC 3 passes
++	 * flags=0, then rejects any layer with more than one plane - with the
++	 * composite NV12 descriptor that check fails, its GL interop gives up
++	 * and the picture is never displayed (a uniform green window).
++	 */
++	if (two_planes &&
+ 	    view->nb_planes == 1 &&
+ 	    (info->drm_format == DRM_FORMAT_NV12 ||
+ 	     info->drm_format == DRM_FORMAT_P010) &&
+diff --git a/src/v4l2_request.h b/src/v4l2_request.h
+index 80ca83e..98c7cd2 100644
+--- a/src/v4l2_request.h
++++ b/src/v4l2_request.h
+@@ -179,6 +179,12 @@ struct v4l2r_surface {
+ 	/* A finished decode still needs (or is undergoing) format conversion
+ 	 * into the backing. Protected by ctx->mutex. */
+ 	bool convert_pending;
++	/* The surface's standalone backing was handed to a client (derived
++	 * image or dma-buf export) before the surface was ever decoded. Clients
++	 * such as Chromium cache such imports per surface id, so the backing
++	 * must stay the presented storage for the surface's whole life and
++	 * every decoded frame is copied into it. */
++	bool keep_backing;
+ 	/* Codec scratch, e.g. the AV1 order hint of the decoded frame. */
+ 	uint32_t codec_tag;
+ };
+@@ -250,6 +256,9 @@ struct v4l2r_buffer {
+ 	/* Set for images derived from a surface: data points into the
+ 	 * CAPTURE buffer mapping and must not be freed. */
+ 	bool derived;
++	/* dup()ed dma-buf behind a derived image, handed out through
++	 * vaAcquireBufferHandle() (legacy DRM_PRIME interop), -1 if none. */
++	int dmabuf_fd;
+ };
+ 
+ struct v4l2r_image {
+@@ -650,6 +659,10 @@ int v4l2r_export_capture_dmabufs(struct v4l2r_context *ctx,
+ VAStatus v4l2r_surface_convert_backing(struct v4l2r_driver *drv,
+ 				       struct v4l2r_surface *surface);
+ 
++/* Copy the surface's decoded CAPTURE buffer into its own backing (used for
++ * surfaces a client imported before the first decode, keep_backing). */
++void v4l2r_surface_copy_backing(struct v4l2r_surface *surface);
++
+ /* --- codec table --- */
+ 
+ extern const struct v4l2r_codec v4l2r_codec_mpeg2;

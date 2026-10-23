@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- Feature: Chromium video runs on the VPU. With
+  `LIBVA_DRIVER_NAME=v4l2_request` Chromium decodes 1080p24 H.264 through
+  Cedrus and now *displays* it — before, the picture was a flat green
+  rectangle. Cause, measured by instrumenting the driver: Chromium exports its
+  whole frame pool (22 surfaces) to EGL at start-up, before any of them has
+  been decoded, and then never asks the driver again; those early exports were
+  throwaway standalone backings that the driver dropped when the decode context
+  bound the surface to a CAPTURE buffer, so Chromium kept sampling freed, zeroed
+  memory (YUV 0,0,0 = green). The driver now keeps such a backing for the
+  surface's lifetime and copies each decoded frame into it (one NV12 copy per
+  frame, Chromium only; VLC and mpv export after decode and stay zero-copy).
+  Measured 102–176 % of one core against 201–232 % software.
+
+- Feature: VLC 3 plays video zero-copy on the VPU. It has no V4L2 path of its
+  own, but it speaks VA-API, and the libva driver over the request API reaches
+  Cedrus. Two driver fixes were needed: `vaAcquireBufferHandle()` was a stub
+  returning UNIMPLEMENTED (VLC probes its dmabuf path before accepting the GL
+  converter, and silently fell back to software without it), and
+  `vaExportSurfaceHandle()` only split NV12 into layers when the client asked
+  for `VA_EXPORT_SURFACE_SEPARATE_LAYERS` — VLC 3 passes `flags=0` and then
+  rejects any multi-plane layer, so it rendered an empty GL surface (green).
+  Both live in `build/patches/libva-v4l2-request-fixes.patch`, applied by
+  `tools/build-va-v4l2request.sh`; the pin stays at tag 1.3 because upstream
+  master requires `V4L2_CAP_VIDEO_M2M_MPLANE` and cedrus is single-planar.
+  Measured 1080p24: H.264 11 % of one core (VLC software 228 %, mpv 20 %),
+  HEVC 22 %, HEVC 540p 13 %.
+
+- Feature: `tools/bench-video-players.py` measures every playback path on the
+  device — CPU, RSS, GPU devfreq and battery draw — and the resulting table
+  (mpv, VLC, ffmpeg, Chromium; hardware and software) is in
+  `docs/video-decode.md`. Two findings worth keeping: the Mali never leaves its
+  minimum 420 MHz at the 640×480 panel (playback is CPU/VPU-bound, not GPU), and
+  the AXP gauge reports 416–427 mA whatever runs, so CPU time is the only
+  usable energy proxy. The VPU is cheaper, not faster: decode-only ffmpeg does
+  27 fps on hardware against 57 fps on the CPU, at a third of the CPU time.
+
 - Fix: the blue video is gone — zero-copy works for every picture width.
   The VPU decodes into a picture whose stride the Cedrus driver aligned to 16
   bytes, and Mali (this SoC has a Mali-G31) only imports linear surfaces

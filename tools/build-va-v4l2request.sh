@@ -4,12 +4,19 @@
 # rootfs, so the .so is ready to push the moment the device is reachable.
 # (On-device compile costs ~an hour on 1 GB of RAM; this takes ~a minute.)
 #
-# Context: docs/video-decode.md ("Chromium and the VPU", "Watching video with
-# VLC"). The driver is what lets VA-API clients reach Cedrus; two interop fixes
-# on top of tag 1.3 (build/patches/libva-v4l2-request-interop.patch) make VLC 3
-# display decoded frames zero-copy instead of rendering a green window. Chromium
-# still shows green for its own reason (stale surface backing, see the doc), and
-# Firefox does not engage its VA-API decoder here.
+# Context: docs/video-decode.md ("Watching video with VLC", "Chromium").
+# The driver is what lets VA-API clients reach Cedrus. Three fixes on top of tag
+# 1.3 (build/patches/libva-v4l2-request-fixes.patch) make VLC 3 and Chromium
+# display decoded frames, VLC zero-copy: a working vaAcquireBufferHandle(), one
+# plane per exported layer regardless of the hint, and keeping (not dropping) a
+# surface backing that a client imported before the first decode.
+#
+# Tag 1.3 is deliberate. Upstream master (f54d8d2, "surface: simplify backing")
+# has the better design - one CAPTURE buffer per surface, queued with
+# V4L2_MEMORY_DMABUF, so surface memory is stable from creation - but it
+# requires V4L2_CAP_VIDEO_M2M_MPLANE and cedrus advertises only
+# V4L2_CAP_VIDEO_M2M, so it fails to initialise here ("no V4L2 Request API
+# decoder found"). Revisit if the kernel driver grows multiplane support.
 #
 # The artifact is staged at work/va-driver/v4l2_request_drv_video.so; --ship
 # installs it into the rootfs, and tools/test-va-v4l2request.sh runs the checks
@@ -44,10 +51,11 @@ grep -q "v4l2_request" "$SRC/meson.build" || die "unexpected checkout at tag $VA
 # "VLC"): vaAcquireBufferHandle() is implemented instead of returning
 # UNIMPLEMENTED, and NV12/P010 export one plane per layer even when the client
 # passes flags=0 - VLC 3 asks that way but rejects a composite layer.
-patch -d "$SRC" -p1 -s --forward < "$TOP/build/patches/libva-v4l2-request-interop.patch" \
-  || die "the interop patch did not apply"
-grep -q "buf_info->mem_size = v4l2r_buffer_bytes(buffer)" "$SRC/src/buffer.c" \
-  || die "the interop patch did not apply"
+patch -d "$SRC" -p1 -s --forward < "$TOP/build/patches/libva-v4l2-request-fixes.patch" \
+  || die "the driver fixes patch did not apply"
+for sym in "buf_info->mem_size = v4l2r_buffer_bytes(buffer)" keep_backing; do
+  grep -rq "$sym" "$SRC/src" || die "the driver fixes patch did not apply ($sym)"
+done
 
 chroot_mount
 in_chroot "apt-get update -qq && apt-get install -y -qq --no-install-recommends $DEV_PKGS"
