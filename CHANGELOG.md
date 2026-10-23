@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fix: kernel messages are logged to a file again. On this image journald never
+  imports `/dev/kmsg` (a probe written there shows in `dmesg` and never appears
+  in `journalctl -k`, even after restarting journald), so the 2026-10-23 hangs
+  left no kernel trace at all. `rg35xxh-kmsg-log.service` runs
+  `dmesg --follow` into `/var/log/kmsg.log`, which is the file to read first
+  after a crash.
+
 - Feature: `goblin-watch <url>` plays YouTube/Twitch on the VPU. yt-dlp
   (installed with `pipx install --global` by `build/04f-streaming.sh`; the
   Debian package is too old for YouTube and fails with "The page needs to be
