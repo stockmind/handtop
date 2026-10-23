@@ -677,6 +677,40 @@ consumer inherits it. On this image that is only `ffmpeg -hwaccel vaapi`
 (uselessly memory-hungry here: `Cannot allocate memory` at device setup under
 CMA pressure) and Firefox (does not engage its VA decoder anyway).
 
+## Watching streams (YouTube, Twitch, …)
+
+`goblin-watch <url>` plays a stream on the VPU: `yt-dlp` (installed by
+`build/04f-streaming.sh`, `pipx install --global`) extracts, `mpv` plays and
+decodes with Cedrus.
+
+```
+$ goblin-watch https://www.youtube.com/watch?v=…
+ ● Video  --vid=1  (h264 1280x720 60 fps) [default]
+ Using hardware decoding (drm).
+ VO: [gpu] 1280x720 drm_prime[nv12]
+```
+
+The wrapper pins three things: `--ytdl-format` prefers **H.264** (the only
+codec Cedrus decodes; YouTube otherwise serves VP9/AV1, which would fall back to
+software), caps at **720p** (the panel is 640×480), and passes
+`--ytdl-raw-options=js-runtimes=node` — yt-dlp needs a JavaScript runtime for
+YouTube and `nodejs` already ships in the image.
+
+Measured 2026-10-23, 720p60 H.264 from YouTube: **47 % of one core, 144 MB RSS**,
+zero-copy (`drm_prime[nv12]`). One transient
+`Error while decoding frame (hardware decoding)!` appears on the first frame;
+playback continues on hardware.
+
+Why not a browser: the same video in Chromium is 154–174 % CPU and ~1 GB RSS on
+a 975 MB device. Why not VLC: YouTube only offers DASH (separate video and audio
+URLs, no progressive format left), and VLC cannot mux two URLs; mpv can. VLC is
+fine for Twitch, whose HLS is already muxed H.264+AAC.
+
+yt-dlp goes stale when YouTube changes: update with
+`pipx upgrade --global yt-dlp` on the device (or rebuild with a newer
+`YTDLP_VERSION`). The Debian package (2025.04) is already too old and fails with
+`The page needs to be reloaded`.
+
 ## How it works
 
 | Piece | What | Where |

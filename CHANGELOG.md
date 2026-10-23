@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Feature: `goblin-watch <url>` plays YouTube/Twitch on the VPU. yt-dlp
+  (installed with `pipx install --global` by `build/04f-streaming.sh`; the
+  Debian package is too old for YouTube and fails with "The page needs to be
+  reloaded") extracts, mpv plays. The wrapper prefers H.264 — the only codec
+  Cedrus decodes, so YouTube's default VP9/AV1 does not silently fall back to
+  software — caps at 720p for the 640×480 panel, and passes node as yt-dlp's
+  JavaScript runtime (nodejs is already in the image). Measured 720p60 H.264
+  from YouTube: 47 % of one core, 144 MB RSS, zero-copy
+  (`VO: [gpu] drm_prime[nv12]`), against 154–174 % and ~1 GB for the same video
+  in Chromium, and against VLC, which cannot play YouTube at all (DASH only, no
+  progressive format, and VLC cannot mux a video-only and an audio-only URL).
+  Twitch works in either player (muxed HLS).
+
 - Change: Chromium and VLC use the VPU out of the box. `build/04e-va-api.sh`
   ships the VA-API driver in the image and the desktop session exports
   `LIBVA_DRIVER_NAME=v4l2_request` before `exec labwc`; nothing else is needed

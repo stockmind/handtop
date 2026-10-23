@@ -1,0 +1,14 @@
+#!/bin/sh
+# Play a video/stream URL through the VPU:  goblin-watch <url> [mpv options]
+#
+# yt-dlp extracts (YouTube, Twitch, ...), mpv plays it zero-copy via the Cedrus
+# VPU. H.264 is preferred because that is the only codec the hardware decodes,
+# YouTube's DASH video and audio streams are muxed by mpv, and 720p is the
+# useful limit for the 640x480 panel (~47% of one core, ~145 MB RSS measured,
+# against 154-174% and ~1 GB for the same video in Chromium).
+#
+# node is the JavaScript runtime yt-dlp needs for YouTube; it ships in the image.
+exec mpv --hwdec=auto-safe --vo=gpu --profile=fast \
+	--ytdl-format='bv*[vcodec^=avc1][height<=720]+ba/b[height<=720]/bv*+ba/b' \
+	--ytdl-raw-options='js-runtimes=node' \
+	"$@"
