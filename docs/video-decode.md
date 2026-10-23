@@ -404,7 +404,10 @@ so mpv, the `ffmpeg` CLI and Moonlight all reach it — while Chromium video
 stays software-decoded (it plays 1080p24 in real time at ~2 cores). Revisit if
 Chromium's dmabuf import on panfrost or the driver's DRM PRIME export is fixed;
 the backend is unmaintained upstream and unpackaged in Debian, so it would have
-to be built in the image either way.
+to be built in the image either way. VLC 3 also went green on this driver, but
+for a different reason — a composite descriptor its GL converter rejects, fixed
+in "Watching video with VLC" above; Chromium asks for separate layers and still
+shows green, so that one is the stale-backing case described here.
 
 ### Revisit plan (researched 2026-10-17, device offline; try in this order)
 
@@ -460,6 +463,69 @@ runs the whole plan over SSH with screenshots pulled back to `work/va-shots/`.
   driver fully outside browsers), then filing the Chromium stale-backing case
   upstream with these traces.
 
+## Watching video with VLC (3.0.24, XWayland, zero-copy)
+
+VLC has no V4L2 path of its own, but it speaks VA-API, and the libva driver over
+the request API (built for the Chromium experiment, `tools/build-va-v4l2request.sh`)
+reaches Cedrus. With the interop patch described below it decodes **and displays
+zero-copy** through EGL + `glconv_vaapi_x11`:
+
+```
+$ LIBVA_DRIVER_NAME=v4l2_request vlc --avcodec-hw=vaapi file.mkv
+[avcodec] Using v4l2-request for hardware decoding
+libva-v4l2request: decoding h264 via /dev/video0 [cedrus] (media /dev/media0)
+[egl_x11] using opengl module "egl_x11"
+[generic] using glconv module "glconv_vaapi_x11"
+```
+
+Measured 2026-10-23 on the device, 1080p24 sources, CPU from `/proc/<pid>/stat`
+over 8 s (1440×1080 HEVC source is a 6 s clip, looped):
+
+| VLC 3.0.24 | CPU (one core) | VLC software, same file |
+|---|---|---|
+| H.264 1080p | 11 % | 208 % |
+| HEVC 1080p | 22 % | 207 % |
+| HEVC 540p | 13 % | 81 % |
+
+mpv is 18 % on the H.264 file (its `vo=gpu` does more work than VLC's bare GL
+surface), so VLC is not the slow path any more. Zero dropped frames, no late
+pictures in either codec.
+
+Quirks worth knowing:
+
+- **XWayland only.** VLC 3.0's Wayland window modules speak `wl_shell` and the
+  pre-stable xdg-shell; labwc offers neither (`main window debug: no vout window
+  modules matched`), so VLC needs `DISPLAY=:0`. VLC 4 has stable xdg-shell but is
+  not in trixie.
+- `LIBVA_DRIVER_NAME=v4l2_request vlc --avcodec-hw=vaapi`. The default vout then
+  picks `gl` + `egl_x11` + the vaapi converter on its own. Without the two
+  settings VLC decodes in software (208 %) and nothing tells the user.
+- `--vout=xcb_x11` is the copy fallback (VAOP→I420 via `vaapi_filters`, 94 %
+  CPU): slower, but it needs no dmabuf interop, so keep it as a diagnosis tool.
+
+### The two interop fixes (`build/patches/libva-v4l2-request-interop.patch`)
+
+1. **`vaAcquireBufferHandle()`/`vaReleaseBufferHandle()` were stubs** returning
+   `VA_STATUS_ERROR_UNIMPLEMENTED`. VLC 3 probes its dmabuf path before it
+   accepts the GL converter (`vaDeriveImage`, then Acquire with DRM_PRIME, then
+   an EGLImage in `tc_vaegl_get_pool`); the probe failing aborted the whole vout
+   and VLC fell back to software decoding without an error. The patch hands out
+   the dma-buf `vaExportSurfaceHandle()` would return, dup'ed per image.
+2. **With that fixed VLC drew a uniform green window.** Not a bad import: the
+   driver exported a composite descriptor (one layer, `num_planes = 2`) because
+   VLC passes `flags = 0`, and VLC 3 *rejects* any multi-plane layer in its GL
+   converter (`if (layers[i].num_planes > 1) goto error;`) — an empty GL surface
+   reads as YUV(0,0,0), which converts to flat green. `VA_EXPORT_SURFACE_SEPARATE_LAYERS`
+   is a hint rather than a requirement, so the patch now always exports NV12/P010
+   as two single-plane layers (R8 + GR88) pointing into the same object.
+   Verified by dumping the exported buffer from inside the driver: it held real
+   decoded luma (`ysum` ≈ 1.2 M, non-zero across the plane) while the screen was
+   green, which is what ruled out a wrong plane offset or modifier.
+
+**This is not the Chromium green.** Chromium asks for separate layers and gets
+them; it consumes a stale backing (see the section above), which this patch does
+not change.
+
 ## How it works
 
 | Piece | What | Where |
@@ -478,9 +544,11 @@ Players:
   (`hwdec=auto-safe` → `drm` in `/etc/mpv/mpv.conf`), copy paths as fallback
   (`v4l2request-copy`, `drm-copy`), and `ffmpeg -hwaccel v4l2request` on the CLI.
   Throughput caveats above. AV1 is software (dav1d) on purpose: no Cedrus AV1.
-- Not covered: ffplay decodes in software only, VLC has no V4L2 code path at
-  all, and Chromium cannot use the V4L2 stateless decoder (its Linux decoder only
-  offers the GL output path, which does not accept these dmabufs).
+- **VLC 3.0.24** — zero-copy through the libva bridge (see "Watching video with
+  VLC"): `LIBVA_DRIVER_NAME=v4l2_request vlc --avcodec-hw=vaapi`, under XWayland.
+- Not covered: ffplay decodes in software only, and Chromium cannot use the V4L2
+  stateless decoder (its Linux decoder only offers the GL output path, which does
+  not accept these dmabufs).
 
 ## Source
 
