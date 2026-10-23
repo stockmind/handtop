@@ -438,7 +438,7 @@ pure YUV(0,0,0) green with no logged error — matching every observation above.
    `cma=320M` or freed RAM to get a bit-exact `hwdownload` check independent
    of any browser.
 
-Prepared offline 2026-10-17 while the device was offline: the driver (tag 1.3)
+Prepared offline 2026-10-17 while the device was offline: the driver (tag 1.3 then)
 is cross-built in the qemu chroot by `tools/build-va-v4l2request.sh` (artifact
 `work/va-driver/v4l2_request_drv_video.so`, arm64, NEEDED=libc only as VA
 drivers require), and `tools/test-va-v4l2request.sh push|info|chromium|firefox`
@@ -464,41 +464,37 @@ runs the whole plan over SSH with screenshots pulled back to `work/va-shots/`.
 
 ### Chromium is fixed (2026-10-23)
 
-The stale-backing theory was right, and the driver now works around it
-(`build/patches/libva-v4l2-request-fixes.patch`, item 3). Evidence, from
+The stale-backing theory was right, and upstream's current design (one CAPTURE
+buffer per surface, queued with `V4L2_MEMORY_DMABUF`) is the fix: the surface's
+memory is now allocated once and never swapped, so a client that imports it
+before the first decode keeps sampling the right buffer. Evidence, from
 instrumenting the driver while Chromium played a 1080p24 H.264 file:
 
-```
-v4l2r-entry: export sid=67108864 keep=0        <- 22 exports, once, at init
-v4l2r-bind:  sid=67108864 keep_backing (pitch 1920, cap 0)
-v4l2r-copy:  sid=67108864 plane=0 3133440 bytes pitch 1920->1920
-```
-
 - Chromium calls `vaExportSurfaceHandle()` **22 times at start-up** (its frame
-  pool), before any frame has been decoded, and then never again — it keeps the
+  pool), before any frame has been decoded, then never again — it caches the
   EGL imports per surface id.
-- Before the fix those exports were throwaway standalone backings, dropped as
-  soon as the decode context bound the surface to a CAPTURE buffer. Chromium
-  kept sampling the freed, zeroed buffer: YUV(0,0,0), flat green, forever.
-  (Earlier instrumentation of `vaDeriveImage` showed the same thing on the other
-  entry point: 22/22 derivations with `bound=0` and `ysum=0`.)
-- Now the backing is kept (`keep_backing`) and, at every decode completion
-  (DQBUF of the CAPTURE buffer, in `decode.c`), copied into it. Chromium shows
-  the correct picture, subtitles included.
+- On tag 1.3 those exports were throwaway standalone backings, dropped as soon
+  as the decode context bound the surface to a CAPTURE buffer; Chromium kept
+  sampling freed, zeroed memory: YUV(0,0,0), flat green, forever. (Instrumenting
+  `vaDeriveImage` on the other entry point showed the same: 22/22 derivations
+  with `bound=0` and `ysum=0`.)
+- On master + the single-planar port there is no swap and no copy; the picture
+  is correct, subtitles included, at 154–174 % of one core and ~1.0 GB RSS
+  (software: 251–260 %, 887–1051 MB, three 10 s runs). The gain is modest
+  because a browser's own work — layout, compositing, subtitle rendering —
+  dominates; the video decode is no longer part of it.
+- Firefox still does not engage its VA-API decoder here, so it stays software.
 
-Cost: one NV12 copy per frame (3.1 MB at 1080p ≈ 75 MB/s at 24 fps) for the
-surfaces that were imported pre-decode — Chromium only; VLC and mpv export after
-decode and take the zero-copy path unchanged. Chromium CPU 102–176 % of one core
-and RSS 875–1033 MB across three 10 s runs (vs 201–232 % / 756–922 MB software).
-The spread is the browser, not the video path. Firefox still does not engage
-its VA-API decoder here, so it stays software.
+An intermediate revision (tag 1.3 plus a "keep the backing and copy every frame
+into it" fix) also un-greened Chromium, at one NV12 copy per frame; it was
+dropped when the base moved to master, which solves it structurally.
 
 ## Watching video with VLC (3.0.24, XWayland, zero-copy)
 
 VLC has no V4L2 path of its own, but it speaks VA-API, and the libva driver over
-the request API (built for the Chromium experiment, `tools/build-va-v4l2request.sh`)
-reaches Cedrus. With the interop patch described below it decodes **and displays
-zero-copy** through EGL + `glconv_vaapi_x11`:
+the request API (`tools/build-va-v4l2request.sh`, upstream master + the
+single-planar port) reaches Cedrus. With the interop fixes described below it
+decodes **and displays zero-copy** through EGL + `glconv_vaapi_x11`:
 
 ```
 $ LIBVA_DRIVER_NAME=v4l2_request vlc --avcodec-hw=vaapi file.mkv
@@ -534,7 +530,7 @@ Quirks worth knowing:
 - `--vout=xcb_x11` is the copy fallback (VAOP→I420 via `vaapi_filters`, 94 %
   CPU): slower, but it needs no dmabuf interop, so keep it as a diagnosis tool.
 
-### The driver fixes (`build/patches/libva-v4l2-request-fixes.patch`)
+### The driver fixes (`build/patches/libva-v4l2-request-fixes.patch`, on master)
 
 1. **`vaAcquireBufferHandle()`/`vaReleaseBufferHandle()` were stubs** returning
    `VA_STATUS_ERROR_UNIMPLEMENTED`. VLC 3 probes its dmabuf path before it
@@ -553,24 +549,29 @@ Quirks worth knowing:
    decoded luma (`ysum` ≈ 1.2 M, non-zero across the plane) while the screen was
    green, which is what ruled out a wrong plane offset or modifier.
 
-3. **The third fix is for Chromium, not VLC** (VLC re-exports every frame and
-   never hits it): a surface backing that a client imported *before* the surface
-   was decoded is kept for the surface's lifetime and every decoded frame is
-   copied into it, instead of being dropped when the decode context takes over.
-   That is what un-greens Chromium — details in "Chromium" above.
+3. **Single-planar support** (the only non-VA fix, and the reason the base is
+   master + patch rather than master as-is). Master's commit `4cb4bde`
+   ("require multiplane support") deleted the dual-planar plumbing
+   (−183/+69 lines) because its author's SoCs are multiplanar; cedrus exposes
+   `V4L2_CAP_VIDEO_M2M` only, so the probe fails with `no V4L2 Request API
+   decoder found` and neither VLC nor Chromium ever reaches the VPU. The patch
+   restores the fallback in one place (format accessors + the buffer type
+   choice) instead of reverting that commit.
 
-**Why tag 1.3 and not upstream master.** Master (`f54d8d2`, "surface: simplify
-backing") replaces this with a better design: each surface owns one CAPTURE
-buffer for its whole life, queued with `V4L2_MEMORY_DMABUF`, so its memory is
-stable from creation and no copy is needed. It cannot run here: master requires
-`V4L2_CAP_VIDEO_M2M_MPLANE`, cedrus advertises only `V4L2_CAP_VIDEO_M2M`
-(single-planar), and the driver fails to initialise with
-`libva-v4l2request: no V4L2 Request API decoder found`. Revisit when the kernel
-driver grows multiplane support.
+**Why not convert cedrus to multiplanar instead?** It would let us run upstream
+unmodified, but it is a ~300–400 line change to a shared kernel interface
+(`ctx->src_fmt/dst_fmt` is referenced 46 times across `cedrus_video.c`,
+`cedrus_dec.c` and the three codec backends, plus the vb2 queue types and
+`queue_setup`), it would have to be re-validated for *every* consumer —
+Moonlight's own FFmpeg, system ffmpeg/mpv, VLC, Chromium — and re-applied on
+each ROCKNIX kernel bump. Fixing the component that made the assumption (the
+libva driver, which is SoC-generic by design) has a far smaller blast radius.
+This single-planar patch is also the piece worth sending upstream.
 
 ## Player resource matrix (measured 2026-10-23)
 
-`tools/bench-video-players.py` (run on the device) loops a 1080p24 H.264 file,
+All rows are with the shipped driver build (upstream master + single-planar
+port) and VLC 3.0.24. `tools/bench-video-players.py` loops a 1080p24 H.264 file,
 skips the first 7 s, then samples for 12 s: CPU is process-tree ticks over that
 window (one core = 100 %), RAM is tree `VmRSS`, GPU is the Mali devfreq
 frequency 4×/s (governor is `simple_ondemand`, so frequency tracks load) and
@@ -579,16 +580,16 @@ decode/upload differs between rows.
 
 | configuration | decode | display | CPU (1 core) | RAM | GPU | picture |
 |---|---|---|---|---|---|---|
-| mpv `hwdec=auto-safe` | VPU (`drm`) | dmabuf→GL, zero-copy | **20 %** | 132 MB | 420 MHz (idle) | correct |
-| mpv `hwdec=v4l2request-copy` | VPU | CPU download | 114 % | 143 MB | 420 MHz | correct |
-| mpv `hwdec=no` | CPU | — | 152 % | 185 MB | 420 MHz | correct |
-| VLC `--avcodec-hw=vaapi` | VPU (VA-API) | dmabuf→EGL, zero-copy | **11 %** | 132 MB | 420 MHz (2 % at 648) | correct |
-| VLC `--vout=xcb_x11` | VPU | VAOP→I420 copy | 94 % | 84 MB | 420 MHz | correct |
-| VLC `--avcodec-hw=none` | CPU | — | 228 % | 240 MB | 420 MHz | correct |
-| `ffmpeg -hwaccel v4l2request -f null` | VPU | none, frames downloaded | 104 % | 75 MB | — | 27 fps (1.12×) |
-| `ffmpeg -f null` | CPU | none | 376 % | 102 MB | — | 57 fps (2.39×) |
-| Chromium (default) | CPU | — | 201–232 % | 756–922 MB | 420 MHz | correct |
-| Chromium + `LIBVA_DRIVER_NAME=v4l2_request` | VPU (VA-API) | dmabuf→GL, kept backing | 102–176 % | 875–1033 MB | 420 MHz | correct |
+| mpv `hwdec=auto-safe` | VPU (`drm`) | dmabuf→GL, zero-copy | **18 %** | 129 MB | 420 MHz (idle) | correct |
+| mpv `hwdec=v4l2request-copy` | VPU | CPU download | 114 % | 144 MB | 420 MHz | correct |
+| mpv `hwdec=no` | CPU | — | 152 % | 186 MB | 420 MHz | correct |
+| VLC `--avcodec-hw=vaapi` | VPU (VA-API) | dmabuf→EGL, zero-copy | **11 %** | 142 MB | 458 MHz (17 % at 648) | correct |
+| VLC `--vout=xcb_x11` | VPU | VAOP→I420 copy | 93 % | 85 MB | 420 MHz | correct |
+| VLC `--avcodec-hw=none` | CPU | — | 227 % | 241 MB | 420 MHz | correct |
+| `ffmpeg -hwaccel v4l2request -f null` | VPU | none, frames downloaded | 104 % | 77 MB | — | 27 fps (1.12×) |
+| `ffmpeg -f null` | CPU | none | 373 % | 102 MB | — | 57 fps (2.39×) |
+| Chromium (default) | CPU | — | 251–260 % | 887–1051 MB | 420 MHz | correct |
+| Chromium + `LIBVA_DRIVER_NAME=v4l2_request` | VPU (VA-API) | dmabuf→GL | 154–174 % | ~1003 MB | 420 MHz | correct |
 
 HEVC (6 s clips, looped):
 
@@ -618,10 +619,9 @@ What the numbers say:
   `vo=dmabuf-wayland`, no XWayland requirement).
 - **Chromium is the odd one out**: it is the only listed configuration that
   burns a core *and* the only one with RAM near 1 GB, and the VPU buys it only
-  ~1.2–1.7× CPU rather than 10×, because the driver has to copy each frame into
-  the backing Chromium imported before decoding ("Chromium is fixed" above). It
-  is also the only row measured over three runs, because the browser's own work
-  (layout, compositing, subtitles) moves the number around 40 %.
+  ~1.5× CPU rather than 10×, because a browser's own work (layout, compositing,
+  subtitle rendering) dominates once decode is off the CPU. It is also the only
+  row measured over three runs: the browser moves the number by tens of percent.
 - **The numbers are single runs unless a range is given** (`/proc` sampling is
   stable for the players; the browser is not).
 

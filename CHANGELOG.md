@@ -2,32 +2,40 @@
 
 ## Unreleased
 
-- Feature: Chromium video runs on the VPU. With
-  `LIBVA_DRIVER_NAME=v4l2_request` Chromium decodes 1080p24 H.264 through
-  Cedrus and now *displays* it — before, the picture was a flat green
-  rectangle. Cause, measured by instrumenting the driver: Chromium exports its
-  whole frame pool (22 surfaces) to EGL at start-up, before any of them has
-  been decoded, and then never asks the driver again; those early exports were
-  throwaway standalone backings that the driver dropped when the decode context
-  bound the surface to a CAPTURE buffer, so Chromium kept sampling freed, zeroed
-  memory (YUV 0,0,0 = green). The driver now keeps such a backing for the
-  surface's lifetime and copies each decoded frame into it (one NV12 copy per
-  frame, Chromium only; VLC and mpv export after decode and stay zero-copy).
-  Measured 102–176 % of one core against 201–232 % software.
+- Change: the VA-API driver is based on upstream master again, not tag 1.3.
+  Master's `surface: simplify backing` (f54d8d2) gives every VA surface one
+  CAPTURE buffer for its lifetime, queued as `V4L2_MEMORY_DMABUF` — stable
+  memory from creation. That is what Chromium needs, so the previous
+  "keep the backing and copy each decoded frame into it" workaround is gone and
+  Chromium keeps its zero-copy path. The pin had only been on 1.3 because
+  master's `require multiplane support` (4cb4bde) deleted the dual-planar
+  plumbing and cedrus exposes single-planar only; `build/patches/libva-v4l2-request-fixes.patch`
+  restores that fallback (~80 lines: format accessors plus the buffer-type
+  choice in probe, context and surface setup) instead of pinning an old tag.
+  A multiplanar conversion of cedrus itself was rejected: ~300–400 lines across
+  the video layer and three codec backends, affecting Moonlight, ffmpeg/mpv,
+  VLC and Chromium alike, to fix one client; the libva patch is also the piece
+  worth sending upstream.
+
+- Feature: Chromium video runs on the VPU and displays correctly (it used to
+  show a flat green rectangle). Chromium exports its whole frame pool (22
+  surfaces) to EGL at start-up, before any of them has been decoded, and then
+  never asks the driver again; on tag 1.3 those early exports were throwaway
+  backings that the driver dropped when the decode context bound the surface to
+  a CAPTURE buffer, so Chromium sampled freed, zeroed memory (YUV 0,0,0 =
+  green). Measured on 1080p24: 154–174 % of one core against 251–260 %
+  software, ~1.0 GB RSS either way.
 
 - Feature: VLC 3 plays video zero-copy on the VPU. It has no V4L2 path of its
   own, but it speaks VA-API, and the libva driver over the request API reaches
-  Cedrus. Two driver fixes were needed: `vaAcquireBufferHandle()` was a stub
-  returning UNIMPLEMENTED (VLC probes its dmabuf path before accepting the GL
-  converter, and silently fell back to software without it), and
-  `vaExportSurfaceHandle()` only split NV12 into layers when the client asked
-  for `VA_EXPORT_SURFACE_SEPARATE_LAYERS` — VLC 3 passes `flags=0` and then
-  rejects any multi-plane layer, so it rendered an empty GL surface (green).
-  Both live in `build/patches/libva-v4l2-request-fixes.patch`, applied by
-  `tools/build-va-v4l2request.sh`; the pin stays at tag 1.3 because upstream
-  master requires `V4L2_CAP_VIDEO_M2M_MPLANE` and cedrus is single-planar.
-  Measured 1080p24: H.264 11 % of one core (VLC software 228 %, mpv 20 %),
-  HEVC 22 %, HEVC 540p 13 %.
+  Cedrus. Two VA-API fixes were needed on top of the single-planar port:
+  `vaAcquireBufferHandle()` was a stub returning UNIMPLEMENTED (VLC probes its
+  dmabuf path before accepting the GL converter, and silently fell back to
+  software without it), and `vaExportSurfaceHandle()` only split NV12 into
+  layers when the client asked for `VA_EXPORT_SURFACE_SEPARATE_LAYERS` — VLC 3
+  passes `flags=0` and then rejects any multi-plane layer, so it rendered an
+  empty GL surface (green). Measured 1080p24: H.264 11 % of one core (VLC
+  software 227 %, mpv 18 %), HEVC 22 %, HEVC 540p 13 %.
 
 - Feature: `tools/bench-video-players.py` measures every playback path on the
   device — CPU, RSS, GPU devfreq and battery draw — and the resulting table

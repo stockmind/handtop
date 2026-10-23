@@ -1,22 +1,24 @@
 #!/bin/bash
-# Cross-build sofus13/libva-v4l2_request (tag 1.3) — the VA-API backend driver
+# Cross-build sofus13/libva-v4l2_request (master, pinned) — the VA-API backend driver
 # over the V4L2 stateless Request API — inside a qemu chroot of the image
 # rootfs, so the .so is ready to push the moment the device is reachable.
 # (On-device compile costs ~an hour on 1 GB of RAM; this takes ~a minute.)
 #
 # Context: docs/video-decode.md ("Watching video with VLC", "Chromium").
-# The driver is what lets VA-API clients reach Cedrus. Three fixes on top of tag
-# 1.3 (build/patches/libva-v4l2-request-fixes.patch) make VLC 3 and Chromium
-# display decoded frames, VLC zero-copy: a working vaAcquireBufferHandle(), one
-# plane per exported layer regardless of the hint, and keeping (not dropping) a
-# surface backing that a client imported before the first decode.
+# Bases on upstream master (f54d8d2: one CAPTURE buffer per surface, queued
+# with V4L2_MEMORY_DMABUF, so a surface's memory is stable from creation - which
+# is what Chromium needs) plus build/patches/libva-v4l2-request-fixes.patch:
 #
-# Tag 1.3 is deliberate. Upstream master (f54d8d2, "surface: simplify backing")
-# has the better design - one CAPTURE buffer per surface, queued with
-# V4L2_MEMORY_DMABUF, so surface memory is stable from creation - but it
-# requires V4L2_CAP_VIDEO_M2M_MPLANE and cedrus advertises only
-# V4L2_CAP_VIDEO_M2M, so it fails to initialise here ("no V4L2 Request API
-# decoder found"). Revisit if the kernel driver grows multiplane support.
+#  1. single-planar support. Master dropped the dual-planar code in 4cb4bde
+#     ("require multiplane support", -183/+69) because its author's SoCs
+#     (RK3399/RK3588) are multiplanar. Cedrus exposes V4L2_CAP_VIDEO_M2M only,
+#     so master refuses it ("no V4L2 Request API decoder found"). This restores
+#     the single-planar fallback; prefer sending it upstream over converting
+#     cedrus to multiplanar (~300-400 lines in a shared kernel API).
+#  2. vaAcquireBufferHandle(): a stub upstream. VLC 3 probes its dmabuf path
+#     with DeriveImage + DRM_PRIME before it accepts the GL converter.
+#  3. NV12/P010 export one plane per layer even when the client passes flags=0
+#     (VLC 3 rejects a composite layer, which shows as a green window).
 #
 # The artifact is staged at work/va-driver/v4l2_request_drv_video.so; --ship
 # installs it into the rootfs, and tools/test-va-v4l2request.sh runs the checks
@@ -34,7 +36,7 @@ source "$TOP/build/config.sh"
 source "$TOP/build/lib/chroot.sh"
 trap chroot_umount EXIT
 
-VA_TAG="1.3"
+VA_TAG="f54d8d2c36433b38ba9b8633ac10eec444ac9cf1"   # master: surface: simplify backing
 VA_URL="https://github.com/sofus13/libva-v4l2_request.git"
 SRC="$WORK/src/libva-v4l2_request"
 OUT="$WORK/va-driver"
@@ -44,16 +46,14 @@ DEV_PKGS="meson ninja-build pkg-config libva-dev libdrm-dev ca-certificates git"
 [ -e "$SRC" ] && safe_rm -r "$SRC"
 mkdir -p "$SRC"
 git init -q "$SRC"
-(cd "$SRC" && git remote add origin "$VA_URL" && git fetch -q --depth 1 origin "refs/tags/$VA_TAG" && git checkout -q FETCH_HEAD)
-grep -q "v4l2_request" "$SRC/meson.build" || die "unexpected checkout at tag $VA_TAG"
+(cd "$SRC" && git remote add origin "$VA_URL" && git fetch -q --depth 1 origin "$VA_TAG" && git checkout -q FETCH_HEAD)
+grep -q "v4l2_request" "$SRC/meson.build" || die "unexpected checkout at $VA_TAG"
 
-# Interop fixes for mpv-like dmabuf consumers and VLC 3 (docs/video-decode.md,
-# "VLC"): vaAcquireBufferHandle() is implemented instead of returning
-# UNIMPLEMENTED, and NV12/P010 export one plane per layer even when the client
-# passes flags=0 - VLC 3 asks that way but rejects a composite layer.
+# Single-planar support + the two VA-API interop fixes (see the header).
 patch -d "$SRC" -p1 -s --forward < "$TOP/build/patches/libva-v4l2-request-fixes.patch" \
   || die "the driver fixes patch did not apply"
-for sym in "buf_info->mem_size = v4l2r_buffer_bytes(buffer)" keep_backing; do
+for sym in "buf_info->mem_size = v4l2r_buffer_bytes(buffer)" \
+           "v4l2r_format_pixelformat" "V4L2_CAP_VIDEO_M2M)" ; do
   grep -rq "$sym" "$SRC/src" || die "the driver fixes patch did not apply ($sym)"
 done
 
