@@ -479,7 +479,9 @@ instrumenting the driver while Chromium played a 1080p24 H.264 file:
   `vaDeriveImage` on the other entry point showed the same: 22/22 derivations
   with `bound=0` and `ysum=0`.)
 - On master + the single-planar port there is no swap and no copy; the picture
-  is correct, subtitles included, at 154–174 % of one core and ~1.0 GB RSS
+  is correct, subtitles included, with no Chromium flags at all beyond the
+  session's `LIBVA_DRIVER_NAME=v4l2_request`, at 154–174 % of one core and
+  ~1.0 GB RSS
   (software: 251–260 %, 887–1051 MB, three 10 s runs). The gain is modest
   because a browser's own work — layout, compositing, subtitle rendering —
   dominates; the video decode is no longer part of it.
@@ -524,9 +526,11 @@ Quirks worth knowing:
   pre-stable xdg-shell; labwc offers neither (`main window debug: no vout window
   modules matched`), so VLC needs `DISPLAY=:0`. VLC 4 has stable xdg-shell but is
   not in trixie.
-- `LIBVA_DRIVER_NAME=v4l2_request vlc --avcodec-hw=vaapi`. The default vout then
-  picks `gl` + `egl_x11` + the vaapi converter on its own. Without the two
-  settings VLC decodes in software (208 %) and nothing tells the user.
+- **No per-app flags.** VLC's default `avcodec-hw=any` picks VA-API once a VA
+  driver answers, and the default vout lands on `gl` + `egl_x11` + the vaapi
+  converter by itself. The only thing that has to be in the environment is
+  `LIBVA_DRIVER_NAME=v4l2_request`; the desktop session sets it (see "Default
+  on" below). Without it VLC decodes in software (227 %) and says nothing.
 - `--vout=xcb_x11` is the copy fallback (VAOP→I420 via `vaapi_filters`, 94 %
   CPU): slower, but it needs no dmabuf interop, so keep it as a diagnosis tool.
 
@@ -625,6 +629,30 @@ What the numbers say:
 - **The numbers are single runs unless a range is given** (`/proc` sampling is
   stable for the players; the browser is not).
 
+
+## Default on
+
+Two pieces put Chromium and VLC on the VPU without per-app flags:
+
+- `build/04e-va-api.sh` ships the driver (`/usr/lib/aarch64-linux-gnu/dri/v4l2_request_drv_video.so`),
+  built and patched by `tools/build-va-v4l2request.sh`.
+- `overlay/etc/profile.d/zz-rg35xxh-session.sh` exports
+  `LIBVA_DRIVER_NAME=v4l2_request` before `exec labwc`, so every app started
+  from the desktop inherits it. Nothing else is needed: VLC's default
+  `avcodec-hw=any` selects VA-API, Chromium enables `VaapiVideoDecoder` on its
+  own.
+
+Why the variable and not "just work": libva has no config file and no usable
+built-in default driver on arm64 — the driver name is chosen by
+`LIBVA_DRIVER_NAME` or a compiled-in default that does not exist here. If the
+variable is unset, or the `.so` is missing, `vaInitialize` fails and both apps
+fall back to software decode (no green, no crash) — that is also the switch to
+turn it off (`unset LIBVA_DRIVER_NAME`, or drop the overlay line).
+
+Caveat: the variable is exported for the whole session, so any other VA-API
+consumer inherits it. On this image that is only `ffmpeg -hwaccel vaapi`
+(uselessly memory-hungry here: `Cannot allocate memory` at device setup under
+CMA pressure) and Firefox (does not engage its VA decoder anyway).
 
 ## How it works
 

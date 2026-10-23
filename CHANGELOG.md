@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Change: Chromium and VLC use the VPU out of the box. `build/04e-va-api.sh`
+  ships the VA-API driver in the image and the desktop session exports
+  `LIBVA_DRIVER_NAME=v4l2_request` before `exec labwc`; nothing else is needed
+  (VLC's default `avcodec-hw=any` and Chromium's own VA-API enablement do the
+  rest). libva has no config file and no usable built-in default driver on
+  arm64, which is why the variable is required at all; unsetting it, or
+  dropping the line, returns both apps to software decode cleanly.
+
 - Change: the VA-API driver is based on upstream master again, not tag 1.3.
   Master's `surface: simplify backing` (f54d8d2) gives every VA surface one
   CAPTURE buffer for its lifetime, queued as `V4L2_MEMORY_DMABUF` — stable
