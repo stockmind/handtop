@@ -9,8 +9,18 @@
 # core against 49% for 720p on the same video (measured 2026-10-23), with no
 # visible gain at this size. Override per run with GOBLIN_WATCH_MAX_HEIGHT=720
 # (goblin-tv's quality key does exactly that).
+#
+# Same keys as the goblin client while a video plays (B/Esc closes it and
+# returns to the caller, D-pad seeks, Y pauses ...): /etc/mpv/input-handtop.conf.
+# --terminal=no/--input-terminal=no keep mpv off the tty, so a TUI that spawned
+# us gets its screen back exactly as it was.
 MAX_HEIGHT="${GOBLIN_WATCH_MAX_HEIGHT:-480}"
-exec mpv --hwdec=auto-safe --vo=gpu --profile=fast \
+INPUT_CONF=""
+[ -f /etc/mpv/input-handtop.conf ] && INPUT_CONF="--input-conf=/etc/mpv/input-handtop.conf"
+
+# shellcheck disable=SC2086
+exec mpv --terminal=no --input-terminal=no $INPUT_CONF \
+	--hwdec=auto-safe --vo=gpu --profile=fast \
 	--ytdl-format="bv*[vcodec^=avc1][height<=$MAX_HEIGHT]+ba/b[height<=$MAX_HEIGHT]/bv*+ba/b" \
 	--ytdl-raw-options='js-runtimes=node' \
 	"$@"

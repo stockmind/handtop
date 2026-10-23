@@ -17,7 +17,12 @@
   switches between 480p and 720p. Playback now defaults to **480p**: on the
   640×480 panel it is 29 % of one core against 49 % for 720p, with no visible
   difference (measured on the same video); `GOBLIN_WATCH_MAX_HEIGHT` overrides
-  it for `goblin-watch` outside the TUI.
+  it for `goblin-watch` outside the TUI. While a stream plays, the keys are the
+  same as in the goblin client (`/etc/mpv/input-handtop.conf`): B/Esc closes it
+  and returns to the list that launched it, D-pad seeks, up/down changes speed,
+  A resets, Y pauses, X cycles subtitles — `goblin-watch` now passes that
+  `--input-conf` (before, mpv's built-in Esc was "cycle pause", so B did not
+  close anything) and keeps mpv off the tty so the TUI is restored untouched.
 
 - Change: no more swap on the microSD. zram now takes all of RAM (zstd, ~2-3 GB
   of compressed swap, no flash writes) and the 2 GB `/swapfile` behind it is

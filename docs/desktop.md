@@ -303,7 +303,11 @@ box (type, Enter, then Enter on a row); `4` shows what you played last (kept in
 `~/.local/state/goblin-tv/recent.json`). `/` focuses a filter box that narrows
 whatever list is on screen by title, channel or game as you type; Esc clears it.
 `5` switches playback between 480p and 720p. Enter plays through `goblin-watch`
-— mpv on the VPU, H.264 preferred — and Esc comes back to the list.
+— mpv on the VPU, H.264 preferred — and the keys while it plays are the same as
+in `goblin` (`/etc/mpv/input-handtop.conf`): **B/Esc closes the stream and drops
+you back into the list you were in**, D-pad left/right seeks 15 s, up/down changes
+speed, A resets it, Y pauses, X switches subtitles. mpv keeps off the terminal
+(`--terminal=no --input-terminal=no`), so the TUI returns exactly as it was.
 
 Discovery needs no API keys: YouTube goes through yt-dlp's search, Twitch
 through its public web GQL endpoint. Rows are read-only text (titles contain
