@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""goblin-tv — browse YouTube and Twitch, play through goblin-watch.
+
+Twitch has a "featured" list for free (top live streams, then top categories),
+YouTube only has search: type a query and press Enter. Enter on a row plays it
+with goblin-watch, which decodes on the VPU.
+
+Keys: 1 YouTube search · 2 Twitch top streams · 3 Twitch categories
+      Enter play / open category · Esc back · r refresh · q quit
+"""
+import json
+import subprocess
+import urllib.request
+
+from rich.text import Text
+from textual import work
+from textual.app import App, ComposeResult
+from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static
+
+# Twitch's public web client id (the one the website itself uses).
+TWITCH_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
+
+
+def gql(query):
+    request = urllib.request.Request(
+        "https://gql.twitch.tv/gql",
+        data=json.dumps([{"query": query}]).encode(),
+        headers={"Client-ID": TWITCH_CLIENT_ID, "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.load(response)[0]["data"]
+
+
+def fmt_duration(seconds):
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if seconds >= 3600:
+        return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def fmt_viewers(count):
+    count = count or 0
+    return f"{count / 1000:.1f}k" if count >= 1000 else str(count)
+
+
+def youtube_search(query, count=30):
+    result = subprocess.run(
+        ["yt-dlp", "--flat-playlist", "--dump-json", f"ytsearch{count}:{query}"],
+        capture_output=True, text=True, timeout=180,
+    )
+    items = []
+    for line in result.stdout.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not entry.get("id"):
+            continue
+        meta = " · ".join(x for x in (
+            entry.get("channel") or entry.get("uploader") or "",
+            fmt_duration(entry.get("duration"))) if x)
+        items.append({
+            "title": entry.get("title") or entry["id"],
+            "meta": meta,
+            "url": "https://www.youtube.com/watch?v=" + entry["id"],
+        })
+    return items
+
+
+def twitch_streams(game=None, count=30):
+    if game:
+        inner = ('streams(first:%d){edges{node{title viewersCount '
+                 'broadcaster{login displayName} game{name}}}}' % count)
+        node = gql('{ game(name:%s){ %s } }' % (json.dumps(game), inner))["game"]
+    else:
+        node = gql('{ streams(first:%d){edges{node{title viewersCount '
+                   'broadcaster{login displayName} game{name}}}} }' % count)
+    items = []
+    for edge in node["streams"]["edges"]:
+        stream = edge["node"]
+        items.append({
+            "title": stream["title"],
+            "meta": f"{fmt_viewers(stream['viewersCount'])} viewers · {stream['game']['name']}",
+            "url": "https://www.twitch.tv/" + stream["broadcaster"]["login"],
+        })
+    return items
+
+
+def twitch_games(count=30):
+    data = gql('{ games(first:%d){edges{node{name displayName viewersCount}}} }' % count)
+    items = []
+    for edge in data["games"]["edges"]:
+        game = edge["node"]
+        items.append({
+            "kind": "game",
+            "name": game["name"],
+            "title": game["displayName"],
+            "meta": f"{fmt_viewers(game['viewersCount'])} viewers",
+            "url": None,
+        })
+    return items
+
+
+class Tv(App):
+    CSS = """
+    #q { dock: top; }
+    #title { padding: 0 1; color: $text-muted; }
+    ListView { padding: 0 1; }
+    #status { dock: bottom; padding: 0 1; color: $text-muted; }
+    """
+    BINDINGS = [
+        ("1", "youtube", "YouTube"),
+        ("2", "twitch", "Twitch"),
+        ("3", "games", "Categories"),
+        ("escape", "back", "Back"),
+        ("r", "refresh", "Refresh"),
+        ("q", "quit", "Quit"),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self.items = []
+        self.mode = "twitch"
+        self.game = None
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static("", id="title")
+        yield Input(placeholder="YouTube search, then Enter", id="q")
+        yield ListView(id="list")
+        yield Static("", id="status")
+        yield Footer()
+
+    def on_mount(self):
+        self.action_twitch()
+
+    # ---- loading -------------------------------------------------------
+    @work(thread=True, exclusive=True, group="load")
+    def load(self, loader, label):
+        self.call_from_thread(self.set_status, f"loading {label}…")
+        try:
+            items = loader()
+        except Exception as error:                     # network, yt-dlp, GQL
+            self.call_from_thread(self.set_status, f"{label}: {error}")
+            return
+        self.call_from_thread(self.fill, items, label)
+
+    def fill(self, items, label):
+        self.items = items
+        view = self.query_one(ListView)
+        view.clear()
+        for item in items:
+            # Titles contain '[' (Twitch: "[654/730]"), so no markup: build a
+            # rich Text and keep the label plain.
+            line = Text(item["title"])
+            line.append("   " + item["meta"], style="dim")
+            view.append(ListItem(Label(line, markup=False)))
+        self.query_one("#title", Static).update(label)
+        view.focus()                                    # Enter must select a row
+        self.call_after_refresh(self.highlight_first)
+        self.set_status(f"{len(items)} entries — Enter plays")
+
+    def highlight_first(self):
+        view = self.query_one(ListView)
+        if view.children:
+            view.index = 0
+
+    def set_status(self, text):
+        self.query_one("#status", Static).update(text)
+
+    # ---- actions -------------------------------------------------------
+    def action_twitch(self):
+        self.mode, self.game = "twitch", None
+        self.query_one(Input).display = False
+        self.load(twitch_streams, "Twitch · top live streams")
+
+    def action_games(self):
+        self.mode, self.game = "games", None
+        self.query_one(Input).display = False
+        self.load(twitch_games, "Twitch · top categories")
+
+    def action_youtube(self):
+        self.mode = "youtube"
+        self.query_one(Input).display = True
+        self.query_one(Input).focus()
+
+    def action_refresh(self):
+        {"twitch": self.action_twitch, "games": self.action_games}.get(
+            self.mode, self.action_youtube)()
+
+    def action_back(self):
+        if self.game:
+            self.action_games()
+        else:
+            self.query_one(ListView).focus()
+
+    def on_input_submitted(self, event):
+        query = event.value.strip()
+        if not query:
+            return
+        self.mode = "youtube"
+        self.load(lambda: youtube_search(query), f"YouTube · “{query}”")
+
+    def on_list_view_selected(self, event):
+        index = event.list_view.index
+        if index is None or index >= len(self.items):
+            return
+        item = self.items[index]
+        if item.get("kind") == "game":
+            self.game = item["name"]
+            self.load(lambda: twitch_streams(item["name"]), f"Twitch · {item['title']}")
+            return
+        self.play(item["url"])
+
+    def play(self, url):
+        self.set_status(f"playing {url}")
+        try:
+            with self.suspend():                       # give the terminal to mpv
+                subprocess.run(["goblin-watch", "--fs", url], check=False)
+        except FileNotFoundError:
+            self.set_status("goblin-watch is not installed")
+        self.set_status("")
+
+
+if __name__ == "__main__":
+    Tv().run()

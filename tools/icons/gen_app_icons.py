@@ -10,6 +10,8 @@ sharp in the app drawer).
   app-ssh.png                  Enable SSH: a terminal saying "SSH" (white) over a ">_" prompt, and a key (no glass).
   app-recenter.png             Re-center sticks: a stick well seen from above with a crosshair, a faint
                                drifted knob up-right and a blue arrow back to the knob in the centre (no glass).
+  app-streams.png              Streams (goblin-tv): a television with legs, a play triangle on the
+                               screen and a red live dot (no glass).
   All are 27x27 art x2 + 1 px margin = exactly 56x56, the app drawer's icon size.
   Each also gets a -light variant (dark drawing, pastel glass, deeper ring) for the light theme.
 
@@ -169,6 +171,41 @@ GOB_TRIANGLE = [
 ]
 
 
+STREAM_BODY = (58, 62, 74)
+STREAM_BODY_LIGHT = (150, 156, 170)
+STREAM_SCREEN = (24, 28, 36)
+STREAM_SCREEN_LIGHT = (214, 219, 229)
+STREAM_PLAY = (86, 196, 110)
+STREAM_PLAY_LIGHT = (34, 128, 62)
+STREAM_LIVE = (214, 68, 74)
+STREAM_LIVE_LIGHT = (176, 34, 40)
+
+
+def streams_icon(light=False):
+    """A television with a play triangle and a live dot."""
+    body = STREAM_BODY_LIGHT if light else STREAM_BODY
+    screen = STREAM_SCREEN_LIGHT if light else STREAM_SCREEN
+    play = STREAM_PLAY_LIGHT if light else STREAM_PLAY
+    live = STREAM_LIVE_LIGHT if light else STREAM_LIVE
+    im = Image.new("RGBA", (EN, EN), (0, 0, 0, 0))
+    for y in range(EN):
+        for x in range(EN):
+            if _in_round_rect(x, y, 2, 4, 24, 21, 4):
+                im.putpixel((x, y), body + (255,))
+            if _in_round_rect(x, y, 4, 6, 22, 19, 3):
+                im.putpixel((x, y), screen + (255,))
+            if (_in_round_rect(x, y, 6, 22, 8, 24, 1)
+                    or _in_round_rect(x, y, 18, 22, 20, 24, 1)):
+                im.putpixel((x, y), body + (255,))
+            if (x - 20) ** 2 + (y - 8) ** 2 <= 2:
+                im.putpixel((x, y), live + (255,))
+    for row, line in enumerate(GOB_TRIANGLE):
+        for col, cell in enumerate(line):
+            if cell == "#":
+                im.putpixel((9 + col, 10 + row), play + (255,))
+    return im
+
+
 def goblin_icon(light=False):
     """The handheld with a play triangle on its screen."""
     body = GOB_BODY_LIGHT if light else GOB_BODY
@@ -323,6 +360,7 @@ if __name__ == "__main__":
         theme_icon(light).save(f"{out}/app-theme{sfx}.png")
         external_controller_icon(light).save(f"{out}/app-external-controller{sfx}.png")
         goblin_icon(light).save(f"{out}/app-goblin{sfx}.png")
+        streams_icon(light).save(f"{out}/app-streams{sfx}.png")
         display_icon(light).save(f"{out}/app-display{sfx}.png")
         ssh_icon(light).save(f"{out}/app-ssh{sfx}.png")
         recenter_icon(light).save(f"{out}/app-recenter{sfx}.png")

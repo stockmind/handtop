@@ -293,3 +293,16 @@ browser, shuffle) is gone — the client is the whole UI.
 Your own `~/.config/waybar/style.css` or `~/.config/mako/config` still wins over both themes.
 
 Not themed yet (stay dark): terminal (foot), volume/brightness bar (`rg35xxh-osd`), on-screen keyboard, External Controller status screen (it already draws from `PALETTES`, so light is new palette entries). Possible later: follow the time of day.
+
+### Streams (`goblin-tv`)
+
+A keypad-first browser for YouTube and Twitch, with the same feel as `goblin`:
+Twitch opens on the top live streams (viewers + game), `3` lists the top
+categories and Enter opens a category's streams; `1` focuses a YouTube search
+box (type, Enter, then Enter on a row). Enter plays through `goblin-watch` — mpv
+on the VPU, H.264 preferred, 720p cap — and Esc comes back to the list.
+
+Discovery needs no API keys: YouTube goes through yt-dlp's search, Twitch
+through its public web GQL endpoint. Rows are read-only text (titles contain
+`[`, so no Textual markup). Streaming 720p H.264 costs ~47 % of one core,
+against 154–174 % for the same video in Chromium.
