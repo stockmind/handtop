@@ -1,4 +1,8 @@
-# Compressed swap in RAM (1 GB device)
+# Compressed swap in RAM. This is the only swap on the device: the 2 GB SD
+# swapfile that used to sit behind it was dropped — paging to the microSD is
+# slow enough to look like a hang (two hard locks in Oct 2026 happened with
+# Chromium near 1 GB RSS on this 1 GB board) and it wears the card. 100% of RAM
+# compresses to ~2-3 GB of usable swap with zstd and costs no flash writes.
 ALGO=zstd
-PERCENT=50
+PERCENT=100
 PRIORITY=100

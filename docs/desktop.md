@@ -43,7 +43,7 @@ Chosen over LXQt-on-labwc (heavier) and sfwbar (smaller community) for low RAM a
 - Physical keyboard: Super+D apps, Super+Enter terminal, Super+E files, Super+X power menu, Alt+F4 close, Print screenshot.
 - **No xdg-desktop-portal**: it delayed Waybar startup (portal activation timeouts) and is only needed for screen sharing/Flatpak; GTK apps use their own file dialogs.
 - Audio: speaker starts at 100 % on a fresh system (`/etc/wireplumber/wireplumber.conf.d/50-rg35xxh.conf`; WirePlumber default is 40 %); the codec DAC and Line Out are set to 100 % by `rg35xxh-hwinit`.
-- Memory: zram swap (50 % of RAM, zstd, priority 100) plus a 2 GB swap file `/swapfile` on the SD card (priority 10, created on first boot by `rg35xxh-swapfile`). Chromium flags in `/etc/chromium.d/50-rg35xxh`; uBlock Origin Lite force-installed by policy (`/etc/chromium/policies/managed/ublock-origin-lite.json`, downloaded on first launch).
+- Memory: zram swap (100 % of RAM, zstd, priority 100) and nothing else — the 2 GB `/swapfile` on the SD card was dropped in Oct 2026: paging to the card is slow enough to freeze the device (two hard locks with Chromium near 1 GB RSS on this 1 GB board) and wears it out. `earlyoom` (5 % free RAM/swap) kills the browser instead of letting the handheld hang. Chromium flags in `/etc/chromium.d/50-rg35xxh`; uBlock Origin Lite force-installed by policy (`/etc/chromium/policies/managed/ublock-origin-lite.json`, downloaded on first launch).
 - Component logs: `~/.local/state/session/*.log`, labwc: `~/.local/state/labwc.log`.
 
 ### Shell (zsh)

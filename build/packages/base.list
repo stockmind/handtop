@@ -23,6 +23,7 @@ rfkill
 iw
 wireless-regdb
 zram-tools
+earlyoom                 # kill the memory hog instead of freezing the handheld
 # Remote access
 openssh-server
 openssh-client

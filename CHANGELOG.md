@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Change: no more swap on the microSD. zram now takes all of RAM (zstd, ~2-3 GB
+  of compressed swap, no flash writes) and the 2 GB `/swapfile` behind it is
+  gone (`rg35xxh-swapfile` removed). Paging to the card was slow enough to look
+  like a hang — the Oct 2026 hard locks happened with Chromium near 1 GB RSS on
+  a 975 MB board. `earlyoom` (act below 5 % free RAM or RAM+swap, preferring
+  chromium) now kills the browser instead of freezing the device.
+
+- Feature: `rg35xxh-ytdlp-update.timer` upgrades the pinned yt-dlp weekly
+  (Mon 04:00, randomised, `Persistent=true`), because YouTube's extractor
+  changes break a stale yt-dlp within weeks. `goblin-watch` itself is unchanged.
+
+- Note: YouTube in Chromium stays software-decoded. Its player now probes
+  codecs from a worker and negotiates over SABR, so the usual
+  `isTypeSupported`/`MediaCapabilities`/`addSourceBuffer` overrides (checked:
+  they work on a plain page, `vp9 → false`) no longer change what YouTube
+  serves; the browser ends up on VP9 at 260-300 % CPU and ~1 GB RSS, against
+  47 % for `goblin-watch` (mpv picks H.264 itself). Local files in Chromium
+  still hardware-decode. The extension and the Chromium memory flags were
+  therefore not shipped.
+
 - Fix: kernel messages are logged to a file again. On this image journald never
   imports `/dev/kmsg` (a probe written there shows in `dmesg` and never appears
   in `journalctl -k`, even after restarting journald), so the 2026-10-23 hangs
