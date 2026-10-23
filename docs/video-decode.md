@@ -630,6 +630,29 @@ What the numbers say:
   stable for the players; the browser is not).
 
 
+### Upstream status (checked 2026-10-23)
+
+- `sofus13/libva-v4l2_request`: the pin (`f54d8d2`, 2026-10-20) **is** current
+  master; nothing newer. Upstream diagnosed and fixed the same Chromium green
+  we hit — issues #1 "decode into surfaces the client exported before the first
+  decode", #2 "Fix green Chromium video from early surface export" and #5
+  "Decode into the client's exported buffer" are closed by the per-surface
+  buffer design we now build on. Issue #6 (surface contents after
+  `vaDestroyContext`) is still open, though the cleanup in master only detaches
+  and no longer frees a live surface's buffer.
+- cedrus (linux-media patchwork): nothing pending that affects the H700. The
+  H616 variant we use was accepted (v3 4/7, 2026-07-12); the probe-cleanup and
+  control-handler leak fixes (accepted 2026-04/06) are already in our 7.2 tree
+  (`v4l2_ctrl_handler_free` / `media_device_unregister` in the error paths).
+  In flight: a series switching the SRAM/reserved-memory setup to
+  `devm_of_reserved_mem_device_init()` (v2 6/6, 2026-09-02) — if it lands it may
+  change what the DT node has to describe, so re-check our overlay when bumping
+  the kernel. No VP9 work exists for cedrus (VP9 stays software; AV1 is not in
+  the silicon).
+- VLC: trixie ships 3.0.23 (3.0.24 in proposed-updates/sid); there is no VLC 4
+  package, so VLC's Wayland-window limitation (and the XWayland requirement
+  above) stands until a newer VLC is packaged.
+
 ## Default on
 
 Two pieces put Chromium and VLC on the VPU without per-app flags:
