@@ -200,7 +200,20 @@ class Tv(App):
         yield Footer()
 
     def on_mount(self):
-        self.action_youtube()
+        self.action_start()
+
+    def action_start(self):
+        """Ask what to watch first: Twitch or YouTube."""
+        self.mode, self.game = "start", None
+        self.query_one("#q", Input).display = False
+        self.query_one("#q", Input).value = ""
+        picker = [
+            {"kind": "source", "source": "twitch", "title": "Twitch",
+             "meta": "live streams, categories and channel search", "url": None},
+            {"kind": "source", "source": "youtube", "title": "YouTube",
+             "meta": "search videos, or pick a topic", "url": None},
+        ]
+        self.fill(picker, "What do you want to watch?", True)
 
     # ---- loading -------------------------------------------------------
     @work(thread=True, exclusive=True, group="load")
@@ -251,16 +264,19 @@ class Tv(App):
     # ---- actions -------------------------------------------------------
     def action_twitch(self):
         self.mode, self.game = "twitch", None
+        self.query_one("#q", Input).display = True
         self.placeholder("Twitch: type to filter · Enter searches channels")
         self.load(twitch_streams, "Twitch · top live streams")
 
     def action_games(self):
         self.mode, self.game = "games", None
+        self.query_one("#q", Input).display = True
         self.placeholder("Twitch categories: type to filter")
         self.load(twitch_games, "Twitch · top categories")
 
     def action_recent(self):
         self.mode, self.game = "recent", None
+        self.query_one("#q", Input).display = True
         self.placeholder("Recent: type to filter")
         self.fill(load_recent(), "Recent", True)
 
@@ -269,6 +285,7 @@ class Tv(App):
         # moves to the search box, which is also where typing goes once it has
         # focus.
         self.mode, self.game = "youtube", None
+        self.query_one("#q", Input).display = True
         self.placeholder("YouTube: / to search · Enter on a topic")
         self.query_one("#q", Input).value = ""
         self.fill(youtube_topics(), "YouTube · pick a topic, or / to search", True)
@@ -285,7 +302,8 @@ class Tv(App):
 
     def action_refresh(self):
         {"twitch": self.action_twitch, "games": self.action_games,
-         "recent": self.action_recent, "youtube": self.action_youtube}.get(
+         "recent": self.action_recent, "youtube": self.action_youtube,
+         "start": self.action_start}.get(
             self.mode, self.action_twitch)()
 
     def action_back(self):
@@ -295,6 +313,8 @@ class Tv(App):
             self.query_one(ListView).focus()
         elif self.game:
             self.action_games()
+        elif self.mode not in ("start",):
+            self.action_start()
         else:
             self.query_one(ListView).focus()
 
@@ -317,6 +337,9 @@ class Tv(App):
         if index is None or index >= len(self.items):
             return
         item = self.items[index]
+        if item.get("kind") == "source":
+            {"twitch": self.action_twitch, "youtube": self.action_youtube}[item["source"]]()
+            return
         if item.get("kind") == "game":
             self.game = item["name"]
             self.load(lambda: twitch_streams(item["name"]), f"Twitch · {item['title']}")

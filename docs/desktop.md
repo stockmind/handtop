@@ -296,8 +296,10 @@ Not themed yet (stay dark): terminal (foot), volume/brightness bar (`rg35xxh-osd
 
 ### Streams (`goblin-tv`)
 
-A keypad-first browser for YouTube and Twitch, with the same feel as `goblin`:
-Twitch opens on the top live streams (viewers + game), `3` lists the top
+A keypad-first browser for YouTube and Twitch, with the same feel as `goblin`.
+It asks first — **Twitch** or **YouTube** — and Esc returns to that question, so
+the entry point is one Enter away from live streams or from a search. Twitch
+opens on the top live streams (viewers + game), `3` lists the top
 categories and Enter opens a category's streams; `1` shows YouTube (a few topic shortcuts, since YouTube has no
 cookie-free "featured" list); `4` shows what you played last (kept in
 `~/.local/state/goblin-tv/recent.json`). One box does search and filter:

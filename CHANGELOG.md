@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Change: Streams asks what to watch on launch — Twitch or YouTube — instead of
+  landing on YouTube's topic list; Esc from either source returns to that
+  question. One Enter gets from opening the app to live streams, the other to
+  YouTube search/topics.
+
 - Fix: Streams searches Twitch, keeps the cursor where you put it, and shows
   YouTube. One box now does both jobs — typing filters the visible list, Enter
   searches the current source: YouTube videos under `1`, **Twitch channels**
