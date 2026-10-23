@@ -11,7 +11,13 @@
   and its own desktop entry. Verified on the device: 28 live streams on launch,
   25 YouTube results for a query, fullscreen VPU playback of a picked result,
   categories → streams. Titles are rendered as plain rich text — Twitch titles
-  contain `[`, which Textual would otherwise parse as markup.
+  contain `[`, which Textual would otherwise parse as markup. Also: `/` filters
+  the current list by title/channel/game as you type (Esc clears), `4` shows the
+  last 50 played items (`~/.local/state/goblin-tv/recent.json`), and `5`
+  switches between 480p and 720p. Playback now defaults to **480p**: on the
+  640×480 panel it is 29 % of one core against 49 % for 720p, with no visible
+  difference (measured on the same video); `GOBLIN_WATCH_MAX_HEIGHT` overrides
+  it for `goblin-watch` outside the TUI.
 
 - Change: no more swap on the microSD. zram now takes all of RAM (zstd, ~2-3 GB
   of compressed swap, no flash writes) and the 2 GB `/swapfile` behind it is

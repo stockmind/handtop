@@ -299,10 +299,16 @@ Not themed yet (stay dark): terminal (foot), volume/brightness bar (`rg35xxh-osd
 A keypad-first browser for YouTube and Twitch, with the same feel as `goblin`:
 Twitch opens on the top live streams (viewers + game), `3` lists the top
 categories and Enter opens a category's streams; `1` focuses a YouTube search
-box (type, Enter, then Enter on a row). Enter plays through `goblin-watch` — mpv
-on the VPU, H.264 preferred, 720p cap — and Esc comes back to the list.
+box (type, Enter, then Enter on a row); `4` shows what you played last (kept in
+`~/.local/state/goblin-tv/recent.json`). `/` focuses a filter box that narrows
+whatever list is on screen by title, channel or game as you type; Esc clears it.
+`5` switches playback between 480p and 720p. Enter plays through `goblin-watch`
+— mpv on the VPU, H.264 preferred — and Esc comes back to the list.
 
 Discovery needs no API keys: YouTube goes through yt-dlp's search, Twitch
 through its public web GQL endpoint. Rows are read-only text (titles contain
-`[`, so no Textual markup). Streaming 720p H.264 costs ~47 % of one core,
-against 154–174 % for the same video in Chromium.
+`[`, so no Textual markup). 480p is the default because the panel is 640×480 and it is much cheaper:
+measured on the same YouTube video, 480p (854×480) is **29 % of one core and
+143 MB**, 720p (1280×720) is **49 % and 146 MB**, with no visible difference at
+this size. 720p stays one keypress away. For comparison, the same video in
+Chromium is 154–174 % / ~1 GB, software-decoded.
