@@ -63,12 +63,21 @@ CABLE = """
 ...........WWWWWW......
 ...........W...........
 """
+KEYBOARD = """
+.WWWWWWWWWWW.
+WSSSSSSSSSSSW
+WSWSWSWSWSWSW
+WSWWWWWWWWWSW
+WSSSSSSSSSSSW
+.WWWWWWWWWWW.
+"""
 def centred(art, top):
     w = len(rows(art)[0]); assert w % 2 == 1, w
     return (art, top, (N - w) // 2)
 ICONS = [  # name, parts, bg, ring, accent, external
     ("desktop", [centred(MOUSE, 4)], "#3d4a63", "#5b6d91", "#9fc3ff", False),
     ("gamepad", [centred(HANDHELD, 6)], "#3d6a4a", "#5b9469", None, False),
+    ("keys", [centred(KEYBOARD, 8)], "#4a3d63", "#6c5b91", None, False),
     ("bt", [centred(WAVES, 4), centred(SMALLHANDHELD, 10)], "#3d5a8a", "#5f80bd", None, True),
     ("wired", [(CABLE, 3, 0), centred(SMALLHANDHELD, 10)], "#8a5f3d", "#c08a5c", None, True),
 ]

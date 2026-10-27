@@ -1,0 +1,1384 @@
+#!/usr/bin/env python3
+"""jellyfin — the media client for the handheld.
+
+Keypad-first (keypad mode: D-pad = arrows, A = Enter, B = Esc, X = Tab,
+Y = Space), one compact single-line-per-row list, one status line.
+Enter opens a folder or plays from the cursor down the visible list;
+Y saves the selected episode/season/series to the SD card; X deletes it again.
+
+Playing and saving always ask Jellyfin for h264/aac <=720p with
+`static=false` (the flag that actually makes the server transcode).
+"""
+import json
+import os
+import queue
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from urllib.parse import urlparse
+
+from rich.cells import cell_len
+from rich.text import Text
+from textual.app import App
+from textual.containers import Horizontal
+from textual.css.query import NoMatches
+from textual.widgets import Input, Label, ListItem, ListView, Static
+
+
+def _load_config():
+    """Seed the environment from /etc/default/jellyfin (JELLYFIN_URL,
+    JELLYFIN_KEY and any JELLYFIN_* tunable). The environment wins."""
+    try:
+        with open("/etc/default/jellyfin") as f:
+            for line in f:
+                if "=" not in line or line.lstrip().startswith("#"):
+                    continue
+                key, val = line.split("=", 1)
+                val = val.split("#")[0].strip().strip('"').strip("'")
+                key = key.strip()
+                if key.startswith("JELLYFIN_"):
+                    os.environ.setdefault(key, val)
+    except OSError:
+        pass
+
+
+_load_config()
+
+OFFLINE = Path(os.environ.get("JELLYFIN_OFFLINE_DIR", str(Path.home() / "Offline")))
+PLAYABLE = {"Episode", "Movie", "MusicVideo", "Video", "Audio"}
+CONTAINERS = {
+    "movies": ["Movie"],
+    "tvshows": ["Series"],
+    "musicvideos": ["MusicVideo"],
+    "music": ["Audio"],
+}
+PAGE = 25                                  # rows fetched per page (mounting a
+                                           # row costs ~17 ms on the A53)
+FIELDS = "Fields=Width,Height,RunTimeTicks,ProductionYear,MediaSources"
+
+# The panel is 640x480: asking the server for that (it keeps the aspect ratio,
+# so 16:9 becomes 640x360) is enough picture and a quarter of the pixels of
+# 720p - less to transcode, less to push over Wi-Fi, less for the VPU.
+# Raise it for the HDMI monitor: JELLYFIN_MAX_WIDTH=1280 JELLYFIN_MAX_HEIGHT=720.
+MAX_WIDTH = int(os.environ.get("JELLYFIN_MAX_WIDTH", "640"))
+MAX_HEIGHT = int(os.environ.get("JELLYFIN_MAX_HEIGHT", "480"))
+VIDEO_BITRATE = int(os.environ.get("JELLYFIN_VIDEO_BITRATE", "0")) or (
+    MAX_WIDTH * MAX_HEIGHT * 4)          # ~4 bits per pixel per second
+AUDIO_BITRATE = int(os.environ.get("JELLYFIN_AUDIO_BITRATE", "96000"))
+# Subtitle languages, if the Jellyfin profile should not decide:
+# JELLYFIN_SUB_LANGUAGES=<code1>,<code2>
+SUB_LANGUAGES = [x.strip() for x in
+                 os.environ.get("JELLYFIN_SUB_LANGUAGES", "").split(",") if x.strip()]
+# The smallest position worth resuming from (seconds).
+RESUME_MINIMUM = float(os.environ.get("JELLYFIN_RESUME_MINIMUM", "10"))
+# How many files to save at once. The server transcodes much faster than the
+# Wi-Fi can carry, so a few in parallel make a series land in a fraction of
+# the time.
+DOWNLOAD_WORKERS = int(os.environ.get("JELLYFIN_DOWNLOAD_WORKERS", "3"))
+# Skip the intro/recap the server knows about (jfsh does the same).
+SKIP_INTRO = os.environ.get("JELLYFIN_SKIP_INTRO", "1") == "1"
+
+
+# ---------------------------------------------------------------- device stats
+
+def _read(path, default=None):
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return default
+
+
+def cpu_snapshot():
+    parts = (_read("/proc/stat") or "").splitlines()[0].split()[1:]
+    if len(parts) < 4:
+        return None
+    vals = [int(x) for x in parts]
+    idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+    return idle, sum(vals)
+
+
+def cpu_busy(prev, cur):
+    if not prev or not cur:
+        return None
+    d_idle, d_total = cur[0] - prev[0], cur[1] - prev[1]
+    return None if d_total <= 0 else max(0.0, 1.0 - d_idle / d_total)
+
+
+def battery():
+    base = "/sys/class/power_supply"
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return None
+    for name in names:
+        cap = _read(f"{base}/{name}/capacity")
+        if cap is None:
+            continue
+        try:
+            return int(cap), _read(f"{base}/{name}/status", "")
+        except ValueError:
+            continue
+    return None
+
+
+def temperature():
+    for zone in sorted(Path("/sys/class/thermal").glob("thermal_zone*/temp")):
+        raw = _read(zone)
+        if raw:
+            try:
+                return int(raw) / 1000.0
+            except ValueError:
+                pass
+    return None
+
+
+def free_bytes():
+    try:
+        return shutil.disk_usage("/").free
+    except OSError:
+        return 0
+
+
+def human_bytes(n):
+    if n >= 1e9:
+        return f"{n / 1e9:.1f}G"
+    return f"{int(n / 1e6)}M"
+
+
+def human_time(ticks):
+    """Jellyfin RunTimeTicks (100 ns) -> '2h03' / '24m'."""
+    if not ticks:
+        return ""
+    hours, mins = divmod(int(ticks / 600_000_000), 60)
+    return f"{hours}h{mins:02d}" if hours else f"{mins}m"
+
+
+def state_path():
+    """Where the client keeps its own record of what was watched."""
+    directory = os.environ.get("JELLYFIN_STATE_DIR",
+                               str(Path.home() / ".local" / "state" / "jellyfin"))
+    return Path(directory) / "positions.json"
+
+
+def load_positions():
+    """{item id: seconds} of the positions the client saw."""
+    try:
+        return {k: float(v) for k, v in json.loads(state_path().read_text()).items()}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def save_positions(positions):
+    """Keep the 200 most recent positions (the newest first)."""
+    try:
+        path = state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(positions))
+    except (OSError, TypeError):
+        pass
+
+
+def safe_name(name):
+    return re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip()[:90] or "media"
+
+
+TEXT_SUBS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
+SUB_FORMAT = {"ass": "ass", "ssa": "ass", "webvtt": "vtt", "mov_text": "srt"}
+
+
+def subtitle_track(item, prefs=None):
+    """The subtitle stream to use, following the user's Jellyfin preferences.
+
+    Order: a track in one of the preferred languages (in the order the user
+    listed them), then the media's own default track, then the first text
+    track there is. Subtitle mode "None" means no subtitles at all."""
+    sources = item.get("MediaSources") or []
+    if not sources:
+        return None
+    streams = [s for s in sources[0].get("MediaStreams", [])
+               if s.get("Type") == "Subtitle"
+               and (s.get("Codec") or "").lower() in TEXT_SUBS]
+    if not streams:
+        return None
+    prefs = prefs or {}
+    if str(prefs.get("mode") or "Default").lower() == "none":
+        return None
+    languages = [str(x).lower() for x in (prefs.get("languages") or [])]
+    if SUB_LANGUAGES:                       # JELLYFIN_SUB_LANGUAGES overrides
+        languages = [x.lower() for x in SUB_LANGUAGES]
+
+    def rank(stream):
+        language = (stream.get("Language") or "").lower()
+        title = (stream.get("DisplayTitle") or "").lower()
+        score = 0
+        for index, wanted in enumerate(languages):
+            if language == wanted or wanted in title:
+                score = max(score, 100 - index)
+                break
+        if not score and not language:
+            # A subtitle without a language is one that was added to the file
+            # (an external .ass beside the episode) - the server cannot know
+            # its language, but it is far more likely the wanted one than the
+            # source's own track in some other language.
+            score = 50
+        if not score and stream.get("IsDefault"):
+            score = 10
+        if not score:
+            score = 1
+        if stream.get("IsForced"):
+            score -= 2
+        return score
+
+    return max(streams, key=rank)
+
+
+def subtitle_language(track):
+    """The track's language code, or a stand-in when the server has none."""
+    language = (track.get("Language") or "").lower()
+    return language if len(language) == 3 else "sub"
+
+
+def api_size(item):
+    """Bytes of the default media source, when the query asked for it."""
+    sources = item.get("MediaSources") or []
+    return (sources[0].get("Size") or 0) if sources else (item.get("Size") or 0)
+
+
+# ---------------------------------------------------------------- Jellyfin
+
+class Jellyfin:
+    def __init__(self, url, key):
+        self.url = url.rstrip("/")
+        self.key = key
+        self._user = None
+        self.error = ""            # the last failure, for the status line
+
+    def get(self, endpoint, params=None):
+        url = f"{self.url}{endpoint}"
+        if params:
+            url += "?" + "&".join(params)
+        req = urllib.request.Request(url, headers={
+            "Authorization": f'MediaBrowser Token="{self.key}"'})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                self.error = ""
+                return json.load(r)
+        except (urllib.error.URLError, ValueError, TimeoutError, OSError) as exc:
+            self.error = str(exc)
+            return None
+
+    def post(self, endpoint, body):
+        """POST a JSON body (progress reporting)."""
+        req = urllib.request.Request(
+            f"{self.url}{endpoint}",
+            data=json.dumps(body).encode(),
+            headers={"Authorization": f'MediaBrowser Token="{self.key}"',
+                     "Content-Type": "application/json"},
+            method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10):
+                return True
+        except (urllib.error.URLError, OSError):
+            return False
+
+    def user_id(self):
+        """The user this token belongs to (the first one; admin keys list all)."""
+        if self._user is None:
+            users = self.get("/Users") or []
+            self._user = users[0].get("Id") if users else ""
+        return self._user
+
+    def resume_positions(self):
+        """{item id: position ticks} of everything half watched."""
+        user = self.user_id()
+        if not user:
+            return {}
+        data = self.get(f"/Users/{user}/Items/Resume", ["Limit=200", "Recursive=true"])
+        out = {}
+        for item in (data or {}).get("Items", []):
+            ticks = ((item.get("UserData") or {}).get("PlaybackPositionTicks") or 0)
+            if ticks:
+                out[item["Id"]] = ticks
+        return out
+
+    def preferences(self):
+        """The user's Jellyfin playback preferences (subtitles).
+
+        Settings > Playback > Subtitles in the web UI: the preferred
+        languages (in order) and the subtitle mode (Default/Always/
+        OnlyForeign/Smart/None)."""
+        user = self.user_id()
+        if not user:
+            return {}
+        config = (self.get(f"/Users/{user}") or {}).get("Configuration") or {}
+        languages = config.get("SubtitleLanguagePreference") or ""
+        if isinstance(languages, str):
+            languages = [x.strip() for x in languages.split(",") if x.strip()]
+        return {"mode": config.get("SubtitleMode") or "Default",
+                "languages": languages}
+
+    def position(self, item_id):
+        """Stored playback position of one item, in seconds (0 if none)."""
+        user = self.user_id()
+        if not user:
+            return 0
+        data = self.get(f"/Users/{user}/Items/{item_id}")
+        ticks = ((data or {}).get("UserData") or {}).get("PlaybackPositionTicks") or 0
+        return ticks / 10_000_000
+
+    def segments(self, item_id):
+        """Intro/recap segments the server knows about (empty if none)."""
+        data = self.get(f"/MediaSegments/{item_id}",
+                        ["includeSegmentTypes=Intro", "includeSegmentTypes=Recap"])
+        return (data or {}).get("Items", [])
+
+    def libraries(self):
+        data = self.get("/Library/VirtualFolders?format=json")
+        out = []
+        for lib in data or []:
+            item_id = lib.get("ItemId") or lib.get("Id")
+            if item_id:
+                out.append(dict(lib, Id=item_id, Type="Collection",
+                                CollectionType=lib.get("CollectionType")))
+        return out
+
+    def children(self, parent_id, types=None, search="", start=0, fields=FIELDS):
+        params = ["Recursive=true", "format=json", f"Limit={PAGE}", f"ParentId={parent_id}",
+                  fields]
+        if types:
+            params.append("IncludeItemTypes=" + ",".join(types))
+        if search:
+            params.append("SearchTerm=" + urllib.parse.quote(search))
+        if start:
+            params.append(f"StartIndex={start}")
+        data = self.get("/Items", params) or {}
+        return data.get("Items", []), data.get("TotalRecordCount", 0)
+
+    def subtitle_url(self, item, prefs=None):
+        """URL of the subtitle track to use, or None.
+
+        Jellyfin serves any subtitle stream as a file in any text format
+        (srt/ass/vtt), so mpv can load it as a sidecar track."""
+        track = subtitle_track(item, prefs)
+        if track is None:
+            return None
+        source = item["MediaSources"][0]
+        codec = (track.get("Codec") or "").lower()
+        return (f"{self.url}/Videos/{item['Id']}/{source['Id']}"
+                f"/Subtitles/{track['Index']}/Stream.{SUB_FORMAT.get(codec, 'srt')}"
+                f"?api_key={self.key}")
+
+    def series_episodes(self, series_id):
+        """Every episode of a series in season/episode order (Save series)."""
+        out, start = [], 0
+        while True:
+            data = self.get("/Items", [
+                "Recursive=true", "format=json", f"Limit={PAGE}", f"ParentId={series_id}",
+                "IncludeItemTypes=Episode", "SortBy=ParentIndexNumber,IndexNumber",
+                f"StartIndex={start}", FIELDS + ",MediaSources"]) or {}
+            items = data.get("Items", [])
+            out.extend(items)
+            start += len(items)
+            if not items or start >= data.get("TotalRecordCount", 0):
+                return out
+
+
+# ---------------------------------------------------------------- widgets
+
+def fit(text, width):
+    """Cut text to a number of terminal cells (CJK characters take two)."""
+    if cell_len(text) <= width:
+        return text
+    out = ""
+    for char in text:
+        if cell_len(out + char) > width - 1:
+            break
+        out += char
+    return out + "…"
+
+
+def row_text(item, width, local, resume=0, prefs=None):
+    """One compact row: marker, code, name, right-aligned meta, saved mark."""
+    kind = item.get("Type", "")
+    marker = "▶" if kind in PLAYABLE else "▸"
+    code = ""
+    if kind == "Episode":
+        season, number = item.get("ParentIndexNumber"), item.get("IndexNumber")
+        if season and number:
+            code = f"S{season:02d}E{number:02d} "
+        elif number:
+            code = f"E{number:02d} "
+    name = item.get("Name", "?")
+    if kind == "Episode" and item.get("SeriesName"):
+        name = f"{item['SeriesName']} · {name}"
+
+    meta = []
+    if kind in ("Movie", "Series") and item.get("ProductionYear"):
+        meta.append(str(item["ProductionYear"]))
+    if kind in PLAYABLE:
+        if kind != "Audio":
+            duration = human_time(item.get("RunTimeTicks"))
+            if duration:
+                meta.append(duration)
+        height = item.get("Height")
+        if height and kind != "Audio":
+            meta.append(f"{height}p")
+        track = subtitle_track(item, prefs)
+        if track:
+            meta.append(subtitle_language(track))
+    right = "  ".join(meta)
+    mark = "✓" if local else ""
+    resume_mark = f"»{int(resume // 60)}:{int(resume % 60):02d}" if resume else ""
+
+    # the cells, not the characters: a CJK title takes two cells each and
+    # would push the resume marker off the screen
+    name_w = max(12, width - 3 - cell_len(code) - cell_len(right)
+                 - cell_len(mark) - cell_len(resume_mark) - 4)
+    name = fit(name, name_w)
+
+    text = Text()
+    text.append(marker + " ", style="#7ee787" if kind in PLAYABLE else "#7aa2f7")
+    if code:
+        text.append(code, style="bold #98a2b3")
+    text.append(name.ljust(name_w))
+    if right:
+        text.append("  " + right, style="#6b7280")
+    if mark:
+        text.append("  " + mark, style="bold #7ee787")
+    if resume_mark:
+        text.append("  " + resume_mark, style="#e5c07b")
+    return text
+
+
+class Row(ListItem):
+    """One list row.
+
+    The text is rendered by the row itself: a child widget would show the
+    class name ("Row") until it mounted, which is exactly the placeholder
+    spam the big libraries showed."""
+
+    def __init__(self, item, width, local=False, resume=0, prefs=None, **kwargs):
+        super().__init__(**kwargs)
+        self.item = item
+        self.text = row_text(item, width, local, resume, prefs)
+
+    def render(self):
+        return self.text
+
+
+class MoreRow(ListItem):
+    def __init__(self, remaining, **kwargs):
+        super().__init__(**kwargs)
+        self.remaining = remaining
+
+    def render(self):
+        return Text(f"… {self.remaining} more", style="#6b7280")
+
+
+CSS = """
+Screen { background: #16181d; color: #d7dbe0; }
+#top { height: 1; background: #1f232b; }
+#crumb { width: 1fr; height: 1; padding: 0 1; color: #7aa2f7; text-style: bold; }
+#stats { width: auto; height: 1; padding: 0 1; color: #98a2b3; }
+#list { height: 1fr; padding: 0; }
+Row, MoreRow { height: 1; padding: 0 1; }
+ListView > ListItem.-highlight { background: #2b3240; }
+#search { height: 1; border: none; padding: 0 1; background: #262b35; color: #e6e9ef; display: none; }
+#hint { height: 1; background: #1f232b; padding: 0 1; color: #98a2b3; }
+"""
+
+
+class JellyfinApp(App):
+    TITLE = "Jellyfin"
+    CSS = CSS
+    BINDINGS = [
+        ("escape", "back", "back"),
+        ("space", "save", "save"),
+        ("x", "delete", "delete"),
+        ("slash", "search", "search"),
+        ("q", "quit", "quit"),
+    ]
+
+    STREAM_TRANSCODE = os.environ.get("JELLYFIN_STREAM_TRANSCODE", "1") == "1"
+    DL_TRANSCODE = os.environ.get("JELLYFIN_DL_TRANSCODE", "1") == "1"
+    DL_TRANSCODE_ABOVE = int(os.environ.get("JELLYFIN_DL_TRANSCODE_MB", "1024")) * 1024 * 1024
+    DL_TRANSCODE_HEIGHT = int(os.environ.get("JELLYFIN_DL_TRANSCODE_HEIGHT", "720"))
+    HINT = "[A] play  [B] back  [Y] save  [X] delete  [/] search  [Q] quit"
+
+    def __init__(self, resume=None, positions=None):
+        super().__init__()
+        self.api = Jellyfin(os.environ.get("JELLYFIN_URL", ""),
+                            os.environ.get("JELLYFIN_KEY", ""))
+        self.resume = resume
+        self.play_state = None
+        self.path = []           # [(id, name, child_types)] from library down
+        self.search = ""
+        self.items = []
+        self.offset = 0
+        self.total = 0
+        self.cursor = {}         # folder id -> list index (restored on Back)
+        self._prev_cpu = cpu_snapshot()
+        self._cpu = None
+        self.resume_at = dict(positions or {})   # item id -> position in ticks
+        self.prefs = {}                           # the user's Jellyfin preferences
+        self._confirm = None     # (item id, deadline) for delete
+        self._search_timer = None
+        self._busy = False
+        self._loading = False
+        self._jobs = queue.Queue()      # save requests waiting their turn
+        self._scroll_timer = None
+
+    # ------------------------------------------------------------- layout
+    def compose(self):
+        with Horizontal(id="top"):
+            yield Static("Home", id="crumb")
+            yield Static("", id="stats")
+        yield ListView(id="list")
+        yield Input(placeholder="search…", id="search")
+        yield Static(self.HINT, id="hint")
+
+    async def on_mount(self):
+        book = load_positions()
+        self.set_interval(5.0, self.tick)
+        self.tick()
+        # "continue watching": what the server stored, plus what this client
+        # saw itself. The server does not always keep the position we report
+        # (an API-key session is anonymous), so the local book is the one
+        # that counts - and it is the fresher of the two.
+        self.resume_at = {**self.api.resume_positions(),
+                           **{k: int(v * 10_000_000) for k, v in book.items()},
+                           **self.resume_at}
+        self.prefs = self.api.preferences()      # subtitle mode and languages
+        await self.show_libraries()
+        if self.resume:
+            await self._resume()
+        # The screen takes the focus itself when it finishes mounting, so the
+        # list gets it one refresh later - otherwise the D-pad arrows and
+        # Enter never reach the list on the device.
+        self.call_after_refresh(self._focus_list)
+
+    def _focus_list(self):
+        self.query_one("#list", ListView).focus()
+
+    # ------------------------------------------------------------- status
+    def tick(self):
+        now = cpu_snapshot()
+        busy = cpu_busy(self._prev_cpu, now)
+        if busy is not None:
+            self._cpu = busy
+        self._prev_cpu = now
+        parts = [f"{human_bytes(free_bytes())} free"]
+        bat = battery()
+        if bat:
+            pct, status = bat
+            parts.append(f"{'chg' if 'Charg' in status else 'bat'} {pct}%")
+        if self._cpu is not None:
+            parts.append(f"cpu {self._cpu * 100:.0f}%")
+        temp = temperature()
+        if temp is not None:
+            parts.append(f"{temp:.0f}°C")
+        self.query_one("#stats", Static).update("  ".join(parts))
+
+    def hint(self, msg=None):
+        self.query_one("#hint", Static).update(
+            Text(msg if msg is not None else self.HINT, style="#98a2b3"))
+
+    def crumb(self, text):
+        self.query_one("#crumb", Static).update(Text(text, style="bold #7aa2f7"))
+
+    # ------------------------------------------------------------- data
+    def manifest(self):
+        try:
+            return json.loads((OFFLINE / "manifest.json").read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def save_manifest(self, manifest):
+        OFFLINE.mkdir(parents=True, exist_ok=True)
+        (OFFLINE / "manifest.json").write_text(json.dumps(manifest))
+
+    def local_files(self, item):
+        return [f for f in self.manifest().get(item.get("Id"), [])
+                if (OFFLINE / f).exists()]
+
+    def remember_cursor(self):
+        if self.path and self.items:
+            self.cursor[self.path[-1][0]] = self.query_one("#list", ListView).index or 0
+
+    async def render_rows(self, restore=True):
+        lv = self.query_one("#list", ListView)
+        # the list keeps room for its scrollbar, so the rightmost mark
+        # (the resume point) is not hidden under it
+        width = max(30, self.size.width - 4)
+        manifest = self.manifest()
+        rows = []
+        for item in self.items:
+            files = manifest.get(item.get("Id"), [])
+            local = bool(files) and any((OFFLINE / f).exists() for f in files)
+            rows.append(Row(item, width, local, self.resume_seconds(item), self.prefs))
+        if self.total > len(self.items):
+            rows.append(MoreRow(self.total - len(self.items)))
+        await lv.clear()
+        await lv.extend(rows)
+        last = max(len(lv.children) - 1, 0)
+        index = self.cursor.get(self.path[-1][0], 0) if (restore and self.path) else 0
+        # index=None first: watch_index only fires on a change, and a rebuilt
+        # list would otherwise keep a stale cursor with no highlighted row.
+        lv.index = None
+        lv.index = min(index, last)
+        lv.focus()
+        # The list was just rebuilt: the cursor is set but the view is still
+        # at the top. A timer (unlike a refresh callback) always fires.
+        self._scroll_timer = self.set_timer(0.15, self._scroll_to_cursor)
+
+    def refresh_rows(self):
+        """Re-render the rows (the saved marks, the resume points)."""
+        lv = self.query_one("#list", ListView)
+        width = max(30, self.size.width - 4)
+        manifest = self.manifest()
+        for child in lv.children:
+            if not isinstance(child, Row):
+                continue
+            item = child.item
+            files = manifest.get(item.get("Id"), [])
+            local = bool(files) and any((OFFLINE / f).exists() for f in files)
+            child.text = row_text(item, width, local, self.resume_seconds(item), self.prefs)
+            child.refresh()
+
+    def _scroll_to_cursor(self):
+        """Bring the cursor row into view (the rebuild leaves it behind)."""
+        try:
+            lv = self.query_one("#list", ListView)
+        except NoMatches:          # the app is on its way out
+            return
+        index = lv.index
+        if index is None or index >= len(lv.children):
+            return
+        lv.scroll_to_widget(lv.children[index], animate=False, immediate=True)
+
+    async def show_libraries(self):
+        self.remember_cursor()
+        self.path = []
+        self.search = ""
+        self.items = self.api.libraries()
+        self.total = len(self.items)
+        self.crumb("Home")
+        if not self.items and self.api.error:
+            self.hint(f"cannot reach {self.api.url}: {self.api.error[:60]}")
+        else:
+            self.hint()
+        await self.render_rows(restore=False)
+
+    async def show_level(self, entry, search="", restore_index=None):
+        """Show the children of the last path entry.
+
+        The cursor is remembered per folder, and the pages it needs are
+        pulled back in, so returning from a download or from a video lands
+        on the same row instead of the top of the list."""
+        parent_id, name, types, fallback = entry
+        self.search = search
+        self.items, self.total = self.api.children(parent_id, types, search)
+        if not self.items and not search and fallback:
+            # Jellyfin 12 leaves some season nodes empty; episodes stay
+            # parented to the series and are found through /Shows.
+            series_id, season = fallback
+            data = self.api.get(f"/Shows/{series_id}/Episodes",
+                                [f"Season={season}", "format=json", FIELDS]) or {}
+            self.items = data.get("Items", [])
+            self.total = len(self.items)
+        self.offset = len(self.items)
+        want = restore_index if restore_index is not None else self.cursor.get(parent_id, 0)
+        while want >= len(self.items) and self.offset < self.total:
+            await self._load_page()
+        self.cursor[parent_id] = want
+        trail = [e[1] for e in self.path[:-1]] + [name]
+        self.crumb("Home › " + " › ".join(trail))
+        await self.render_rows()
+        if not self.items and self.api.error:
+            self.hint(f"cannot reach {self.api.url}: {self.api.error[:60]}")
+        elif search:
+            self.hint(f"{len(self.items)} of {self.total} matching “{search[:40]}”")
+        else:
+            self.hint()
+
+    async def open(self, item):
+        kind = item.get("Type")
+        fallback = None
+        if kind == "Collection":
+            types = CONTAINERS.get(item.get("CollectionType"), ["Movie", "Series"])
+        elif kind == "Series":
+            types = ["Season"]
+        elif kind == "Season":
+            types = ["Episode"]
+            fallback = (item.get("SeriesId"), item.get("IndexNumber"))
+        else:
+            return False
+        self.remember_cursor()
+        self.path.append((item["Id"], item.get("Name", "?"), types, fallback))
+        await self.show_level(self.path[-1])
+        return True
+
+    async def reload(self):
+        self.remember_cursor()
+        if self.path:
+            await self.show_level(self.path[-1], self.search)
+        else:
+            await self.show_libraries()
+
+    async def load_more(self):
+        if not self.path or self._loading or self.offset >= self.total:
+            return
+        self._loading = True
+        try:
+            await self._load_page()
+        finally:
+            self._loading = False
+        self._scroll_timer = None
+
+    async def _load_page(self):
+        parent_id, name, types, _ = self.path[-1]
+        items, total = self.api.children(parent_id, types, self.search, start=self.offset)
+        lv = self.query_one("#list", ListView)
+        for node in list(lv.children):
+            if isinstance(node, MoreRow):
+                await node.remove()
+        width = max(30, self.size.width - 4)
+        manifest = self.manifest()
+        new = []
+        for item in items:
+            files = manifest.get(item.get("Id"), [])
+            local = bool(files) and any((OFFLINE / f).exists() for f in files)
+            new.append(Row(item, width, local, self.resume_seconds(item), self.prefs))
+        await lv.extend(new)
+        self.items.extend(items)
+        self.offset += len(items)
+        if total > self.offset:
+            await lv.append(MoreRow(total - self.offset))
+        lv.focus()
+        # Mounting the new rows moves the scroll; put the cursor back where
+        # it was, so the list does not jump while the user is scrolling.
+        if lv.highlighted_child is not None:
+            lv.scroll_to_widget(lv.highlighted_child, animate=False, immediate=True)
+
+    # ------------------------------------------------------------- actions
+    def selected(self):
+        node = self.query_one("#list", ListView).highlighted_child
+        return node.item if isinstance(node, Row) else None
+
+    async def on_list_view_highlighted(self, event):
+        """Fetch the next page before the cursor reaches the end.
+
+        Mounting a row is not free on the A53, so the page arrives a little
+        before it is needed - the pause then happens while the user is
+        still reading, not in the middle of a scroll."""
+        index = event.list_view.index or 0
+        if index >= len(self.items) - 10 and self.offset < self.total and not self._loading:
+            await self.load_more()
+
+    async def on_list_view_selected(self, event):
+        node = event.item
+        if isinstance(node, MoreRow):
+            await self.load_more()
+            return
+        if not isinstance(node, Row):
+            return
+        item = node.item
+        if not await self.open(item) and item.get("Type") in PLAYABLE:
+            self.play(item)
+        self.query_one("#list", ListView).focus()
+
+    def play(self, item):
+        lv = self.query_one("#list", ListView)
+        playables = [node.item for node in lv.children
+                     if isinstance(node, Row) and node.item.get("Type") in PLAYABLE]
+        if item not in playables:
+            playables = [item]
+        entries = []
+        for entry in playables:
+            start = self.start_position(entry, exact=entry is item)
+            url, subtitle = self.media(entry, start)
+            source = ((entry.get("MediaSources") or [{}])[0]).get("Id", "")
+            entries.append({
+                "id": entry.get("Id", ""),
+                "source": source,
+                "name": entry.get("Name", ""),
+                "url": url,
+                "sub": subtitle,
+                "start": start,
+            })
+        start = playables.index(item)
+        self.play_state = {
+            "path": [tuple(e) for e in self.path],
+            "index": lv.index or 0,
+            "search": self.search,
+        }
+        self.exit(("PL", entries[start:] + entries[:start]))
+
+    def transcode_url(self, item_id):
+        # static=false is what makes Jellyfin transcode. Without it this
+        # endpoint just serves the original and every parameter is ignored.
+        return (f"{self.api.url}/Videos/{item_id}/stream.mp4?static=false"
+                f"&videoCodec=h264&audioCodec=aac"
+                f"&maxWidth={MAX_WIDTH}&maxHeight={MAX_HEIGHT}"
+                f"&videoBitrate={VIDEO_BITRATE}&audioBitrate={AUDIO_BITRATE}"
+                f"&api_key={self.api.key}")
+
+    def resume_seconds(self, item):
+        """Stored position of an item, in seconds (0 when there is none)."""
+        ticks = self.resume_at.get(item.get("Id"), 0)
+        seconds = ticks / 10_000_000 if ticks else 0
+        runtime = (item.get("RunTimeTicks") or 0) / 10_000_000
+        if runtime and seconds > runtime * 0.95:
+            return 0                      # watched to the end: start over
+        # The server stores every position, so a short one is a real position
+        # too: ignoring it would make the client disagree with the web UI.
+        return seconds if seconds > RESUME_MINIMUM else 0
+
+    def start_position(self, item, exact=False):
+        """Where playback starts: the stored position, or after the intro.
+
+        The resume list is capped, so for the item that is actually played the
+        server is asked directly if the list did not have it."""
+        seconds = self.resume_seconds(item)
+        if not seconds and exact:
+            seconds = self.api.position(item.get("Id", ""))
+            runtime = (item.get("RunTimeTicks") or 0) / 10_000_000
+            if runtime and seconds > runtime * 0.95:
+                seconds = 0
+            if seconds > RESUME_MINIMUM:
+                self.resume_at[item["Id"]] = int(seconds * 10_000_000)
+            else:
+                seconds = 0
+        if seconds:
+            return seconds
+        if not SKIP_INTRO:
+            return 0
+        runtime = (item.get("RunTimeTicks") or 0) / 10_000_000
+        for segment in self.api.segments(item.get("Id", "")):
+            if segment.get("Type") not in ("Intro", "Recap"):
+                continue
+            end = (segment.get("EndTicks") or 0) / 10_000_000
+            start = (segment.get("StartTicks") or 0) / 10_000_000
+            # only a short intro near the beginning is worth skipping
+            if end and end < 300 and start < 30 and end < (runtime or 1e9) * 0.1:
+                return end
+        return 0
+
+    def media(self, item, start=0):
+        """(video url, subtitle url or None) for one item.
+
+        A saved copy is played from the card. Everything else is transcoded
+        down to the panel: it decodes on the VPU and the Wi-Fi only carries
+        the small stream. A saved position is reached by seeking in the
+        running transcode (`--start` does nothing there)."""
+        files = self.local_files(item)
+        if files:
+            local = OFFLINE / files[0]
+            # A saved copy has its subtitle next to it; mpv loads that itself.
+            if any(local.with_suffix(ext).exists()
+                   for ext in (".srt", ".ass", ".vtt")):
+                return str(local), None
+            return str(local), self.api.subtitle_url(item, self.prefs)
+        if item.get("Type") == "Audio":
+            return (f"{self.api.url}/Audio/{item['Id']}/stream"
+                    f"?static=true&api_key={self.api.key}"), None
+        if self.STREAM_TRANSCODE:
+            return self.transcode_url(item["Id"]), self.api.subtitle_url(item, self.prefs)
+        return (f"{self.api.url}/Videos/{item['Id']}/stream.mp4?static=true"
+                f"&api_key={self.api.key}"), self.api.subtitle_url(item, self.prefs)
+
+    def action_search(self):
+        box = self.query_one("#search", Input)
+        box.display = True
+        box.focus()
+
+    def on_input_changed(self, event):
+        if self._search_timer:
+            self._search_timer.stop()
+        self._search_timer = self.set_timer(0.4, self._apply_search)
+
+    async def on_input_submitted(self, event):
+        self.query_one("#search", Input).display = False
+        self.query_one("#list", ListView).focus()
+        if self.path:
+            await self.show_level(self.path[-1], event.value.strip())
+        else:
+            q = event.value.strip().lower()
+            for node in self.query_one("#list", ListView).children:
+                if isinstance(node, Row):
+                    node.display = q in node.item.get("Name", "").lower()
+
+    async def _apply_search(self):
+        query = self.query_one("#search", Input).value.strip()
+        if not self.path:
+            for node in self.query_one("#list", ListView).children:
+                if isinstance(node, Row):
+                    node.display = query.lower() in node.item.get("Name", "").lower()
+        elif query != self.search:
+            await self.show_level(self.path[-1], query)
+
+    async def action_delete(self):
+        item = self.selected()
+        if item is None:
+            return
+        item_id = item.get("Id")
+        now = time.monotonic()
+        if self._confirm and self._confirm[0] == item_id and now < self._confirm[1]:
+            self._confirm = None
+            await self.remove(item)
+            return
+        if item_id not in self.manifest():
+            self.hint("Nothing saved for this item")
+            return
+        self._confirm = (item_id, now + 5)
+        self.hint(f"[X] again to delete “{item.get('Name', '?')[:45]}” from the device")
+
+    async def remove(self, item):
+        manifest = self.manifest()
+        files = manifest.pop(item.get("Id"), [])
+        still_used = {f for v in manifest.values() for f in v}
+        removed = 0
+        for name in files:
+            if name in still_used:
+                continue
+            try:
+                (OFFLINE / name).unlink()
+                removed += 1
+            except OSError:
+                pass
+            base = (OFFLINE / name).with_suffix("")
+            for ext in (".srt", ".ass", ".vtt"):
+                try:
+                    Path(str(base) + ext).unlink()
+                except OSError:
+                    pass
+        self.save_manifest(manifest)
+        await self.reload()
+        self.hint(f"Deleted {removed} file(s)")
+
+    async def action_save(self):
+        """Queue a save and let it run in the background.
+
+        The download is a worker thread; the list stays usable while it
+        works, and a second request is queued rather than refused."""
+        item = self.selected()
+        if item is None:
+            return
+        targets = self.targets(item)
+        if not targets:
+            self.hint(f"Nothing to save for a {item.get('Type', '?').lower()}")
+            return
+        need = sum(size for _, _, size, _, _ in targets)
+        if need and free_bytes() < need * 1.02:
+            self.hint(f"Not enough space: {human_bytes(need)} needed, "
+                      f"{human_bytes(free_bytes())} free")
+            return
+        waiting = self._jobs.qsize()
+        self._jobs.put((item, targets))
+        if not self._busy:
+            self._busy = True
+            self.run_worker(self._drain_jobs, group="dl", exclusive=True, thread=True)
+        if waiting:
+            self.hint(f"Queued ({waiting} job(s) ahead): {item.get('Name', '?')[:40]}")
+        else:
+            self.hint(f"Saving {len(targets)} item(s) in the background…")
+
+    def _drain_jobs(self):
+        """Worker thread: save the queued items one after the other."""
+        while True:
+            try:
+                item, targets = self._jobs.get_nowait()
+            except queue.Empty:
+                break
+            done, skipped, errors = self.download(item, targets)
+            try:
+                self.call_from_thread(self._job_done, (done, skipped, errors))
+            except RuntimeError:
+                pass                     # the app is gone, the files are not
+        try:
+            self.call_from_thread(self._queue_done)
+        except RuntimeError:
+            pass
+
+    def _job_done(self, result):
+        """One queued job finished - called in the app's thread."""
+        done, skipped, errors = result
+        self.call_later(self._after_job, done, skipped, errors)
+
+    async def _after_job(self, done, skipped, errors):
+        # Only the saved marks changed: re-render those rows. Rebuilding the
+        # whole list here would drop the scroll and repaint every row, which
+        # is very visible in a long library.
+        self.refresh_rows()
+        left = self._jobs.qsize()
+        if errors:
+            self.hint(f"Saved {done + skipped}, {len(errors)} failed: {errors[0][:40]}")
+        elif left:
+            self.hint(f"Saved {done} new, {skipped} already there · {left} job(s) left")
+        else:
+            self.hint(f"Saved {done} new, {skipped} already on device")
+
+    def _queue_done(self):
+        """The queue is empty - called in the app's thread."""
+        self._busy = False
+        if not self._jobs.empty():
+            # something was queued while the last job was finishing
+            self._busy = True
+            self.run_worker(self._drain_jobs, group="dl", exclusive=True, thread=True)
+
+    def targets(self, item):
+        """[(item id, filename, expected bytes, 'tc'|'orig')]."""
+        kind = item.get("Type")
+        if kind in PLAYABLE:
+            entries = [item]
+        elif kind == "Season":
+            entries, _ = self.api.children(item["Id"], ["Episode"], fields=FIELDS + ",MediaSources")
+        elif kind == "Series":
+            entries = self.api.series_episodes(item["Id"])
+        else:
+            return []
+        out = []
+        for ep in entries:
+            if not ep.get("Id"):
+                continue
+            name = ep.get("Name", "episode")
+            if ep.get("Type") == "Episode":
+                season, number = ep.get("ParentIndexNumber"), ep.get("IndexNumber")
+                tag = f"S{season:02d}E{number:02d}" if season and number else ""
+                name = " ".join(x for x in (ep.get("SeriesName") or item.get("Name"), tag, name) if x)
+            elif ep.get("ProductionYear"):
+                name = f"{name} ({ep['ProductionYear']})"
+            transcode, ext = self.dl_choice(ep)
+            out.append((ep["Id"], f"{safe_name(name)}.{ext}", api_size(ep),
+                        "tc" if transcode else "orig", self.api.subtitle_url(ep, self.prefs)))
+        return out
+
+    def dl_choice(self, item):
+        ext = (item.get("Container") or "mkv").split(",")[0]
+        if not self.DL_TRANSCODE:
+            return False, ext
+        big = api_size(item) > self.DL_TRANSCODE_ABOVE
+        bigger_than_screen = ((item.get("Height") or 0) > MAX_HEIGHT
+                              or (item.get("Width") or 0) > MAX_WIDTH)
+        return (True, "mp4") if big or bigger_than_screen else (False, ext)
+
+    def download(self, top, targets):
+        """Worker thread: a few files at a time, so a series lands in a
+        fraction of the time (the server transcodes far faster than the
+        card can be written to).
+
+        The UI is never blocked: this runs off the event loop and only
+        touches the manifest at the end.
+        """
+        OFFLINE.mkdir(parents=True, exist_ok=True)
+        manifest = self.manifest()
+        done = skipped = 0
+        errors = []
+
+        def fetch(target):
+            """Download one file (and its subtitle). Returns its state."""
+            item_id, name, _, kind, subtitle = target
+            dest = OFFLINE / name
+            if dest.exists() and dest.stat().st_size > 0:
+                return item_id, name, "skip", None
+            part = dest.with_suffix(dest.suffix + ".part")
+            url = (self.transcode_url(item_id) if kind == "tc"
+                   else f"{self.api.url}/Items/{item_id}/Download")
+            req = urllib.request.Request(
+                url, headers={"Authorization": f'MediaBrowser Token="{self.api.key}"'})
+            try:
+                with urllib.request.urlopen(req, timeout=600) as response, open(part, "wb") as fh:
+                    shutil.copyfileobj(response, fh)
+                os.replace(part, dest)
+                if subtitle:
+                    # sidecar with the same base name: mpv loads it by itself
+                    self.fetch(subtitle, dest.with_suffix(
+                        os.path.splitext(urlparse(subtitle).path)[1] or ".srt"))
+                return item_id, name, "ok", None
+            except Exception as exc:                 # reported in the UI
+                part.unlink(missing_ok=True)
+                return item_id, name, "error", str(exc)
+
+        workers = max(1, min(DOWNLOAD_WORKERS, len(targets)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(fetch, target) for target in targets]
+            for count, future in enumerate(as_completed(futures), 1):
+                item_id, name, state, error = future.result()
+                if state == "ok":
+                    done += 1
+                    manifest[item_id] = [name]
+                elif state == "skip":
+                    skipped += 1
+                    manifest[item_id] = [name]
+                else:
+                    errors.append(f"{name}: {error}")
+                try:
+                    self.call_from_thread(self.hint, f"Saving {count}/{len(targets)}: {name[:40]}")
+                except RuntimeError:
+                    pass                 # the app is gone, the download is not
+        manifest[top["Id"]] = [name for _, name, _, _, _ in targets]
+        self.save_manifest(manifest)
+        return done, skipped, errors
+
+    def fetch(self, url, dest):
+        """Save a small file (a subtitle) next to the video."""
+        request = urllib.request.Request(
+            url, headers={"Authorization": f'MediaBrowser Token="{self.api.key}"'})
+        with urllib.request.urlopen(request, timeout=60) as response, open(dest, "wb") as fh:
+            shutil.copyfileobj(response, fh)
+
+    # ------------------------------------------------------------- navigation
+    async def _resume(self):
+        state = self.resume
+        index = state.get("index")
+        entries = state.get("path", [])
+        for position, entry in enumerate(entries):
+            self.path.append(tuple(entry))
+            await self.show_level(self.path[-1], state.get("search", ""),
+                                  index if position == len(entries) - 1 else None)
+
+    async def action_back(self):
+        box = self.query_one("#search", Input)
+        if box.display:
+            box.display = False
+            self.query_one("#list", ListView).focus()
+            return
+        if self.search:
+            await self.show_level(self.path[-1], "")
+            return
+        if self.path:
+            self.path.pop()
+            if self.path:
+                await self.show_level(self.path[-1])
+            else:
+                await self.show_libraries()
+            return
+        self.exit()
+
+    async def on_resize(self):
+        """Re-cut the rows for the new width.
+
+        Rebuilding the list here would throw the cursor and the scroll away,
+        so the existing rows are re-textured instead."""
+        if not self.items:
+            return
+        lv = self.query_one("#list", ListView)
+        width = max(30, self.size.width - 2)
+        manifest = self.manifest()
+        for child in lv.children:
+            if not isinstance(child, Row):
+                continue
+            item = child.item
+            files = manifest.get(item.get("Id"), [])
+            local = bool(files) and any((OFFLINE / f).exists() for f in files)
+            child.text = row_text(item, width, local, self.resume_seconds(item), self.prefs)
+            child.refresh()
+
+
+class Player:
+    """mpv on the device, with the position reported back to Jellyfin.
+
+    The progress reports need a session that belongs to a user; an API key
+    creates an anonymous one on Jellyfin 12, so the position is only stored
+    when the config holds a real user token. Reading the stored position
+    (resume) works either way.
+    """
+
+    def __init__(self, client, entries):
+        self.client = client
+        self.entries = entries
+        self.socket_path = f"/tmp/jellyfin-mpv-{os.getpid()}.sock"
+        self.socket = None
+        self.reader = None
+        self.request_id = 0
+        self.position = 0.0
+        self.index = 0
+
+    def command(self):
+        # --input-terminal=no: mpv must not touch the tty. It saves the
+        # terminal state when it starts and restores it when it quits, which
+        # knocks the client's alternate screen away and leaves a black
+        # terminal behind. The keyboard reaches mpv through its window
+        # anyway (the input daemon sends it to the focused client).
+        command = ["mpv", "--fullscreen", "--force-window=yes",
+                   "--idle=no", "--terminal=no", "--input-terminal=no",
+                   "--input-conf=/etc/mpv/input-handtop.conf",
+                   f"--input-ipc-server={self.socket_path}"]
+        for entry in self.entries:
+            # Zero-copy for every width: the Cedrus driver gives the picture a
+            # 64-byte aligned stride, so panfrost can import it (see
+            # docs/video-decode.md, "The blue video").
+            command.append("--hwdec=drm")
+            if entry.get("sub"):
+                command.append(f"--sub-file={entry['sub']}")
+            if entry.get("start"):
+                command.append(f"--start={entry['start']}")
+            command.append(entry["url"])
+        return command
+
+    def connect(self):
+        """Connect to mpv's IPC socket (it appears a moment after mpv starts)."""
+        for _ in range(50):
+            if os.path.exists(self.socket_path):
+                try:
+                    self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    self.socket.connect(self.socket_path)
+                    self.socket.settimeout(2)
+                    self.reader = self.socket.makefile("rb")
+                    return True
+                except OSError:
+                    self.socket = None
+            time.sleep(0.2)
+        return False
+
+    def ask(self, name):
+        """Read one property from mpv (None if it does not answer)."""
+        if self.socket is None:
+            return None
+        self.request_id += 1
+        try:
+            self.socket.sendall((json.dumps({"command": ["get_property", name],
+                                             "request_id": self.request_id}) + "\n").encode())
+            while True:
+                line = self.reader.readline()
+                if not line:
+                    return None
+                try:
+                    answer = json.loads(line)
+                except ValueError:
+                    continue
+                if answer.get("request_id") == self.request_id:
+                    return answer.get("data")
+        except (OSError, ValueError):
+            return None
+
+    def report(self, position, item, event):
+        self.client.post("/Sessions/Playing/Progress", {
+            "ItemId": item["id"],
+            "MediaSourceId": item.get("source") or item["id"],
+            "PositionTicks": int(position * 10_000_000),
+            "IsPaused": False,
+            "CanSeek": True,
+            "PlayMethod": "Transcode",
+            "EventName": event,
+            "VolumeLevel": 100,
+        })
+
+    def skip_segment(self, item, position):
+        """Jump over an intro/recap the server marked."""
+        for segment in self.client.segments(item["id"]):
+            if segment.get("Type") not in ("Intro", "Recap"):
+                continue
+            start = (segment.get("StartTicks") or 0) / 10_000_000
+            end = (segment.get("EndTicks") or 0) / 10_000_000
+            if start <= position < end and end:
+                if self.socket:
+                    self.socket.sendall((json.dumps(
+                        {"command": ["seek", end, "absolute"]}) + "\n").encode())
+                return end
+        return None
+
+    def seek_to(self, entry):
+        """Jump to the saved position.
+
+        mpv's --start does not work on a transcode (the server produces one
+        growing file), but a seek does: the server honours the range request
+        and restarts the transcode at the offset."""
+        seconds = entry.get("start") or 0
+        if seconds <= 0 or self.socket is None:
+            return
+        try:
+            self.socket.sendall((json.dumps(
+                {"command": ["seek", seconds, "absolute"]}) + "\n").encode())
+        except OSError:
+            pass
+
+    def run(self):
+        """Run mpv until it exits, reporting the position on the way."""
+        try:
+            os.unlink(self.socket_path)
+        except OSError:
+            pass
+        process = subprocess.Popen(self.command())
+        self.connect()
+        if self.entries:
+            self.seek_to(self.entries[0])
+        if self.entries:
+            self.client.post("/Sessions/Playing", {
+                "ItemId": self.entries[0]["id"],
+                "MediaSourceId": self.entries[0].get("source") or self.entries[0]["id"],
+                "PositionTicks": int(self.entries[0].get("start", 0) * 10_000_000),
+                "IsPaused": False, "CanSeek": True,
+                "PlayMethod": "Transcode", "VolumeLevel": 100,
+            })
+        last_report = 0.0
+        while process.poll() is None:
+            time.sleep(1)
+            index = self.ask("playlist-pos")
+            position = self.ask("time-pos")
+            if isinstance(index, int) and index < len(self.entries):
+                if index != self.index:
+                    self.index = index
+                    # a new file starts: it may have a position of its own
+                    self.seek_to(self.entries[self.index])
+            if isinstance(position, (int, float)):
+                self.position = float(position)
+                item = self.entries[self.index]
+                if SKIP_INTRO:
+                    self.skip_segment(item, self.position)
+                if self.position - last_report >= 10:
+                    last_report = self.position
+                    self.report(self.position, item, "timeupdate")
+        if self.entries:
+            self.report(self.position, self.entries[self.index], "stopped")
+            self.client.post("/Sessions/Playing/Stopped", {
+                "ItemId": self.entries[self.index]["id"],
+                "MediaSourceId": self.entries[self.index].get("source")
+                                 or self.entries[self.index]["id"],
+                "PositionTicks": int(self.position * 10_000_000),
+                "Failed": False,
+            })
+        try:
+            os.unlink(self.socket_path)
+        except OSError:
+            pass
+        return self.entries[self.index] if self.entries else None
+
+
+def main():
+    if not os.environ.get("JELLYFIN_URL"):
+        print("JELLYFIN_URL not set; configure /etc/default/jellyfin", file=sys.stderr)
+        return 1
+    resume = None
+    positions = {}
+    while True:
+        app = JellyfinApp(resume=resume, positions=positions)
+        result = app.run()
+        if isinstance(result, tuple) and result and result[0] == "PL":
+            # The client is out of the way while mpv plays, so the keyboard
+            # belongs to mpv: B (Esc) closes the video (input-handtop.conf)
+            # and the client comes back on the same row. The Player reports
+            # the position back to Jellyfin while it plays.
+            player = Player(app.api, result[1])
+            played = player.run()
+            if played:
+                positions[played["id"]] = int(player.position * 10_000_000)
+                # the device's own book: the server may not keep it
+                book = {k: v / 10_000_000 for k, v in positions.items()}
+                save_positions(dict(sorted(book.items(),
+                                           key=lambda kv: -kv[1])[:200]))
+            resume = app.play_state
+            continue
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

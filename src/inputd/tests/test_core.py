@@ -35,7 +35,62 @@ def test_face_buttons_desktop():
     assert c.button("l3", False, 0.1) == []
     assert c.button("r3", True, 0) == [("clipboard", "paste")]
     assert c.button("x", True, 0) == [("osk", "toggle")]
-    assert c.button("select", True, 0) == []
+    c.button("r1", False, 0.1)   # release keys held by the asserts above
+    c.button("r2", False, 0.1)
+    assert c.button("select", True, 0.2) == []          # hold-based now
+    out, _ = run_ticks(c, 0.2, 1.3)
+    assert ("mode", "keys") in out                      # fires after the 1 s hold
+    assert c.mode == "keys"
+
+
+def test_select_quick_tap_does_not_switch():
+    c = Core()
+    c.tick(0.0)
+    assert c.button("select", True, 0.1) == []
+    assert c.button("select", False, 0.5) == []         # released before 1 s
+    out, _ = run_ticks(c, 0.5, 1.0)
+    assert ("mode", "keys") not in out and c.mode == "desktop"
+
+
+def test_keys_mode_navigation():
+    c = Core()
+    c.tick(0.0)
+    assert c.button("select", True, 0.1) == []                 # hold to enter
+    out, t = run_ticks(c, 0.1, 1.3)
+    assert ("mode", "keys") in out and c.mode == "keys"
+    assert c.button("select", False, t) == []                  # release swallowed post-switch
+    assert c.button("down", True, 2.0) == [("key", "KEY_DOWN", True)]
+    assert c.button("down", False, 2.1) == [("key", "KEY_DOWN", False)]
+    assert c.button("a", True, 2.2) == [("key", "KEY_ENTER", True)]
+    assert c.button("a", False, 2.3) == [("key", "KEY_ENTER", False)]
+    assert c.button("b", True, 2.4) == [("key", "KEY_ESC", True)]
+    assert c.button("b", False, 2.5) == [("key", "KEY_ESC", False)]
+    # right stick still scrolls (wheel), no pointer motion
+    c.tick(2.5)
+    c.axis("ry", -1.0, 2.5)
+    out, _ = run_ticks(c, 2.5, 0.5)
+    assert any(a[0] == "wheel" and a[1] > 0 for a in out)
+    assert not any(a[0] == "rel" for a in out)
+    # holding select exits too; a held arrow is released first
+    c.button("up", True, 3.3)
+    c.button("select", True, 3.4)
+    out, _ = run_ticks(c, 3.4, 1.3)
+    assert ("key", "KEY_UP", False) in out and ("mode", "desktop") in out
+    assert c.mode == "desktop"
+
+
+def test_keys_mode_start_goes_to_gamepad():
+    c = Core()
+    c.tick(0.0)
+    c.button("select", True, 0.1)                     # hold select -> keys
+    run_ticks(c, 0.1, 1.3)
+    assert c.mode == "keys"
+    c.button("select", False, 1.5)
+    c.button("down", True, 1.6)                       # leave an arrow held
+    out = c.button("start", True, 1.7)
+    assert ("key", "KEY_DOWN", False) in out          # held arrow released first
+    assert ("mode", "gamepad") in out
+    assert c.mode == "gamepad"
 
 
 def test_pointer_left_stick_deadzone_and_speed():
@@ -235,6 +290,27 @@ def test_request_gamepad_from_app():
     # No Start press to swallow: the next tap reaches the virtual pad.
     assert c.button("start", True, 1.0) == [("pad_key", "BTN_START", 1)]
     assert c.button("start", False, 1.1) == [("pad_key", "BTN_START", 0)]
+
+
+def test_request_gamepad_and_desktop_from_keypad_mode():
+    c = Core()
+    c.tick(0.0)
+    c.button("select", True, 0.1)                     # hold Select 1 s -> keypad mode
+    run_ticks(c, 0.1, 1.3)
+    assert c.mode == "keys"
+    c.button("down", True, 2.0)                       # arrow held when the request arrives
+    out = c.request_gamepad()                         # e.g. the External Controller app
+    assert ("key", "KEY_DOWN", False) in out and ("mode", "gamepad") in out
+    assert c.mode == "gamepad"
+    assert ("pad_abs", "ABS_HAT0Y", 0) in c.button("down", False, 2.1)
+    out = c.request_desktop()                         # game launcher cleared its flag
+    assert out == [("mode", "desktop")] and c.mode == "desktop"
+    # request_desktop from keypad mode leaves through the keypad exit (arrows released)
+    c._enter_keys()
+    c.button("up", True, 3.0)
+    out = c.request_desktop()
+    assert ("key", "KEY_UP", False) in out and ("mode", "desktop") in out
+    assert c.mode == "desktop"
 
 
 def test_request_desktop_when_bt_link_ends():

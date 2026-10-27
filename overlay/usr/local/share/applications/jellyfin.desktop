@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Jellyfin
+Comment=Jellyfin client for the handheld
+Exec=foot -T Jellyfin -e jellyfin
+Icon=/usr/local/share/rg35xxh/icons/app-jellyfin.png
+Terminal=false
+Categories=AudioVideo;Video;Utility;
+Keywords=jellyfin;media;video;movies;series;streaming;tui;handheld;

@@ -1,0 +1,47 @@
+# Configuration for the Jellyfin client (/usr/local/bin/jellyfin).
+# Read at start-up; an environment variable with the same name wins.
+#
+# Both values are required - the client shows a one-line error and exits when
+# JELLYFIN_URL is empty.
+#
+#   JELLYFIN_URL  your server, e.g. http://mediaserver:8096 or
+#                 https://jellyfin.example.org (no trailing slash needed)
+#   JELLYFIN_KEY  an ACCESS TOKEN (see below), not an API key
+#
+# Use a user access token, not an API key from the admin panel: an API key is
+# an anonymous session, and the server refuses to store a playback position for
+# it (the client keeps its own position book either way, but "Continue
+# watching" on your other devices would stay empty). A token is per user, so
+# each person using the handheld gets their own.
+#
+# To mint one (needs the user's own password, once):
+#
+#   curl -s -X POST "$JELLYFIN_URL/Users/AuthenticateByName" \
+#     -H 'Content-Type: application/json' \
+#     -H 'Authorization: MediaBrowser Client="handtop", Device="handtop", DeviceId="handtop", Version="1"' \
+#     -d '{"Username":"<user>","Pw":"<password>"}' | jq -r .AccessToken
+#
+# Copy the token into JELLYFIN_KEY, then start the client from the drawer
+# ("Jellyfin") or with Super+p.
+#
+JELLYFIN_URL=""
+JELLYFIN_KEY=""
+
+# Optional tunables; the values in brackets are the defaults.
+#
+# JELLYFIN_OFFLINE_DIR=~/Offline     where "save" puts episodes and subtitles
+# JELLYFIN_MAX_WIDTH=640             transcode size asked of the server: the
+# JELLYFIN_MAX_HEIGHT=480            panel is 640x480, so 16:9 becomes 640x360
+# JELLYFIN_VIDEO_BITRATE=<auto>      bits/s; default is 4 bits per pixel
+# JELLYFIN_AUDIO_BITRATE=96000
+# JELLYFIN_SUB_LANGUAGES=<c1>,<c2>   override the subtitle languages from the
+#                                    server profile (see "The Jellyfin side")
+# JELLYFIN_STREAM_TRANSCODE=1        play through a server transcode (what the
+#                                    VPU decodes fastest and the Wi-Fi carries)
+# JELLYFIN_DL_TRANSCODE=1            save likewise; JELLYFIN_DL_TRANSCODE_MB=1024
+#                                    and JELLYFIN_DL_TRANSCODE_HEIGHT=720 say
+#                                    when and how
+# JELLYFIN_DOWNLOAD_WORKERS=3        files saved in parallel
+# JELLYFIN_RESUME_MINIMUM=10         seconds below which a position is ignored
+# JELLYFIN_SKIP_INTRO=1              skip the intro/recap the server marks
+# JELLYFIN_STATE_DIR=~/.local/state/jellyfin

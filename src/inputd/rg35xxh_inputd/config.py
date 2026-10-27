@@ -10,7 +10,7 @@ from .core import DEFAULT_BINDINGS, DEFAULT_SETTINGS
 
 PATHS = ("/boot/firmware/rg35xxh-input.conf", "/etc/rg35xxh/input.conf")
 BUTTON_NAMES = tuple(DEFAULT_BINDINGS)
-_ACTION_RE = re.compile(r"^(none|click_(left|right|middle)|key:KEY_[A-Z0-9_]+|copy|paste|osk_toggle|mode_gamepad|power_menu)$")
+_ACTION_RE = re.compile(r"^(none|click_(left|right|middle)|key:KEY_[A-Z0-9_]+|copy|paste|osk_toggle|mode_gamepad|mode_keys|power_menu)$")
 
 log = logging.getLogger("rg35xxh-inputd")
 

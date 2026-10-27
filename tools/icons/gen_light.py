@@ -7,6 +7,7 @@ N = M.N
 LIGHT = {  # name: (glass tint, ring)
     "desktop": ("#a9b6d0", "#5b6d91"),
     "gamepad": ("#9fcfab", "#3f8a55"),
+    "keys":    ("#c6b8db", "#6c5b91"),
     "bt":      ("#a3bde6", "#3d68b0"),
     "wired":   ("#e2b88f", "#b0753f"),
 }

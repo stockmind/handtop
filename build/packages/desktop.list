@@ -48,6 +48,7 @@ chromium                  # browser: about half Firefox's CPU when scrolling on 
 imv
 qpdfview
 mpv
+python3-textual          # TUI framework: the Jellyfin client
 xarchiver
 # Themes / fonts
 adwaita-icon-theme

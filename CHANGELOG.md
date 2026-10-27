@@ -1,4 +1,25 @@
-# Handtop changelog
+## Unreleased
+
+- **Jellyfin client** (`jellyfin`, Apps → Jellyfin or Super+p): a keypad-first
+  browser for a Jellyfin server in the terminal. One line per item (episode,
+  season, series, film, music video), `A` plays, `Y` saves to the card, `X`
+  deletes the saved copy, `/` filters, and `B` goes back. It plays what the
+  server transcodes to the panel's size (640×480 → 360p for 16:9, ~1.2 Mbit/s)
+  so the VPU decodes it and the Wi-Fi carries little; a saved position is
+  resumed by seeking in that transcode; subtitles follow the Jellyfin user
+  profile (language order and mode); saved copies keep their subtitle as a
+  sidecar. Downloads run in the background, a few at a time, and the list
+  stays usable while they do. Setup (`/etc/default/jellyfin`: server URL and a
+  user access token), keys and troubleshooting: `docs/jellyfin.md`. One package
+  (`python3-textual`), plus a drawer entry and a pixel-art icon.
+
+- **Keypad mode** (hold Select 1 s): the handheld stops being a mouse and
+  becomes a keyboard for terminal applications — D-pad = arrow keys, A = Enter,
+  B = Esc, X = Tab, Y = Space, L1/R1 = Esc/Enter, right stick still scrolls.
+  Hold Select again for desktop mode, or press Start for gamepad mode. The
+  taskbar's input-mode icon shows the new mode. This is what lets the Jellyfin
+  client (and any other TUI: htop, nano, mc) be driven by the handheld's own
+  controls; gamepad and External Controller modes are unchanged.
 
 ## v0.3.0
 
