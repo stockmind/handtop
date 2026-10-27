@@ -145,13 +145,13 @@ Tested 2026-10-17 on the device: fresh profile per browser, 20 s of scrolling on
 Earlier rounds showed Firefox's rendering path (GPU/CPU WebRender, Wayland/X11), CPU governor, smooth scrolling and frame rate made no noticeable difference; full uBlock Origin alone took 110–270 MB in Firefox's extension process.
 
 
-## Goblin (the Jellyfin client, v0.2.0)
+## Jellyfin (the media client, v0.2.0)
 
 > The full reference — keys, configuration, the feature set, the mocked
-> screenshots — is in **[goblin.md](goblin.md)**. This section is the short
+> screenshots — is in **[jellyfin.md](jellyfin.md)**. This section is the short
 > version.
 
-`goblin` is the one media app on the handheld: a single Jellyfin client,
+`jellyfin` is the one media app on the handheld: a single Jellyfin client,
 keypad-first, no menu/dashboard/launcher modes. `Super+p`
 starts it in a terminal. Everything the old suite did (menu, dashboard, play
 browser, shuffle) is gone — the client is the whole UI.
@@ -195,7 +195,7 @@ browser, shuffle) is gone — the client is the whole UI.
   every other parameter is decoration. The size is the panel: the server keeps
   the aspect ratio, so 16:9 comes back as 640x360 h264 — a quarter of the
   pixels of 720p, a quarter of the bitrate, and still a picture the 640x480
-  screen shows pixel for pixel. `GOBLIN_MAX_WIDTH`/`GOBLIN_MAX_HEIGHT` raise
+  screen shows pixel for pixel. `JELLYFIN_MAX_WIDTH`/`JELLYFIN_MAX_HEIGHT` raise
   it for the HDMI monitor (1280x720 for a 4 Mbit/s stream).
 * **Coming back where you were**: the cursor is remembered per folder, and so
   are the pages it needs — after a download or after a video, the list comes
@@ -212,7 +212,7 @@ browser, shuffle) is gone — the client is the whole UI.
   the web UI show it too.
 * **Intro skipping**: the server's media segments (`/MediaSegments/{id}`) are
   honoured — an intro or recap in the first minutes is skipped over
-  automatically while the video plays (`GOBLIN_SKIP_INTRO=0` turns it off).
+  automatically while the video plays (`JELLYFIN_SKIP_INTRO=0` turns it off).
   This server has no segment detection installed, so it is a no-op here.
 * **The decode path**: mpv is started with `--hwdec=drm` — zero-copy, the
   decoder's dmabufs go straight to the GPU. Every width works: the Cedrus
@@ -228,7 +228,7 @@ browser, shuffle) is gone — the client is the whole UI.
   *Settings → Playback → Subtitles* in the web UI and the handheld follows.
   The pick is: a track in one of the preferred languages (in the order the
   user listed them), else the media's own default track, else the first text
-  track; mode `None` means no subtitles at all. `GOBLIN_SUB_LANGUAGES=ita,eng`
+  track; mode `None` means no subtitles at all. `JELLYFIN_SUB_LANGUAGES=ita,eng`
   overrides the profile if you want a different order on the device.
   Jellyfin serves any subtitle stream as srt/ass/vtt on the fly
   (`/Videos/{id}/{source}/Subtitles/{index}/Stream.srt`), and the client
@@ -261,13 +261,13 @@ browser, shuffle) is gone — the client is the whole UI.
   curl -s -X POST -H 'Content-Type: application/json' -d "{\"Secret\":\"$SECRET\"}" "$B/Users/AuthenticateWithQuickConnect"
   ```
 
-  The last call returns `AccessToken` — put it in `/etc/default/goblin-dash`
+  The last call returns `AccessToken` — put it in `/etc/default/jellyfin`
   as `DASH_API_KEY`. With it the server logs the session as the user
   ("User admin started playback"), stores the position, and the web UI shows
   the handheld's progress. Without a user token the client still tracks the
   position itself and shows it as `»55:01`.
 * **Headless test** (no device needed, runs against any Jellyfin):
-  `python3 tools/test-goblin-tui.py` with `JELLYFIN_URL`/`JELLYFIN_KEY` env —
+  `python3 tools/test-jellyfin-tui.py` with `JELLYFIN_URL`/`JELLYFIN_KEY` env —
   covers the library list, the status line, movie and episode playlists (with
   the transcode URL asserted), the resume snapshot, series save targets, a
   real save → play-local → delete round-trip, and back navigation. Verified on
@@ -295,7 +295,7 @@ Not themed yet (stay dark): terminal (foot), volume/brightness bar (`rg35xxh-osd
 
 ### Streams (`goblin-tv`)
 
-A keypad-first browser for YouTube and Twitch, with the same feel as `goblin`.
+A keypad-first browser for YouTube and Twitch, with the same feel as `jellyfin`.
 It asks first — **Twitch** or **YouTube** — and Esc returns to that question, so
 the entry point is one Enter away from live streams or from a search. Twitch
 opens on the top live streams (viewers + game), `3` lists the top
@@ -309,7 +309,7 @@ focuses the box, B/Esc clears it without losing the list.
 `5` switches playback between 480p and 720p. Focus stays where you put it: the
 list takes it after a load so Enter plays, the box keeps it while you type. Enter plays through `goblin-watch`
 — mpv on the VPU, H.264 preferred — and the keys while it plays are the same as
-in `goblin` (`/etc/mpv/input-handtop.conf`): **B/Esc closes the stream and drops
+in `jellyfin` (`/etc/mpv/input-handtop.conf`): **B/Esc closes the stream and drops
 you back into the list you were in**, D-pad left/right seeks 15 s, up/down changes
 speed, A resets it, Y pauses, X switches subtitles. mpv keeps off the terminal
 (`--terminal=no --input-terminal=no`), so the TUI returns exactly as it was.

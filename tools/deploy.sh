@@ -1,5 +1,5 @@
 #!/bin/bash
-# Hot-deploy to goblin without reflashing. Usage: tools/deploy.sh [inputd|goblin|all]
+# Hot-deploy to goblin without reflashing. Usage: tools/deploy.sh [inputd|jellyfin|all]
 # Targets are root-owned and the device sudo needs a password (image default),
 # so stage in ~ then copy with sudo -S. Remote shell is zsh -> keep commands plain.
 # NB: under sudo ~ means /root, so reference the stage dir by absolute path.
@@ -28,19 +28,23 @@ fi
 
 if [ "$WHAT" = all ] || [ "$WHAT" = console ]; then
     # Everything else the image would install: scripts, icons, themes, units, rules, configs.
-    # /etc/default/goblin-dash is device state (the user's Jellyfin key), the repo only has the
+    # /etc/default/jellyfin is device state (the user's Jellyfin key), the repo only has the
     # template, so it is never overwritten. Services are on-demand, units only need a reload.
     stage
-    tar -C overlay --exclude=etc/default/goblin-dash --owner=0 --group=0 --numeric-owner \
+    tar -C overlay --exclude=etc/default/jellyfin --owner=0 --group=0 --numeric-owner \
         -czf - . | ssh goblin "cat > $STAGE/overlay.tgz"
     # The desktop entries in the overlay are only registered with GIO when their
     # directory has a mimeinfo.cache; without it a fresh home has no handler for
     # a video file (Thunar runs a literal "%U"). Same two commands the image
     # build runs (build/05-configure-base.sh).
-    # rm the pre-2026-10-28 leftovers: the client's drawer entry is now jellyfin.desktop
+    # rm the leftovers of the 2026-10-28 rename: the client is jellyfin now
     install_as_root "rm -f /usr/local/share/applications/goblin.desktop \
         /usr/local/share/rg35xxh/icons/app-goblin.png /usr/local/share/rg35xxh/icons/app-goblin-light.png \
-        /home/rg/.local/share/applications/goblin.desktop"
+        /home/rg/.local/share/applications/goblin.desktop /usr/local/bin/goblin \
+        && if [ -f /etc/default/goblin-dash ] && [ ! -f /etc/default/jellyfin ]; then \
+             mv /etc/default/goblin-dash /etc/default/jellyfin; fi \
+        && if [ -d /home/rg/.local/state/goblin ] && [ ! -d /home/rg/.local/state/jellyfin ]; then \
+             mv /home/rg/.local/state/goblin /home/rg/.local/state/jellyfin; fi"
     install_as_root "tar -xzf $STAGE/overlay.tgz -C / && rm -rf $STAGE \
         && systemctl daemon-reload && udevadm control --reload-rules \
         && update-mime-database /usr/share/mime \
@@ -65,13 +69,13 @@ if [ "$WHAT" = all ] || [ "$WHAT" = session ]; then
     echo "session restarted (waybar/mako/swaybg/inputd/labwc)"
 fi
 
-if [ "$WHAT" = all ] || [ "$WHAT" = goblin ]; then
+if [ "$WHAT" = all ] || [ "$WHAT" = jellyfin ]; then
     stage
-    scp -q overlay/usr/local/bin/goblin goblin:deploy-stage/
+    scp -q overlay/usr/local/bin/jellyfin goblin:deploy-stage/
     # rm the pre-2026-10-21 leftovers: the old wrapper and the abandoned
     # goblin-play-tui.py (both are in git history if they are ever needed).
-    install_as_root "cp $STAGE/goblin /usr/local/bin/goblin && chmod 755 /usr/local/bin/goblin \
+    install_as_root "cp $STAGE/jellyfin /usr/local/bin/jellyfin && chmod 755 /usr/local/bin/jellyfin \
         && rm -f /usr/local/bin/goblin-play /usr/local/lib/goblin-play-tui.py \
         && rm -rf $STAGE"
-    echo "goblin TUI deployed (takes effect on next launch)"
+    echo "jellyfin client deployed (takes effect on next launch)"
 fi

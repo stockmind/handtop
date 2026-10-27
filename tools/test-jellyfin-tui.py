@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Headless end-to-end test for the goblin Jellyfin client.
+"""Headless end-to-end test for the jellyfin client.
 
 Drives the real app with Textual's pilot against a live Jellyfin server:
 libraries -> movies/series/seasons/episodes, transcode URLs, status line,
 Save targets, and a real download -> play-local -> delete round-trip.
 
     JELLYFIN_URL=http://192.168.1.60:8096 JELLYFIN_KEY=<token> \
-        python3 tools/test-goblin-tui.py
+        python3 tools/test-jellyfin-tui.py
 """
 import asyncio
 import os
@@ -16,21 +16,21 @@ import urllib.request
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-APP = os.path.join(HERE, "..", "overlay", "usr", "local", "bin", "goblin")
+APP = os.path.join(HERE, "..", "overlay", "usr", "local", "bin", "jellyfin")
 
 os.environ.setdefault("JELLYFIN_URL", "http://192.168.1.60:8096")
 os.environ.setdefault("JELLYFIN_KEY", "a35b1923c3c5495d91edcf067ad96a66")
-OFFLINE = Path("/tmp/opencode/goblin-offline")
-os.environ.setdefault("GOBLIN_OFFLINE_DIR", str(OFFLINE))
+OFFLINE = Path("/tmp/opencode/jellyfin-offline")
+os.environ.setdefault("JELLYFIN_OFFLINE_DIR", str(OFFLINE))
 
 import importlib.machinery
-loader = importlib.machinery.SourceFileLoader("goblin_app", APP)
-goblin_app = loader.load_module()
-Goblin = goblin_app.Goblin
-Row = goblin_app.Row
-MoreRow = goblin_app.MoreRow
-MoreRow = goblin_app.MoreRow
-load_manifest = goblin_app.Goblin.manifest
+loader = importlib.machinery.SourceFileLoader("jellyfin_app", APP)
+jellyfin_app = loader.load_module()
+JellyfinApp = jellyfin_app.JellyfinApp
+Row = jellyfin_app.Row
+MoreRow = jellyfin_app.MoreRow
+MoreRow = jellyfin_app.MoreRow
+load_manifest = jellyfin_app.JellyfinApp.manifest
 
 
 def api(path):
@@ -84,7 +84,7 @@ async def main():
     shutil.rmtree(OFFLINE, ignore_errors=True)
 
     # --- libraries, compact status line, no leftover dashboard/menu
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         names = [r.item.get("Name") for r in app.query(Row)]
@@ -96,7 +96,7 @@ async def main():
         assert "free" in stats, stats
         for word in ("cpu",):
             assert word in stats, f"status line lacks {word}: {stats}"
-        if goblin_app.battery():
+        if jellyfin_app.battery():
             assert "bat" in stats or "chg" in stats, stats
         assert "[A] play" in hint, hint
         print(f"PASS home: {len(names)} libraries, stats={stats!r}")
@@ -125,7 +125,7 @@ async def main():
 
     # --- resume reopens the same folder and cursor
     assert app.play_state["path"], "no navigation state captured"
-    app2 = Goblin(resume=app.play_state)
+    app2 = JellyfinApp(resume=app.play_state)
     async with app2.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         from textual.widgets import ListView
@@ -135,7 +135,7 @@ async def main():
         print("PASS resume reopens folder + cursor")
 
     # --- TV: series -> season -> episode playlist
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         await click_row(pilot, "Serie TV")
@@ -153,7 +153,7 @@ async def main():
         print(f"PASS series: {len(episodes)}-episode playlist via season")
 
     # --- Resume: a stored position shows up on the row and starts playback there
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         await click_row(pilot, "Serie TV")
@@ -172,7 +172,7 @@ async def main():
             assert entries[0]["start"] > 30, f"no start position: {entries[0]}"
 
     # --- Pagination: a big library comes in pages, and no placeholder rows
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         await click_row(pilot, "Video Musicali")
@@ -198,7 +198,7 @@ async def main():
 
     # --- The cursor and its pages come back after a reload (download) and
     #     after a video (the resume snapshot)
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         await click_row(pilot, "Video Musicali")
@@ -220,7 +220,7 @@ async def main():
         app.play_state = {"path": [tuple(e) for e in app.path],
                           "index": index, "search": app.search}
 
-    app2 = Goblin(resume=app.play_state)
+    app2 = JellyfinApp(resume=app.play_state)
     async with app2.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         from textual.widgets import ListView
@@ -232,7 +232,7 @@ async def main():
 
     # --- A saved position is carried into the playlist (the player seeks in
     #     the running transcode)
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         await click_row(pilot, "Film")
@@ -247,7 +247,7 @@ async def main():
         print("PASS a saved position is carried into the transcode")
 
     # --- Subtitles: every kind of media gets one, not just series
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         await click_row(pilot, "Film")
@@ -261,7 +261,7 @@ async def main():
               f"{targets[0][4][-40:]}")
 
     # --- A second save is queued, not refused
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         await click_row(pilot, "Video Musicali")
@@ -285,7 +285,7 @@ async def main():
         print("PASS queued saves: both jobs finished")
 
     # --- Subtitles: Italian first, English second, else whatever is there
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         await click_row(pilot, "Serie TV")
@@ -296,7 +296,7 @@ async def main():
         assert rows, "no episodes"
         chosen = None
         for row in rows:
-            track = goblin_app.subtitle_track(row.item, app.prefs)
+            track = jellyfin_app.subtitle_track(row.item, app.prefs)
             if track:
                 chosen = track
                 break
@@ -313,7 +313,7 @@ async def main():
             print("PASS subtitle url:", sub[:90])
 
     # --- Save targets: a whole series expands to every episode
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         await click_row(pilot, "Serie TV")
@@ -325,7 +325,7 @@ async def main():
         print(f"PASS series save targets: {len(targets)} episodes")
 
     # --- Save one episode for real, play it locally, delete it with X twice
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         await click_row(pilot, "Serie TV")
@@ -347,7 +347,7 @@ async def main():
         assert size > 50_000, f"suspiciously small: {size}"
         print(f"PASS save: {files[0]} ({size / 1e6:.1f} MB)")
         # the subtitle comes along as a sidecar mpv loads by itself
-        track = goblin_app.subtitle_track(item, app.prefs)
+        track = jellyfin_app.subtitle_track(item, app.prefs)
         if track:
             base = (OFFLINE / files[0]).with_suffix("")
             sidecars = [p for p in base.parent.glob(base.name + ".*")
@@ -365,7 +365,7 @@ async def main():
         assert any("/" in u and "http" not in u and u.endswith(files[0]) for u in local), local[0]
         print("PASS play uses the saved copy")
 
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         await click_row(pilot, "Serie TV")
@@ -387,7 +387,7 @@ async def main():
         print("PASS delete needs two X presses and removes the file")
 
     # --- Escape walks back up; status survives a resize
-    app = Goblin()
+    app = JellyfinApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await settle(pilot)
         await click_row(pilot, "Film")

@@ -1,6 +1,6 @@
-# Goblin — the Jellyfin client for the handheld
+# Jellyfin — the media client for the handheld
 
-`goblin` is the one media app on the RG35XX H: a single, keypad-first
+`jellyfin` is the one media app on the RG35XX H: a single, keypad-first
 Jellyfin client in a terminal. It browses the library, plays what you pick
 fullscreen, keeps your place, follows the subtitle preferences of your
 Jellyfin account, and saves episodes to the SD card.
@@ -9,13 +9,13 @@ Start it with `Super+p` — it opens in a terminal window.
 
 ![The client on the handheld](img/device-home.png)
 
-Every picture in this document is **mocked**: `tools/goblin-mock.py` drives the
+Every picture in this document is **mocked**: `tools/jellyfin-mock.py` drives the
 real application (real widgets, real CSS, real layout) against a fake server
 with invented library, series and episode names. These ones are photographs
 of the actual RG35XX H running that mock — the terminal, the font, the
 taskbar and all — so nothing copyrighted is in the repository and the
 pictures cannot drift away from the UI. The same screens are also rendered
-crisply as SVG (`img/goblin-*.svg`).
+crisply as SVG (`img/jellyfin-*.svg`).
 
 ---
 
@@ -106,7 +106,7 @@ download) restores the folder, the pages that were loaded and the row under
 the cursor.
 
 Two things make it work: the client keeps its own book of what it watched
-(`~/.local/state/goblin/positions.json`), because the server does not always
+(`~/.local/state/jellyfin/positions.json`), because the server does not always
 keep the position a client reports; and a resumed item is streamed from the
 **original** file (bitrate capped) instead of the transcode — a transcode is
 one growing file that cannot be seeked into, so the video would start at the
@@ -156,29 +156,29 @@ temperature, refreshed every five seconds.
 
 ## Configuration
 
-Everything lives in `/etc/default/goblin-dash` on the device (that file is
+Everything lives in `/etc/default/jellyfin` on the device (that file is
 device state; the repository only ships the template).
 
 ```sh
-DASH_JELLYFIN="http://192.168.1.60:8096"
+JELLYFIN_URL="http://192.168.1.60:8096"
 DASH_API_KEY="<a user access token, see below>"
 ```
 
 | variable | default | what it does |
 |---|---|---|
-| `DASH_JELLYFIN` | — | the Jellyfin server |
+| `JELLYFIN_URL` | — | the Jellyfin server |
 | `DASH_API_KEY` | — | a **user access token** (not an API key — see below) |
-| `GOBLIN_MAX_WIDTH` | `640` | the width the server transcodes to; raise it for the HDMI monitor |
-| `GOBLIN_MAX_HEIGHT` | `480` | the height the server transcodes to |
-| `GOBLIN_VIDEO_BITRATE` | 4 bits/pixel/s | the video bitrate of the transcode (≈1.2 Mbit/s at 640×360) |
-| `GOBLIN_AUDIO_BITRATE` | `96000` | the audio bitrate of the transcode |
-| `GOBLIN_STREAM_TRANSCODE` | `1` | `0` streams the original file instead of a transcode |
-| `GOBLIN_DL_TRANSCODE` | `1` | `0` saves the original file instead of a transcode |
-| `GOBLIN_DL_TRANSCODE_MB` | `1024` | originals above this size are transcoded even if they fit the panel |
-| `GOBLIN_SUB_LANGUAGES` | — | overrides the profile's subtitle languages, e.g. `ita,eng` |
-| `GOBLIN_SKIP_INTRO` | `1` | `0` does not skip intros/recaps |
-| `GOBLIN_DOWNLOAD_WORKERS` | `3` | how many files are saved at once |
-| `GOBLIN_OFFLINE_DIR` | `~/Offline` | where the saved copies go (never `/tmp`: it is a 128 MB tmpfs) |
+| `JELLYFIN_MAX_WIDTH` | `640` | the width the server transcodes to; raise it for the HDMI monitor |
+| `JELLYFIN_MAX_HEIGHT` | `480` | the height the server transcodes to |
+| `JELLYFIN_VIDEO_BITRATE` | 4 bits/pixel/s | the video bitrate of the transcode (≈1.2 Mbit/s at 640×360) |
+| `JELLYFIN_AUDIO_BITRATE` | `96000` | the audio bitrate of the transcode |
+| `JELLYFIN_STREAM_TRANSCODE` | `1` | `0` streams the original file instead of a transcode |
+| `JELLYFIN_DL_TRANSCODE` | `1` | `0` saves the original file instead of a transcode |
+| `JELLYFIN_DL_TRANSCODE_MB` | `1024` | originals above this size are transcoded even if they fit the panel |
+| `JELLYFIN_SUB_LANGUAGES` | — | overrides the profile's subtitle languages, e.g. `ita,eng` |
+| `JELLYFIN_SKIP_INTRO` | `1` | `0` does not skip intros/recaps |
+| `JELLYFIN_DOWNLOAD_WORKERS` | `3` | how many files are saved at once |
+| `JELLYFIN_OFFLINE_DIR` | `~/Offline` | where the saved copies go (never `/tmp`: it is a 128 MB tmpfs) |
 
 ---
 
@@ -230,11 +230,11 @@ dropped frames.
 
 | path | what |
 |---|---|
-| `/usr/local/bin/goblin` | the client (one Python file, no dependencies beyond Textual) |
+| `/usr/local/bin/jellyfin` | the client (one Python file, no dependencies beyond Textual) |
 | `/usr/local/share/applications/jellyfin.desktop` | the drawer entry (shown as "Jellyfin") |
 | `/usr/local/share/rg35xxh/icons/app-jellyfin.png` | the icon (56 px pixel art, plus a `-light` variant) |
 | `/etc/mpv/input-handtop.conf` | the pad bindings during playback |
-| `/etc/default/goblin-dash` | the configuration (device state) |
+| `/etc/default/jellyfin` | the configuration (device state) |
 | `~/Offline/` | the saved copies and their subtitles |
 
 ---
@@ -262,15 +262,15 @@ key cannot store one. Use a user token.
 
 ```sh
 # the headless test (needs a Jellyfin server; no device needed)
-JELLYFIN_URL=http://192.168.1.60:8096 JELLYFIN_KEY=… python3 tools/test-goblin-tui.py
+JELLYFIN_URL=http://192.168.1.60:8096 JELLYFIN_KEY=… python3 tools/test-jellyfin-tui.py
 
 # regenerate the mocked screenshots in this document
-python3 tools/goblin-mock.py docs/img
+python3 tools/jellyfin-mock.py docs/img
 
 # run the mock on the handheld itself (for photographing it)
-scp tools/goblin-mock.py goblin:/tmp/ && ssh goblin 'foot -e "python3 /tmp/goblin-mock.py --live"'
+scp tools/jellyfin-mock.py goblin:/tmp/ && ssh goblin 'foot -e "python3 /tmp/jellyfin-mock.py --live"'
 ssh goblin 'grim /tmp/shot.png'   # and pull the picture back
 
 # push the client to the handheld
-tools/deploy.sh goblin
+tools/deploy.sh jellyfin
 ```

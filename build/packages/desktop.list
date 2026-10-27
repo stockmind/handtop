@@ -40,7 +40,7 @@ chromium                  # browser: about half Firefox's CPU when scrolling on 
 imv
 qpdfview
 mpv
-python3-textual          # modern TUI framework (goblin-tui); mouse support, neon styling
+python3-textual          # modern TUI framework (the TUI client); mouse support, neon styling
 xarchiver
 # Themes / fonts
 adwaita-icon-theme

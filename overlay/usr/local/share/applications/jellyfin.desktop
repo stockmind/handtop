@@ -2,7 +2,7 @@
 Type=Application
 Name=Jellyfin
 Comment=Jellyfin client for the handheld
-Exec=foot -T Jellyfin -e goblin
+Exec=foot -T Jellyfin -e jellyfin
 Icon=/usr/local/share/rg35xxh/icons/app-jellyfin.png
 Terminal=false
 Categories=AudioVideo;Video;Utility;

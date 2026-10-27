@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""goblin — the one Jellyfin client for the handheld.
+"""jellyfin — the media client for the handheld.
 
 Keypad-first (keypad mode: D-pad = arrows, A = Enter, B = Esc, X = Tab,
 Y = Space), one compact single-line-per-row list, one status line.
@@ -34,10 +34,10 @@ from textual.widgets import Input, Label, ListItem, ListView, Static
 
 
 def _load_config():
-    """Seed env from /etc/default/goblin-dash: DASH_JELLYFIN/DASH_API_KEY map to
-    JELLYFIN_URL/JELLYFIN_KEY; any GOBLIN_* line passes through."""
+    """Seed env from /etc/default/jellyfin: JELLYFIN_URL/JELLYFIN_KEY, and any
+    JELLYFIN_* tunable; the old DASH_ names still work."""
     try:
-        with open("/etc/default/goblin-dash") as f:
+        with open("/etc/default/jellyfin") as f:
             for line in f:
                 if "=" not in line or line.lstrip().startswith("#"):
                     continue
@@ -48,7 +48,7 @@ def _load_config():
                     os.environ.setdefault("JELLYFIN_URL", val)
                 elif key == "DASH_API_KEY":
                     os.environ.setdefault("JELLYFIN_KEY", val)
-                elif key.startswith("GOBLIN_"):
+                elif key.startswith("JELLYFIN_"):
                     os.environ.setdefault(key, val)
     except OSError:
         pass
@@ -56,7 +56,7 @@ def _load_config():
 
 _load_config()
 
-OFFLINE = Path(os.environ.get("GOBLIN_OFFLINE_DIR", str(Path.home() / "Offline")))
+OFFLINE = Path(os.environ.get("JELLYFIN_OFFLINE_DIR", str(Path.home() / "Offline")))
 PLAYABLE = {"Episode", "Movie", "MusicVideo", "Video", "Audio"}
 CONTAINERS = {
     "movies": ["Movie"],
@@ -71,24 +71,24 @@ FIELDS = "Fields=Width,Height,RunTimeTicks,ProductionYear,MediaSources"
 # The panel is 640x480: asking the server for that (it keeps the aspect ratio,
 # so 16:9 becomes 640x360) is enough picture and a quarter of the pixels of
 # 720p - less to transcode, less to push over Wi-Fi, less for the VPU.
-# Raise it for the HDMI monitor: GOBLIN_MAX_WIDTH=1280 GOBLIN_MAX_HEIGHT=720.
-MAX_WIDTH = int(os.environ.get("GOBLIN_MAX_WIDTH", "640"))
-MAX_HEIGHT = int(os.environ.get("GOBLIN_MAX_HEIGHT", "480"))
-VIDEO_BITRATE = int(os.environ.get("GOBLIN_VIDEO_BITRATE", "0")) or (
+# Raise it for the HDMI monitor: JELLYFIN_MAX_WIDTH=1280 JELLYFIN_MAX_HEIGHT=720.
+MAX_WIDTH = int(os.environ.get("JELLYFIN_MAX_WIDTH", "640"))
+MAX_HEIGHT = int(os.environ.get("JELLYFIN_MAX_HEIGHT", "480"))
+VIDEO_BITRATE = int(os.environ.get("JELLYFIN_VIDEO_BITRATE", "0")) or (
     MAX_WIDTH * MAX_HEIGHT * 4)          # ~4 bits per pixel per second
-AUDIO_BITRATE = int(os.environ.get("GOBLIN_AUDIO_BITRATE", "96000"))
+AUDIO_BITRATE = int(os.environ.get("JELLYFIN_AUDIO_BITRATE", "96000"))
 # Subtitle languages, if the Jellyfin profile should not decide:
-# GOBLIN_SUB_LANGUAGES=ita,eng
+# JELLYFIN_SUB_LANGUAGES=ita,eng
 SUB_LANGUAGES = [x.strip() for x in
-                 os.environ.get("GOBLIN_SUB_LANGUAGES", "").split(",") if x.strip()]
+                 os.environ.get("JELLYFIN_SUB_LANGUAGES", "").split(",") if x.strip()]
 # The smallest position worth resuming from (seconds).
-RESUME_MINIMUM = float(os.environ.get("GOBLIN_RESUME_MINIMUM", "10"))
+RESUME_MINIMUM = float(os.environ.get("JELLYFIN_RESUME_MINIMUM", "10"))
 # How many files to save at once. The server transcodes much faster than the
 # Wi-Fi can carry, so a few in parallel make a series land in a fraction of
 # the time.
-DOWNLOAD_WORKERS = int(os.environ.get("GOBLIN_DOWNLOAD_WORKERS", "3"))
+DOWNLOAD_WORKERS = int(os.environ.get("JELLYFIN_DOWNLOAD_WORKERS", "3"))
 # Skip the intro/recap the server knows about (jfsh does the same).
-SKIP_INTRO = os.environ.get("GOBLIN_SKIP_INTRO", "1") == "1"
+SKIP_INTRO = os.environ.get("JELLYFIN_SKIP_INTRO", "1") == "1"
 
 
 # ---------------------------------------------------------------- device stats
@@ -167,8 +167,8 @@ def human_time(ticks):
 
 def state_path():
     """Where the client keeps its own record of what was watched."""
-    directory = os.environ.get("GOBLIN_STATE_DIR",
-                               str(Path.home() / ".local" / "state" / "goblin"))
+    directory = os.environ.get("JELLYFIN_STATE_DIR",
+                               str(Path.home() / ".local" / "state" / "jellyfin"))
     return Path(directory) / "positions.json"
 
 
@@ -216,7 +216,7 @@ def subtitle_track(item, prefs=None):
     if str(prefs.get("mode") or "Default").lower() == "none":
         return None
     languages = [str(x).lower() for x in (prefs.get("languages") or [])]
-    if SUB_LANGUAGES:                       # GOBLIN_SUB_LANGUAGES overrides
+    if SUB_LANGUAGES:                       # JELLYFIN_SUB_LANGUAGES overrides
         languages = [x.lower() for x in SUB_LANGUAGES]
 
     def rank(stream):
@@ -506,7 +506,7 @@ ListView > ListItem.-highlight { background: #2b3240; }
 """
 
 
-class Goblin(App):
+class JellyfinApp(App):
     TITLE = "Jellyfin"
     CSS = CSS
     BINDINGS = [
@@ -517,10 +517,10 @@ class Goblin(App):
         ("q", "quit", "quit"),
     ]
 
-    STREAM_TRANSCODE = os.environ.get("GOBLIN_STREAM_TRANSCODE", "1") == "1"
-    DL_TRANSCODE = os.environ.get("GOBLIN_DL_TRANSCODE", "1") == "1"
-    DL_TRANSCODE_ABOVE = int(os.environ.get("GOBLIN_DL_TRANSCODE_MB", "1024")) * 1024 * 1024
-    DL_TRANSCODE_HEIGHT = int(os.environ.get("GOBLIN_DL_TRANSCODE_HEIGHT", "720"))
+    STREAM_TRANSCODE = os.environ.get("JELLYFIN_STREAM_TRANSCODE", "1") == "1"
+    DL_TRANSCODE = os.environ.get("JELLYFIN_DL_TRANSCODE", "1") == "1"
+    DL_TRANSCODE_ABOVE = int(os.environ.get("JELLYFIN_DL_TRANSCODE_MB", "1024")) * 1024 * 1024
+    DL_TRANSCODE_HEIGHT = int(os.environ.get("JELLYFIN_DL_TRANSCODE_HEIGHT", "720"))
     HINT = "[A] play  [B] back  [Y] save  [X] delete  [/] search  [Q] quit"
 
     def __init__(self, resume=None, positions=None):
@@ -1205,7 +1205,7 @@ class Player:
     def __init__(self, client, entries):
         self.client = client
         self.entries = entries
-        self.socket_path = f"/tmp/goblin-mpv-{os.getpid()}.sock"
+        self.socket_path = f"/tmp/jellyfin-mpv-{os.getpid()}.sock"
         self.socket = None
         self.reader = None
         self.request_id = 0
@@ -1365,12 +1365,12 @@ class Player:
 
 def main():
     if not os.environ.get("JELLYFIN_URL"):
-        print("JELLYFIN_URL not set; configure /etc/default/goblin-dash", file=sys.stderr)
+        print("JELLYFIN_URL not set; configure /etc/default/jellyfin", file=sys.stderr)
         return 1
     resume = None
     positions = {}
     while True:
-        app = Goblin(resume=resume, positions=positions)
+        app = JellyfinApp(resume=resume, positions=positions)
         result = app.run()
         if isinstance(result, tuple) and result and result[0] == "PL":
             # The client is out of the way while mpv plays, so the keyboard

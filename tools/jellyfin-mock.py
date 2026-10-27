@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Render the goblin client with fake data, for the documentation.
+"""Render the jellyfin client with fake data, for the documentation.
 
 The mock drives the *real* app - real widgets, real CSS, real layout - and
 only replaces the Jellyfin server with a canned one, so the screenshots
 cannot drift from the UI. Every name in the fake data is invented.
 
 Usage:
-    python3 tools/goblin-mock.py docs/img     # render the pictures
-    python3 tools/goblin-mock.py --live        # run it in a terminal (on the
+    python3 tools/jellyfin-mock.py docs/img     # render the pictures
+    python3 tools/jellyfin-mock.py --live        # run it in a terminal (on the
                                               # device, to photograph the
                                               # real screen)
 """
@@ -19,11 +19,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 # The client: from the repository, or the one installed on a device.
-APP = Path(os.environ.get("GOBLIN_APP",
-                          HERE.parent / "overlay" / "usr" / "local" / "bin" / "goblin"))
+APP = Path(os.environ.get("JELLYFIN_APP",
+                          HERE.parent / "overlay" / "usr" / "local" / "bin" / "jellyfin"))
 if not APP.exists():
-    APP = Path("/usr/local/bin/goblin")
-g = importlib.machinery.SourceFileLoader("goblin_app", str(APP)).load_module()
+    APP = Path("/usr/local/bin/jellyfin")
+g = importlib.machinery.SourceFileLoader("jellyfin_app", str(APP)).load_module()
 
 # --------------------------------------------------------------- fake server
 
@@ -183,7 +183,7 @@ async def shot(app, pilot, name, out):
 
 async def live():
     """Run the mock in a real terminal, so a device can be photographed."""
-    app = g.Goblin()
+    app = g.JellyfinApp()
     app.api = FakeServer()
 
     async def walk():
@@ -204,27 +204,27 @@ async def main():
         return
     out = Path(sys.argv[1] if len(sys.argv) > 1 else "docs/img")
     out.mkdir(parents=True, exist_ok=True)
-    app = g.Goblin()
+    app = g.JellyfinApp()
     app.api = FakeServer()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        await shot(app, pilot, "goblin-home", out)
+        await shot(app, pilot, "jellyfin-home", out)
 
         await app.open(LIBRARIES[0])               # the series library
         await pilot.pause()
-        await shot(app, pilot, "goblin-series", out)
+        await shot(app, pilot, "jellyfin-series", out)
 
         await app.open(SERIES[0])                  # into a series
         await pilot.pause()
-        await shot(app, pilot, "goblin-seasons", out)
+        await shot(app, pilot, "jellyfin-seasons", out)
 
         await app.open(SEASONS[0])                 # into the season
         await pilot.pause()
-        await shot(app, pilot, "goblin-episodes", out)
+        await shot(app, pilot, "jellyfin-episodes", out)
 
         await app.open(MOVIES[0])                  # a movie row
         await pilot.pause()
-        await shot(app, pilot, "goblin-movies", out)
+        await shot(app, pilot, "jellyfin-movies", out)
 
 
 if __name__ == "__main__":

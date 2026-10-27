@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Change: the client is called `jellyfin` everywhere, not just in the drawer:
+  `/usr/local/bin/jellyfin`, `/etc/default/jellyfin` (was `goblin-dash`),
+  `~/.local/state/jellyfin`, `JELLYFIN_*` tunables, `docs/jellyfin.md`,
+  `tools/test-jellyfin-tui.py`, `tools/jellyfin-mock.py`, and
+  `tools/deploy.sh jellyfin`. `deploy.sh` moves the old config file and state
+  directory over, so a hot-deployed device keeps its server key and positions.
+  Streams keeps its name (`goblin-tv`, `goblin-watch`).
+
 - Change: the client is called **Jellyfin** in the app drawer, with a pixel
   Jellyfin mark (white on a purple tile) instead of the handheld-with-a-play
   icon. `jellyfin.desktop` / `app-jellyfin.png`; the binary is still `goblin`,
