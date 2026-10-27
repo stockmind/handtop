@@ -1,6 +1,13 @@
 # Handtop changelog
 
-## v0.3.0
+## Unreleased
+
+- Fix: `04c` uses upstream's checks again (`grep -w … >/dev/null`, not `grep -qw`):
+  with `pipefail`, `-q` stops reading ffmpeg's long list at the first match, grep
+  dies of SIGPIPE and the build fails on a check that actually passed. The
+  ffmpeg build itself is upstream's verbatim (Kwiboo `fad85d9` + the drm patch),
+  so an upstream bump lands without a conflict — the fork's video work sits in
+  `04e` (VA-API), beside ffmpeg rather than inside it.
 
 - Change: the client is called `jellyfin` everywhere, not just in the drawer:
   `/usr/local/bin/jellyfin`, `/etc/default/jellyfin` (was `goblin-dash`),
@@ -365,6 +372,8 @@
 - Fix: the desktop user could not open the dma-buf heaps (`/dev/dma_heap/*` are `root:root 0600`), so ffmpeg logged `Unable to open any dma_heap device` and every dmabuf-based hardware path was unavailable. New udev rule `72-rg35xxh-dma-heap.rules` grants group `video` access.
 - Docs: rewrote `docs/video-decode.md` with the measurements above; `tools/check-video-decode.sh` now requires a real decode (Cedrus VPU engaged, 0 decode errors, exit 0) instead of a capability listing — that listing is what let the earlier broken build through. The same tool now also asserts the zero-copy path (`mpv --hwdec=auto-safe` selecting the `drm` hwdec and using the drmprime EGL dmabuf interop), and `docs/desktop.md` no longer calls zero-copy a gap.
 - Removed: the mpv-side alternative (`build/patches/mpv-v4l2request-drmprime.patch` + `tools/build-mpv-v4l2request.sh`, "route B"). It was never shipped: the FFmpeg-side patch covers every consumer (mpv, the `ffmpeg` CLI, anything else a user installs), while an mpv patch would need a distribution package rebuild. The tree keeps the FFmpeg side only.
+## v0.3.0
+
 - ⚠️ **Known issue:** Bluetooth is sometimes missing on the first boot after flashing (no adapter: the Bluetooth icon shows it off and External Controller → Bluetooth can't start). Restart once (Power → Restart); it works from then on.
 - **BT Controller mode is now an Xbox controller.** Over Bluetooth the handheld presents itself as an Xbox Wireless Controller (Series X|S, BLE): Windows loads its own Xbox driver, XInput-only games work directly, and **game vibration now works over Bluetooth** too (played on the handheld's motor through the vibration safety gate). Tested on Windows 11. **After updating, remove "Handtop Gamepad" on the PC and pair it again once** (Windows caches the old description). For this, bluetoothd runs with the Xbox controller's device ID while the mode is on and gets its own back afterwards. The v0.2.0 generic gamepad stays available (`RG35XXH_BTPAD_PROFILE=generic`). Details in `docs/apps/external-controller.md`.
 - External Controller app waits a little longer for BT mode to start (bluetoothd restarts).
