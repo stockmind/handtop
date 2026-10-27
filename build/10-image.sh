@@ -10,7 +10,10 @@ for m in proc sys dev run; do
   mountpoint -q "$ROOTFS/$m" && die "$ROOTFS/$m is still mounted"
 done
 
-VER="$(date +%Y%m%d)-$(git -C "$TOP" rev-parse --short HEAD 2>/dev/null || echo "v$RELEASE_VERSION")"
+# -c safe.directory: the build runs in the build container as root, where git
+# otherwise refuses to read the checkout ("dubious ownership") and the image
+# name silently falls back to the release version instead of the commit.
+VER="$(date +%Y%m%d)-$(git -c safe.directory="$TOP" -C "$TOP" rev-parse --short HEAD 2>/dev/null || echo "v$RELEASE_VERSION")"
 [ "$RAM_TYPE" != "DDR4" ] && VER="$VER-$RAM_TYPE"
 OUT="$WORK/out"; mkdir -p "$OUT"
 IMG="$OUT/$IMAGE_NAME-$VER.img"

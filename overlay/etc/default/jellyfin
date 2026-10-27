@@ -1,0 +1,16 @@
+# Environment for the Jellyfin client (/usr/local/bin/jellyfin).
+# Set these to enable the Jellyfin now-playing panel; empty = off.
+JELLYFIN_URL=""
+JELLYFIN_KEY=""
+# JELLYFIN_URL=http://mediaserver:8096
+# JELLYFIN_KEY=<your-api-key-here>
+#
+# Use a USER access token, not an API key: an API key creates an anonymous
+# Jellyfin session, and the server then refuses to store a playback position
+# for it (the handheld still remembers its own). A user token can be minted
+# without the password - see docs/desktop.md, "A user token for the client".
+# Client transcode defaults (on): server-side 720p h264 for downloads of
+# big/tall originals and for streaming. Opt out here if your server is slower
+# than your network:
+# JELLYFIN_DL_TRANSCODE=0
+# JELLYFIN_STREAM_TRANSCODE=0

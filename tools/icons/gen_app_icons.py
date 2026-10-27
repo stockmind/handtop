@@ -4,11 +4,15 @@ sharp in the app drawer).
   app-theme.png                Theme app: a circle split into a dark and a light half (27x27 art).
   app-external-controller.png  External Controller: the input-mode glass (BT blue / wired brown split
                                diagonally, rainbow stripes) with BT waves, a USB plug and an RG35XX H.
+  app-jellyfin.png             Jellyfin (the media client): the jellyfin mark, white on a purple
+                               tile - the one app that plays something.
   app-display.png              Display: a monitor with an HDMI cable to an RG35XX H (no glass, fills the grid).
   app-ssh.png                  Enable SSH: a terminal saying "SSH" (white) over a ">_" prompt, and a key (no glass).
   (terminal_icon, files_icon, notepad_icon, browser_icon, monitor_icon, code_icon, pdf_icon, archive_icon: default-app icons, written by gen_default_app_icons.py)
   app-recenter.png             Re-center sticks: a stick well seen from above with a crosshair, a faint
                                drifted knob up-right and a blue arrow back to the knob in the centre (no glass).
+  app-streams.png              Streams (goblin-tv): a television with legs, a play triangle on the
+                               screen and a red live dot (no glass).
   All are 27x27 art x2 + 1 px margin = exactly 56x56, the app drawer's icon size.
   Each also gets a -light variant (dark drawing, pastel glass, deeper ring) for the light theme.
 
@@ -142,6 +146,119 @@ def external_controller_icon(light=False):
         if c in colors:
             im.putpixel((x, y), (shade if c == "W" and low[x] == y else colors[c]) + (255,))
     return _tile(im)
+
+
+# ---- Jellyfin (the media client) ---------------------------------------------------
+JEL_TOP = (170, 92, 195)                       # the jellyfin purple, lighter at the top
+JEL_TOP_LIGHT = (188, 118, 210)
+JEL_BOTTOM = (108, 58, 168)                    # and deeper at the bottom
+JEL_BOTTOM_LIGHT = (126, 78, 186)
+JEL_INK = (255, 255, 255)
+
+# the mark on the 27x27 grid: '#' ink, '.' the purple tile, ' ' transparent
+JELLYFIN = [
+    "",
+    "  .......................",
+    " .........................",
+    " ...........###...........",
+    " ..........#####..........",
+    " .........#######.........",
+    " .........#######.........",
+    " ........####.####........",
+    " .......####...####.......",
+    " .......###.....###.......",
+    " ......###.......###......",
+    " ......###...#...###......",
+    " .....###...###...###.....",
+    " .....###..#####..###.....",
+    " ....###...#####...###....",
+    " ....###..#######..###....",
+    " ...###...#######...###...",
+    " ...###...#######...###...",
+    " ..####.............####..",
+    " ..####.............####..",
+    " ..######.........######..",
+    " ..#####################..",
+    " ...###################...",
+    " .....###############.....",
+    " .........................",
+    "  .......................",
+    "",
+]
+
+
+# the play triangle, drawn on the 27x27 grid (5 wide at the base, 6 tall)
+PLAY_TRIANGLE = [
+    "..#..",
+    ".##..",
+    "###..",
+    "####.",
+    "###..",
+    ".##..",
+    "..#..",
+]
+
+
+STREAM_BODY = (58, 62, 74)
+STREAM_BODY_LIGHT = (150, 156, 170)
+STREAM_SCREEN = (24, 28, 36)
+STREAM_SCREEN_LIGHT = (214, 219, 229)
+STREAM_PLAY = (86, 196, 110)
+STREAM_PLAY_LIGHT = (34, 128, 62)
+STREAM_LIVE = (214, 68, 74)
+STREAM_LIVE_LIGHT = (176, 34, 40)
+
+
+def streams_icon(light=False):
+    """A television with a play triangle and a live dot."""
+    body = STREAM_BODY_LIGHT if light else STREAM_BODY
+    screen = STREAM_SCREEN_LIGHT if light else STREAM_SCREEN
+    play = STREAM_PLAY_LIGHT if light else STREAM_PLAY
+    live = STREAM_LIVE_LIGHT if light else STREAM_LIVE
+    im = Image.new("RGBA", (EN, EN), (0, 0, 0, 0))
+    for y in range(EN):
+        for x in range(EN):
+            if _in_round_rect(x, y, 2, 4, 24, 21, 4):
+                im.putpixel((x, y), body + (255,))
+            if _in_round_rect(x, y, 4, 6, 22, 19, 3):
+                im.putpixel((x, y), screen + (255,))
+            if (_in_round_rect(x, y, 6, 22, 8, 24, 1)
+                    or _in_round_rect(x, y, 18, 22, 20, 24, 1)):
+                im.putpixel((x, y), body + (255,))
+            if (x - 20) ** 2 + (y - 8) ** 2 <= 2:
+                im.putpixel((x, y), live + (255,))
+    for row, line in enumerate(PLAY_TRIANGLE):
+        for col, cell in enumerate(line):
+            if cell == "#":
+                im.putpixel((9 + col, 10 + row), play + (255,))
+    return im
+
+
+def jellyfin_icon(light=False):
+    """The jellyfin mark, white on a purple tile, pixels stepped like the rest of the set."""
+    top = JEL_TOP_LIGHT if light else JEL_TOP
+    bottom = JEL_BOTTOM_LIGHT if light else JEL_BOTTOM
+    im = Image.new("RGBA", (EN, EN), (0, 0, 0, 0))
+    rows = len(JELLYFIN)
+    for y, line in enumerate(JELLYFIN):
+        t = y / (rows - 1)
+        bg = tuple(round(a + (b - a) * t) for a, b in zip(top, bottom)) + (255,)
+        for x, cell in enumerate(line.ljust(EN)):
+            if cell == "#":
+                im.putpixel((x, y), JEL_INK + (255,))
+            elif cell == ".":
+                im.putpixel((x, y), bg)
+    return _tile(im)
+
+
+def _in_round_rect(x, y, x0, y0, x1, y1, r):
+    """Is the pixel inside the rounded rectangle? (x1/y1 exclusive)"""
+    if not (x0 <= x < x1 and y0 <= y < y1):
+        return False
+    cx = min(max(x + 0.5, x0 + r), x1 - r)
+    cy = min(max(y + 0.5, y0 + r), y1 - r)
+    return (x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 <= r * r
+
 
 
 # ---- Display ------------------------------------------------------------------------------
@@ -523,6 +640,8 @@ if __name__ == "__main__":
     for light, sfx in ((False, ""), (True, "-light")):
         theme_icon(light).save(f"{out}/app-theme{sfx}.png")
         external_controller_icon(light).save(f"{out}/app-external-controller{sfx}.png")
+        jellyfin_icon(light).save(f"{out}/app-jellyfin{sfx}.png")
+        streams_icon(light).save(f"{out}/app-streams{sfx}.png")
         display_icon(light).save(f"{out}/app-display{sfx}.png")
         ssh_icon(light).save(f"{out}/app-ssh{sfx}.png")
         recenter_icon(light).save(f"{out}/app-recenter{sfx}.png")

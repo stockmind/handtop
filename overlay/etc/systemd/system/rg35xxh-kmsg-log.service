@@ -1,0 +1,21 @@
+[Unit]
+# journald on this image does not import /dev/kmsg (a probe written to /dev/kmsg
+# shows in dmesg but never appears in `journalctl -k`), so a hang or a hard
+# power loss leaves no kernel trace at all. This keeps a plain file tail of the
+# kernel log, which is what made the 2026-10-23 hangs unexplainable.
+Description=Keep a file copy of the kernel log (/var/log/kmsg.log)
+DefaultDependencies=no
+After=systemd-journald.service
+Before=shutdown.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/stdbuf -oL /usr/bin/dmesg --follow --time-format iso
+StandardOutput=append:/var/log/kmsg.log
+Restart=always
+RestartSec=5
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

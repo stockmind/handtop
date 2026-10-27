@@ -61,3 +61,12 @@ trusted only during the build and removed from the rootfs afterwards.
 - Session logs: `~/.local/state/session/` (labwc, Waybar, input daemon).
 - Input daemon key logging: `touch $XDG_RUNTIME_DIR/rg35xxh-inputd.debug` and restart the session.
 - Kernel serial console on the UART header, `ttyS0` at 115200 baud.
+
+## Dev tools (bundled)
+
+Every image includes build/packages/dev.list (jq, yq, fd, ripgrep, fzf, bat, gh, starship,
+direnv, lazygit, kitty-terminfo, docker.io, nodejs, npm) plus guarded shell hooks in
+/etc/profile.d/dev-tools.sh. docker/containerd stay disabled by default;
+enable on the device with sudo systemctl enable --now docker.socket.
+Agent CLIs (opencode, codex) are intentionally not preinstalled: install manually per project.
+mpv is hardware-accelerated via the patched ffmpeg in build/04c-v4l2-ffmpeg.sh (see docs/video-decode.md).

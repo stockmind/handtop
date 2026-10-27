@@ -26,7 +26,7 @@
 | Start (tap) | Switch to gamepad mode | Passed through |
 | Start (hold 1 s) | — | Switch to desktop mode |
 | Select + Start + L1 + R1 | — | BT Controller mode only: back to desktop mode (ends BT Controller mode). Holding Start does not exit there |
-| Select | — | Passed through |
+| Select (hold 1 s) | Switch to keypad mode | Passed through |
 | F (tap) | — | — |
 | F + Vol+/− | Brightness | Brightness |
 | Vol+/− | System volume | System volume |
@@ -44,10 +44,13 @@
 - **On-screen keyboard:** custom ([on-screen-keyboard.md](on-screen-keyboard.md)), part of the input daemon, so the daemon always knows whether it is open (its window runs in the daemon's display process, see below). Left stick still moves the pointer while it is open.
 - **Copy/paste:** daemon checks the focused app. Terminals get Ctrl+Shift+C / Ctrl+Shift+V; other apps Ctrl+C / Ctrl+V (Ctrl+C in a terminal would kill the running program). Bash bracketed paste must stay enabled so an accidental R3 paste cannot execute a command. Hold-to-paste can be added later if accidental stick clicks are a problem.
 - **Gamepad mode:** virtual controller uses standard Xbox layout **by position** (bottom button = Xbox A). F is not forwarded (would open Xbox Game Bar on Windows). Rumble from Moonlight can be forwarded to the motor.
+- **Keypad mode (hold Select 1 s):** for terminal TUIs (the Jellyfin client, for one), which read the keyboard and never the virtual pad. D-pad = arrow keys (moves list cursors), A = Enter, B = Esc, X = Tab, Y = Space, L1/R1 = Esc/Enter, right stick still scrolls. Holding Select returns to desktop mode (a quick tap does nothing, like Start's hold); Start switches straight to gamepad mode. The mapping is fixed in code (`KEYS_BUTTONS`), not configurable yet; the mode flag is `rg35xxh-keys-mode`.
 - **Start in gamepad mode:** short tap is sent to the PC as Start; only a 1 s hold switches back.
 - Brightness moved off F-tap to avoid colliding with the F + Vol combo.
 
 ## Implementation
+
+- The daemon polls a force-gamepad flag (`$XDG_RUNTIME_DIR/rg35xxh-force-gamepad`) every 200 ms: present → gamepad mode, absent → back to desktop (`mode_keys`/manual switches are left alone; only a change of the flag acts). A game launcher (e.g. Halo's) only has to create the file before the game starts and remove it after — no signal, no pid. It goes through the same `request_gamepad`/`request_desktop` path as the External Controller app, so held buttons and keypad mode are unwound properly.
 
 - Vibration requests from other programs: creating `$XDG_RUNTIME_DIR/rg35xxh-haptic-request` makes the daemon play its standard buzz (checked every 0.1 s; used by `rg35xxh-lowbattery`). The motor keeps a single owner.
 - Signals: `SIGUSR1` re-centres the sticks (Re-center sticks app), `SIGUSR2` switches to an external controller mode (External Controller app, see [../apps/external-controller.md](../apps/external-controller.md)): gamepad mapping, events sent to `/run/rg35xxh-extpad.sock` (BT or USB service, whichever runs) instead of the local virtual pad; vibration comes back from the USB service. Mode flags `rg35xxh-bt-mode` / `rg35xxh-wired-mode`.

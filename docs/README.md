@@ -17,6 +17,7 @@ How Handtop works on the RG35XX H. One document per app or background service; g
 | [apps/external-controller.md](apps/external-controller.md) | External Controller: the handheld as a Bluetooth (Xbox) or USB game controller, status screen |
 | [apps/display.md](apps/display.md) | External display (mini HDMI) and the Display app: layouts, resolution, refresh rate |
 | [apps/files.md](apps/files.md) | Files: click-to-mount for the TF2 card and USB sticks, drive toasts |
+| [jellyfin.md](jellyfin.md) | Jellyfin client: browse the server, play, save episodes to the card |
 | [apps/theme.md](apps/theme.md) | Theme app: dark / light |
 | [apps/power-menu.md](apps/power-menu.md) | Power button, power menu, sleep and auto-sleep, shutdown |
 | [apps/recenter-sticks.md](apps/recenter-sticks.md) | Re-center sticks: stick drift and the fix |

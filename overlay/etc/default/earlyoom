@@ -1,0 +1,4 @@
+# Kill the memory hog instead of letting the handheld freeze. 975 MB of RAM and
+# Chromium alone sits near 1 GB: the Oct 2026 hard locks were memory pressure,
+# not a driver fault. -m/-s 5: act when free RAM, or free RAM+swap, is below 5%.
+EARLYOOM_ARGS="-m 5 -s 5 --prefer '(^|/)(chromium|chrome|node)$' --avoid '(^|/)(init|systemd|labwc|ssh|inputd|pipewire|wireplumber)$'"

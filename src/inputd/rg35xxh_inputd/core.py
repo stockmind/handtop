@@ -62,7 +62,7 @@ DEFAULT_BINDINGS = {
     "l3": "copy",
     "r3": "paste",
     "start": "mode_gamepad",
-    "select": "none",
+    "select": "mode_keys",
 }
 
 # Gamepad mode: by position, Xbox 360 (xpad) conventions.
@@ -77,6 +77,17 @@ PAD_AXES = {"lx": "ABS_X", "ly": "ABS_Y", "rx": "ABS_RX", "ry": "ABS_RY"}
 # BT Controller mode exits with this combo instead of holding Start (same as Moonlight's quit
 # combo), so a long Start press reaches the other device.
 EXIT_COMBO = ("select", "start", "l1", "r1")
+
+# Keypad mode: a terminal TUI (Textual, etc.) reads the keyboard, never the
+# virtual Xbox pad, so this mode turns the controls into keystrokes: D-pad ->
+# arrows (move the list cursor), A -> Enter (select/play), B -> Esc (back),
+# right stick still scrolls long lists. Select returns to desktop mode.
+# ponytail: mapping fixed; add a [keys] config section if anyone remaps it.
+KEYS_DPAD = {"up": "KEY_UP", "down": "KEY_DOWN", "left": "KEY_LEFT", "right": "KEY_RIGHT"}
+KEYS_BUTTONS = {
+    "a": "KEY_ENTER", "b": "KEY_ESC", "x": "KEY_TAB", "y": "KEY_SPACE",
+    "l1": "KEY_ESC", "r1": "KEY_ENTER",
+}
 
 
 class Core:
@@ -97,6 +108,7 @@ class Core:
         self.swallowed = set()      # buttons whose press was consumed (e.g. screen wake)
         self.power_fired = False
         self.start_fired = False
+        self.select_fired = False
         self.osk_pressed_button = None  # button that triggered the current OSK press
         self.osk_next_repeat = {}   # dpad dir -> next repeat time
         self.osk_key_next = None    # next "repeat" while the OSK key (A) is held
@@ -156,6 +168,18 @@ class Core:
                 out.extend(self._enter_desktop())
             return out
 
+        if self.mode == "keys":
+            if name == "select":          # hold (like Start) to leave; tap does nothing
+                self.select_fired = False
+                return []
+            if name == "start":  # straight to gamepad mode, like from desktop
+                out = [("key", KEYS_DPAD[d], False) for d in list(self.held) if d in DPAD]
+                return out + self._enter_gamepad()
+            if name in DPAD:
+                return [("key", KEYS_DPAD[name], True)]
+            code = KEYS_BUTTONS.get(name)
+            return [("key", code, True)] if code else []
+
         # desktop mode
         if name in DPAD:
             if self.osk_visible:
@@ -168,6 +192,10 @@ class Core:
             self.osk_pressed_button = name
             self.osk_key_next = t + self.s["osk_key_repeat_delay"]
             return [("osk", "press")]
+
+        if name == "select" and self._binding_of(name) == "mode_keys":
+            self.select_fired = False     # hold to enter keypad mode, like Start's hold
+            return []
         if name == "l2" and self.osk_visible:
             self.osk_shift_button = name
             return [("osk", "shift")]
@@ -198,6 +226,14 @@ class Core:
             if name == "start" and self.start_fired:
                 return []  # release already sent when switching modes
             return self._pad_button(name, False)
+
+        if self.mode == "keys":
+            if name == "select":
+                return []          # hold handled in tick(); a tap does nothing
+            if name in DPAD:
+                return [("key", KEYS_DPAD[name], False)]
+            code = KEYS_BUTTONS.get(name)
+            return [("key", code, False)] if code else []
 
         if name in DPAD:
             self.osk_next_repeat.pop(name, None)
@@ -236,6 +272,27 @@ class Core:
                 self.start_fired = True
                 out.append(("pad_key", "BTN_START", 0))
                 out.extend(self._enter_desktop())
+            return out
+
+        # Select switches into/out of keypad mode only after a hold (like Start);
+        # swallowed so its release does not bounce back.
+        st = self.held.get("select")
+        if st is not None and not self.select_fired and t - st >= self.s["start_hold_seconds"]:
+            self.select_fired = True
+            self.swallowed.add("select")
+            out.extend(self._enter_keys() if self.mode == "desktop" else self._exit_keys())
+
+        if self.mode == "keys":
+            # Right stick still scrolls long lists; no pointer motion (D-pad is keys).
+            sx, sy = self._stick_velocity(self.axes["rx"], self.axes["ry"],
+                                          self.s["scroll_speed"] * 120.0, self._log_curve)
+            self.acc[2] += -sy * dt
+            self.acc[3] += sx * dt
+            wv, wh = int(self.acc[2]), int(self.acc[3])
+            if wv or wh:
+                self.acc[2] -= wv
+                self.acc[3] -= wh
+                out.append(("wheel", wv, wh))
             return out
 
         if self.screen_off or dt == 0.0:
@@ -324,6 +381,8 @@ class Core:
             return [("osk", "toggle")]
         if action == "mode_gamepad":
             return self._enter_gamepad()
+        if action == "mode_keys":
+            return self._enter_keys()
         if action == "power_menu":
             return [("cmd", "power_menu")]
         return []
@@ -357,13 +416,17 @@ class Core:
         self.combo_exit = combo_exit
         if self.mode == "gamepad":
             return []
-        out = self._enter_gamepad()
+        out = self._exit_keypad() if self.mode == "keys" else []   # arrows held in keypad mode
+        out += self._enter_gamepad()
         if "start" not in self.held:      # no Start press to swallow: let the next one through
             self.swallowed.discard("start")
         return out
 
     def request_desktop(self):
-        """Leave gamepad mode on request (the BT Controller link ended)."""
+        """Leave gamepad or keypad mode on request (the BT Controller link ended / a game
+        launcher cleared its force-gamepad flag)."""
+        if self.mode == "keys":
+            return self._exit_keys()
         if self.mode != "gamepad":
             return []
         self.swallowed |= set(self.held)  # buttons still down must not act in desktop mode
@@ -376,6 +439,24 @@ class Core:
         self.osk_next_repeat.clear()
         self.osk_key_next = None
         return [("mode", "desktop")]
+
+    def _enter_keys(self):
+        out = self._release_all_desktop()
+        self.mode = "keys"
+        self.acc = [0.0, 0.0, 0.0, 0.0]
+        out.append(("mode", "keys"))
+        return out
+
+    def _exit_keypad(self):
+        """Release the arrow keys still held in keypad mode; no mode event (callers add one)."""
+        return [("key", KEYS_DPAD[d], False) for d in list(self.held) if d in DPAD]
+
+    def _exit_keys(self):
+        out = self._exit_keypad()
+        self.mode = "desktop"
+        self.acc = [0.0, 0.0, 0.0, 0.0]
+        out.append(("mode", "desktop"))
+        return out
 
     def _pad_button(self, name, pressed):
         if name in PAD_BUTTONS:

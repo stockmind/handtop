@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Streams
+Comment=YouTube and Twitch, played by goblin-watch
+Exec=foot -e goblin-tv
+Icon=/usr/local/share/rg35xxh/icons/app-streams.png
+Terminal=false
+Categories=AudioVideo;Video;Utility;
+Keywords=youtube;twitch;stream;streaming;video;tui;handheld;

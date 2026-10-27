@@ -1,0 +1,8 @@
+#!/bin/sh
+# yt-dlp goes stale whenever YouTube changes; this keeps the image's pinned
+# version current. Runs from rg35xxh-ytdlp-update.timer as root.
+set -u
+before=$(yt-dlp --version 2>/dev/null || echo none)
+pipx upgrade --global yt-dlp >/tmp/ytdlp-update.log 2>&1 || exit 0
+after=$(yt-dlp --version 2>/dev/null || echo none)
+[ "$before" = "$after" ] || echo "yt-dlp: $before -> $after"

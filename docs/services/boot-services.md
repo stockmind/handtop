@@ -6,7 +6,6 @@ Small services that run at boot or in the background. All are in `overlay/` (scr
 |---|---|
 | `rg35xxh-hwinit` | Hardware setup at every boot, ported from ROCKNIX's H700 quirks: CPU/GPU governors, audio DAC and Line Out levels, LEDs. See [../rocknix-quirks.md](../rocknix-quirks.md) |
 | `rg35xxh-resize-root` | First boot: grows the root partition and filesystem to fill the SD card (once) |
-| `rg35xxh-swapfile` | 2 GB swap file on the SD card behind zram (priority 10); created on first boot after the resize, enabled on every boot |
 | `rg35xxh-ssh-keygen` | First boot: generates the SSH host keys (the image ships without them) |
 | `rg35xxh-wifi-import` | Every boot: imports `wifi.txt` from the boot partition into NetworkManager, then blanks the password in the file ([../flashing.md](../flashing.md)) |
 | `rg35xxh-bootlog` (+ timers) | Diagnostic log on the boot partition (`logs/boot-NNNN.txt`, last 5 kept), 60 s after boot and when the desktop session is up |

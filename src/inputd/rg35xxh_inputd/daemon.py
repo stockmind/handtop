@@ -77,6 +77,7 @@ ICON_FRAMES = [max(-2, min(2, round(SPRING_AMP_PX * _spring(t)))) or (1 if _spri
                for t in _PEAKS]                               # px; frames exist for -2..2
 SPRING_PULSES = [round(SPRING_FLOOR + (1 - SPRING_FLOOR) * math.exp(-SPRING_DECAY * t), 2) for t in _PEAKS]
 INPUTMODE_FRAME = "rg35xxh-inputmode-frame"
+MODE_SYNC_MS = 200       # poll interval for the force-gamepad flag (game launchers)
 # Hiding the pointer outside desktop mode: labwc has no "hide cursor" action, but it hides the
 # pointer after touch input until the next real pointer motion. So on entering gamepad / BT
 # Controller mode a short-lived virtual touchscreen taps once at the top-left corner, onto our own
@@ -171,6 +172,7 @@ class Daemon:
         self.motor_refresh_timer = None
         self.bt_watch = None
         self.icon_mode = "desktop"  # mode whose icon the taskbar shows (lags during the shake)
+        self.force_pad = None       # last force-gamepad flag state (None: not read yet)
         self.touch = None           # short-lived virtual touchscreen (pointer hiding)
         self.anim = None
         self.waybar_pid = None
@@ -639,6 +641,7 @@ class Daemon:
                         self.osk_visible = False
                         self.core.set_osk_visible(False)
                     self._hide_cursor()                   # no pointer outside desktop mode
+                    set_flag("rg35xxh-keys-mode", False)  # keypad mode (fork) does not span modes
                     if self.bt:
                         flag, title, text, _icon = EXT_MODES[self.ext]
                         set_flag(flag, True)
@@ -654,8 +657,13 @@ class Daemon:
                         spawn("notify-send", "-t", "2500", "Desktop mode", f"{title} stopped")
                     else:
                         self._destroy_pad()
-                        spawn("notify-send", "-t", "1500", "Desktop mode")
+                        if a[1] == "keys":
+                            spawn("notify-send", "-t", "2500", "Keypad mode",
+                                  "D-pad moves, A selects; hold Select 1 s to return")
+                        else:
+                            spawn("notify-send", "-t", "1500", "Desktop mode")
                     set_flag("rg35xxh-gamepad-mode", False)
+                    set_flag("rg35xxh-keys-mode", a[1] == "keys")
                 self._mode_feedback(EXT_MODES[self.ext][3] if self.bt else a[1])   # icon shake + haptic wobble
             elif kind in ("pad_key", "pad_abs"):
                 etype = E.EV_KEY if kind == "pad_key" else E.EV_ABS
@@ -926,6 +934,16 @@ class Daemon:
         return True
 
     # ---------------------------------------------------------------- run
+    def _sync_mode(self):
+        """Follow the force-gamepad flag (written by a game launcher, e.g. Halo's), polled every
+        200 ms: present -> gamepad mode, absent -> desktop mode. Only a change acts, so keypad
+        mode and manual mode switches are left alone; the launcher needs no signal, no pid."""
+        want = os.path.exists(runtime_flag("rg35xxh-force-gamepad"))
+        if want != self.force_pad:
+            self.force_pad = want
+            self._run(self.core.request_gamepad() if want else self.core.request_desktop())
+        return True
+
     def _quit(self):
         self._loop.quit()
         return False
@@ -1112,6 +1130,7 @@ class Daemon:
 
     def run(self):
         GLib.timeout_add(10, self._tick)
+        GLib.timeout_add(MODE_SYNC_MS, self._sync_mode)   # the force-gamepad flag (game launchers)
         self.beats = 0
         self._heartbeat()
         GLib.timeout_add(HEARTBEAT_MS, self._heartbeat)

@@ -48,8 +48,12 @@ F
 
 # User
 if ! in_chroot "id $USER_NAME" >/dev/null 2>&1; then
-  in_chroot "useradd -m -s /bin/bash $USER_NAME"
+  in_chroot "useradd -m -s /usr/bin/zsh $USER_NAME"
 fi
+# zsh is the image default login shell. Debian's zsh does not read
+# /etc/profile, so overlay/etc/zsh/zprofile re-sources it (session
+# launcher, dev-tools PATH). usermod keeps reruns idempotent.
+in_chroot "usermod -s /usr/bin/zsh $USER_NAME"
 for g in sudo video render audio input netdev plugdev bluetooth; do
   in_chroot "getent group $g >/dev/null && usermod -aG $g $USER_NAME || true"
 done

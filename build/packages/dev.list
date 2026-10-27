@@ -1,0 +1,16 @@
+# Dev CLI layer, bundled in every image. trixie-native arm64 only;
+# NOTE: docker/node are heavy on 1 GB RAM; docker stays disabled by default.
+jq
+yq
+fd-find
+ripgrep
+fzf
+bat
+gh
+starship
+direnv
+lazygit
+kitty-terminfo
+docker.io
+nodejs
+npm

@@ -1,0 +1,10 @@
+[Unit]
+Description=Update yt-dlp (YouTube extractors go stale within weeks)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rg35xxh-ytdlp-update
+Nice=19
+IOSchedulingClass=idle
