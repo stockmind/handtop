@@ -10,6 +10,7 @@ External controller modes (BT Controller: rg35xxh-btpad, wired: rg35xxh-usbpad) 
 mapping too, but send the pad events over a Unix socket to that service instead of creating the
 local pad, so apps on the handheld see nothing. Only one of the two services runs at a time.
 """
+import json
 import logging
 import math
 import os
@@ -147,6 +148,7 @@ def spawn(*argv):
 
 class Daemon:
     def __init__(self):
+        self._loop = None
         settings, bindings, self.hw, self.config_path = config.load()
         self.core = Core(settings, bindings)
         self.layout = PointerLayout()   # per-screen pointer speed (rg35xxh-display writes the layout)
@@ -172,20 +174,24 @@ class Daemon:
         self.icon_mode = "desktop"  # mode whose icon the taskbar shows (lags during the shake)
         self.force_pad = None       # last force-gamepad flag state (None: not read yet)
         self.touch = None           # short-lived virtual touchscreen (pointer hiding)
-        self.touch_win = None       # its tap target: a tiny transparent overlay window
         self.anim = None
         self.waybar_pid = None
         self.haptic_id = None
         self.step_ids = {}
         self.axis_offset = {}      # software centre correction per axis (set by re-centre)
         self.watches = {}          # fd -> GLib watch id
-        self.osk = None
+        self.ui = None              # display side (on-screen keyboard, touch target): own process, ui.py
+        self.ui_watch = None
+        self.ui_buf = b""
+        self.ui_retry = None        # respawn timer after the UI process ended
+        self.ui_backoff = 2         # s, doubled per failed start (no display after a log-out)
+        self.osk_visible = False
         self.ticks = 0
         for flag in ("rg35xxh-gamepad-mode", "rg35xxh-bt-mode", "rg35xxh-wired-mode", INPUTMODE_FRAME):
             set_flag(flag, False)
         self._open_devices()
         self._create_virtual_devices()
-        self._init_osk()
+        self._ui_start()
 
     # ------------------------------------------------------------ devices
     def _open_devices(self, wait=15.0):
@@ -243,6 +249,43 @@ class Daemon:
             except OSError as e:
                 log.warning("rumble not available: %s", e)
 
+    def _release_effects(self):
+        """Motor first: stop every vibration effect on the gamepad, then erase it (Handtop's own
+        haptics, the PC's levels, the games' effects) and forget the ids. Called before the
+        gamepad is closed (clean exit, stick re-centre), so nothing is left to the kernel's
+        teardown while it may still be playing (docs/hardware-safety.md, rule 2). Safe on a
+        half-built daemon. The motor gate's state is reset too; the PC's wanted level is kept
+        (re-applied on its next request)."""
+        for name in ("motor_timer", "motor_refresh_timer"):
+            tid = getattr(self, name, None)
+            if tid:
+                GLib.source_remove(tid)
+                setattr(self, name, None)
+        for name in ("motor_game_active", "motor_game_endless", "motor_pending_upload", "motor_pending_play"):
+            if getattr(self, name, None) is not None:
+                getattr(self, name).clear()
+        g = getattr(self, "gamepad", None)
+        ids = [i for i in [getattr(self, "haptic_id", None), *getattr(self, "step_ids", {}).values(),
+                           *getattr(self, "motor_ext_ids", {}).values(), *getattr(self, "pad_ff", {}).values()]
+               if i is not None]
+        if g is not None and ids:
+            for eid in ids:
+                try:
+                    g.write(E.EV_FF, eid, 0)
+                except OSError as e:
+                    log.debug("stop effect %d: %s", eid, e)
+            time.sleep(0.05)
+            for eid in ids:
+                try:
+                    g.erase_effect(eid)
+                except OSError as e:
+                    log.debug("erase effect %d: %s", eid, e)
+        self.haptic_id = None
+        self.step_ids = {}
+        self.motor_ext_ids = {}
+        self.motor_ext_applied = 0
+        self.pad_ff = {}
+
     def _magnitude(self, strength):
         scale = max(0.0, min(1.0, self.core.s["haptic_strength"]))
         return int(round(strength * scale * 0xFFFF))
@@ -268,6 +311,7 @@ class Daemon:
             return True
         log.info("re-centre: reopening %s", g.path)
         path = g.path
+        self._release_effects()    # effects live on this file handle: stop + erase them first
         wid = self.watches.pop(g.fd, None)
         if wid:
             GLib.source_remove(wid)
@@ -277,7 +321,7 @@ class Daemon:
             pass
         g.close()
         self.devices.remove(g)
-        self.pad_ff = {}           # effects lived on the old file handle
+        self.gamepad = None
         time.sleep(0.2)
         try:
             g = evdev.InputDevice(path)
@@ -290,6 +334,8 @@ class Daemon:
         self.devices.append(g)
         self._setup_gamepad()
         self._watch(g)
+        if self.motor_ext_want:           # the PC still wants vibration (Wired / BT): re-apply it
+            self._motor_kick()
 
         # Verify: sample the axes for ~0.5 s and correct what is still off-centre.
         samples = {code: [] for code in HW_AXES}
@@ -348,22 +394,115 @@ class Daemon:
     def _destroy_pad(self):
         if self.pad:
             GLib.source_remove(self.pad_watch)
-            for phys in self.pad_ff.values():
+            phys_ids = list(self.pad_ff.values())
+            for phys in phys_ids:                  # stop first, then erase (motor first)
+                try:
+                    self.gamepad.write(E.EV_FF, phys, 0)
+                except (OSError, AttributeError):
+                    pass
+            for phys in phys_ids:
                 try:
                     self.gamepad.erase_effect(phys)
-                except OSError:
+                except (OSError, AttributeError):
                     pass
+            self.pad_ff = {}
+            self.motor_game_active.clear()
+            self.motor_game_endless.clear()
             self.pad.close()
             self.pad = None
             log.info("desktop mode: virtual pad removed")
 
-    # ---------------------------------------------------------------- OSK
-    def _init_osk(self):
+    # ------------------------------------------- display side (ui.py, own process)
+    # The daemon itself never connects to the display: GDK ends a process with _exit() when its
+    # Wayland display goes away (every log-out), which would skip the clean exit. The on-screen
+    # keyboard and the touch target live in a child process instead (JSON lines over its
+    # stdin/stdout); it is restarted if it ends, and ends by itself when the daemon does.
+    def _ui_start(self):
+        self.ui_retry = None
+        if not os.environ.get("WAYLAND_DISPLAY"):
+            log.warning("no WAYLAND_DISPLAY: on-screen keyboard unavailable")
+            return False
         try:
-            from . import osk
-            self.osk = osk.OnScreenKeyboard(self._type_combo)
-        except Exception as e:  # no display / missing GTK layer shell
-            log.warning("on-screen keyboard unavailable: %s", e)
+            self.ui = subprocess.Popen(
+                [sys.executable, "-m", "rg35xxh_inputd.ui", json.dumps(self.core.bind)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE)   # stderr: same log as ours
+        except OSError as e:
+            log.warning("cannot start the on-screen keyboard process: %s", e)
+            self._ui_schedule()
+            return False
+        os.set_blocking(self.ui.stdin.fileno(), False)   # a stuck UI must never block input
+        self.ui_buf = b""
+        self.ui_watch = GLib.io_add_watch(self.ui.stdout.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR,
+                                          self._on_ui)
+        return False
+
+    def _ui_schedule(self):
+        if self.ui_retry is None:
+            self.ui_retry = GLib.timeout_add(int(self.ui_backoff * 1000), self._ui_start)
+            self.ui_backoff = min(self.ui_backoff * 2, 60)
+
+    def _ui_send(self, *cmd):
+        if self.ui is None:
+            return
+        try:
+            os.write(self.ui.stdin.fileno(), (json.dumps(cmd) + "\n").encode())
+        except BlockingIOError:
+            log.warning("on-screen keyboard process not reading: dropped %s", cmd[:2])
+        except OSError:
+            pass                            # it ended: _on_ui sees the hang-up
+
+    def _on_ui(self, fd, cond):
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            data = b""
+        if not data:
+            self._ui_stop("ended")
+            self._ui_schedule()
+            return False
+        self.ui_buf += data
+        while b"\n" in self.ui_buf:
+            line, self.ui_buf = self.ui_buf.split(b"\n", 1)
+            try:
+                kind, *args = json.loads(line)
+                if kind == "ready":
+                    self.ui_backoff = 2
+                    log.info("on-screen keyboard process ready (pid %d)", self.ui.pid)
+                elif kind == "visible":
+                    self.osk_visible = bool(args[0])
+                    self.core.set_osk_visible(self.osk_visible)
+                elif kind == "type":
+                    self._type_combo(args[0], args[1])
+            except Exception as e:          # bad line or unknown key: ignore it
+                log.warning("on-screen keyboard process: %r: %s", line[:80], e)
+        return True
+
+    def _ui_stop(self, why):
+        """Stop the UI process (if still running) and forget it."""
+        ui, self.ui = self.ui, None
+        if self.ui_watch:
+            GLib.source_remove(self.ui_watch)
+            self.ui_watch = None
+        if self.osk_visible:
+            self.osk_visible = False
+            self.core.set_osk_visible(False)
+        if ui is None:
+            return
+        for f in (ui.stdin, ui.stdout):
+            try:
+                f.close()                   # stdin EOF: the UI process exits by itself
+            except OSError:
+                pass
+        try:
+            ui.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            ui.terminate()
+            try:
+                ui.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                ui.kill()
+                ui.wait()
+        log.info("on-screen keyboard process %s (exit %s)", why, ui.returncode)
 
     def _type_combo(self, mods, key):
         codes = [E.ecodes[m] for m in mods]
@@ -417,9 +556,9 @@ class Daemon:
         now = time.monotonic()
         if self.ticks % 10 == 0:
             self.core.set_screen_off(os.path.exists(runtime_flag("rg35xxh-screen-off")))
+            self._haptic_requests()
             self._layout_reload()
-            if self.osk:
-                self.core.set_osk_visible(self.osk.visible)
+            self.core.set_osk_visible(self.osk_visible)
         self._run(self.core.tick(now))
         return True
 
@@ -479,25 +618,28 @@ class Daemon:
             elif kind == "key":
                 self.keyboard.write(E.EV_KEY, E.ecodes[a[1]], 1 if a[2] else 0)
                 self.keyboard.syn()
+                if self.osk_visible:                    # L1 / R1 / R2: show it on the keyboard too
+                    self._ui_send("osk", "key_state", a[1], a[2])
             elif kind == "clipboard":
                 self._clipboard(a[1])
-            elif kind == "osk" and not self.osk:
+            elif kind == "osk" and not self.ui:
                 log.warning("on-screen keyboard requested but unavailable")
-            elif kind == "osk" and self.osk:
+            elif kind == "osk":
                 if a[1] == "toggle":
-                    self.osk.toggle()
-                    self.core.set_osk_visible(self.osk.visible)
-                    log.info("on-screen keyboard %s", "shown" if self.osk.visible else "hidden")
+                    self._ui_send("osk", "toggle")
+                    self.osk_visible = not self.osk_visible     # the UI process confirms it
+                    self.core.set_osk_visible(self.osk_visible)
+                    log.info("on-screen keyboard %s", "shown" if self.osk_visible else "hidden")
                 elif a[1] == "move":
-                    self.osk.move(a[2], a[3])
-                elif a[1] == "press":
-                    self.osk.press_selected()
-                elif a[1] == "release":
-                    self.osk.release_selected()
+                    self._ui_send("osk", "move", a[2], a[3])
+                elif a[1] in ("press", "release", "repeat", "shift"):
+                    self._ui_send("osk", a[1])
             elif kind == "mode":
                 if a[1] == "gamepad":
-                    if self.osk and self.osk.visible:
-                        self.osk.toggle()
+                    if self.osk_visible:
+                        self._ui_send("osk", "hide")
+                        self.osk_visible = False
+                        self.core.set_osk_visible(False)
                     self._hide_cursor()                   # no pointer outside desktop mode
                     set_flag("rg35xxh-keys-mode", False)  # keypad mode (fork) does not span modes
                     if self.bt:
@@ -628,6 +770,20 @@ class Daemon:
         spawn("notify-send", "-u", "critical", "-t", "10000", "Shutting down…")
         GLib.timeout_add(600, lambda: spawn("systemctl", "poweroff") or False)
 
+    def _haptic_requests(self):
+        """Other programs ask for a vibration by creating $XDG_RUNTIME_DIR/rg35xxh-haptic-request
+        (e.g. rg35xxh-lowbattery): the motor has one owner, this daemon, and the request plays
+        Handtop's own fixed-length buzz (docs/hardware-safety.md, rules 1 and 5)."""
+        try:
+            os.unlink(runtime_flag("rg35xxh-haptic-request"))
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            log.warning("haptic request: %s", e)
+            return
+        log.info("haptic requested")
+        self._haptic()
+
     def _haptic(self):
         self._play_effect(self.haptic_id)
 
@@ -640,42 +796,12 @@ class Daemon:
         return False
 
     # ------------------------------------------------ pointer hiding
-    def _touch_target(self):
-        """The 2x2 px transparent overlay window the hide-pointer tap lands on (top-left corner)."""
-        if self.touch_win is None:
-            from gi.repository import Gtk, GtkLayerShell
-            w = Gtk.Window()
-            GtkLayerShell.init_for_window(w)
-            GtkLayerShell.set_layer(w, GtkLayerShell.Layer.OVERLAY)
-            GtkLayerShell.set_namespace(w, "rg35xxh-touch-target")
-            GtkLayerShell.set_anchor(w, GtkLayerShell.Edge.TOP, True)
-            GtkLayerShell.set_anchor(w, GtkLayerShell.Edge.LEFT, True)
-            GtkLayerShell.set_exclusive_zone(w, -1)
-            GtkLayerShell.set_keyboard_mode(w, GtkLayerShell.KeyboardMode.NONE)
-            w.set_size_request(2, 2)
-            visual = w.get_screen().get_rgba_visual()
-            if visual:
-                w.set_visual(visual)
-            w.set_app_paintable(True)
-
-            def clear(_w, cr):
-                cr.set_operator(0)          # CAIRO_OPERATOR_CLEAR: fully transparent
-                cr.paint()
-                return True
-            w.connect("draw", clear)
-            self.touch_win = w
-        return self.touch_win
-
     def _hide_cursor(self):
         if self.touch:
             return
-        if not self.osk:                    # no GTK main loop (no display): cannot show the target
+        if not self.ui:                     # no display side: cannot show the tap target
             return
-        try:
-            self._touch_target().show_all()
-        except Exception as e:  # pragma: no cover - GTK/layer-shell missing
-            log.warning("cannot hide the pointer (touch target): %s", e)
-            return
+        self._ui_send("target", "show")      # 2x2 px transparent overlay window, top-left corner
         caps = {E.EV_KEY: [E.BTN_TOUCH],
                 E.EV_ABS: [(E.ABS_X, evdev.AbsInfo(0, 0, TOUCH_W - 1, 0, 0, 0)),
                            (E.ABS_Y, evdev.AbsInfo(0, 0, TOUCH_H - 1, 0, 0, 0)),
@@ -687,7 +813,7 @@ class Daemon:
             self.touch = evdev.UInput(caps, name="rg35xxh virtual touch", input_props=[E.INPUT_PROP_DIRECT])
         except (OSError, evdev.UInputError) as e:
             log.warning("cannot hide the pointer (virtual touch): %s", e)
-            self.touch_win.hide()
+            self._ui_send("target", "hide")
             return
         GLib.timeout_add(400, self._touch_tap)       # let libinput pick the new device up first
 
@@ -710,8 +836,7 @@ class Daemon:
         if self.touch:
             self.touch.close()
             self.touch = None
-        if self.touch_win:
-            self.touch_win.hide()
+        self._ui_send("target", "hide")
         return False
 
     # ------------------------------------------------ mode-change feedback
@@ -820,11 +945,7 @@ class Daemon:
         return True
 
     def _quit(self):
-        if self.osk:
-            from gi.repository import Gtk
-            Gtk.main_quit()
-        else:
-            self._loop.quit()
+        self._loop.quit()
         return False
 
     # ------------------------------------------------- BT Controller mode
@@ -1009,23 +1130,114 @@ class Daemon:
 
     def run(self):
         GLib.timeout_add(10, self._tick)
+        GLib.timeout_add(MODE_SYNC_MS, self._sync_mode)   # the force-gamepad flag (game launchers)
+        self.beats = 0
+        self._heartbeat()
+        GLib.timeout_add(HEARTBEAT_MS, self._heartbeat)
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, self._recenter)
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR2, self._request_bt)
-        GLib.timeout_add(MODE_SYNC_MS, self._sync_mode)
-        self._loop = None
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self._on_term, sig)
+        # A plain GLib main loop (no GTK in this process, see ui.py). Quitting PyGObject's Gtk.main()
+        # from a signal handler deadlocked (7 of 8 tries on the device); ui.py avoids it too.
+        self._loop = GLib.MainLoop()
+        self._loop.run()
+
+    # Watchdog (rg35xxh-inputd wrapper): the daemon grabs every button, the power key included, so
+    # a hung main loop would leave no way to switch the handheld off but the power chip's forced
+    # cut. The main loop writes a counter here every second; the wrapper restarts a daemon whose
+    # counter stops. The file exists only while the main loop runs (not during start-up or the
+    # clean exit), so neither is mistaken for a hang.
+    def _heartbeat(self):
+        self.beats += 1
         try:
-            if self.osk:
-                from gi.repository import Gtk
-                Gtk.main()
-            else:
-                self._loop = GLib.MainLoop()
-                self._loop.run()
-        finally:
-            for d in self.devices:
-                try:
-                    d.ungrab()
-                except OSError:
-                    pass
+            with open(HEARTBEAT, "w") as f:
+                f.write(f"{self.beats}\n")
+        except OSError as e:
+            log.warning("heartbeat: %s", e)
+        return True
+
+    def _on_term(self, sig):
+        log.info("%s: clean exit", signal.Signals(sig).name)
+        self._quit()
+        return False
+
+    # ------------------------------------------------ clean exit
+    # SIGTERM (log-out: the next session's autostart stops this one), SIGINT/SIGHUP and errors all
+    # end here. We stop the motor and free every vibration effect, the virtual devices and the grabs
+    # ourselves, one step at a time, instead of leaving it all to the kernel's teardown when the
+    # process dies -- while the next session's daemon may already be grabbing the same gamepad and
+    # uploading its effects. The joypad driver's vibration path (ff-memless + PWM work) has locked
+    # the whole system up before (see MOTOR_INTERVAL); a log-out that killed the old daemon right as
+    # the new one started froze the handheld (input, Wi-Fi, SSH) and needed a battery reset.
+    # The single-instance lock (main) makes the next daemon wait until this one is gone.
+    def cleanup(self):
+        # Also runs for a daemon that was stopped during start-up (__init__ not finished), so
+        # every attribute may still be missing: read them with get().
+        def step(what, fn, *a):
+            try:
+                fn(*a)
+            except Exception as e:      # keep going: every later step still matters
+                log.warning("clean exit: %s: %s", what, e)
+
+        def get(name, default=None):
+            return getattr(self, name, default)
+        try:
+            os.unlink(HEARTBEAT)                    # disarm the watchdog: exiting, not hung
+        except FileNotFoundError:                   # (not armed yet: stopped during start-up)
+            pass
+        if get("ui_retry"):
+            step("ui_retry", GLib.source_remove, get("ui_retry"))
+            self.ui_retry = None
+        if get("bt"):
+            step("external controller", self._bt_close)   # stops + frees the PC's vibration levels
+        step("vibration effects", self._release_effects)    # stop, then erase all (games' too)
+        if get("pad"):
+            step("virtual pad", self._destroy_pad)
+        if get("touch") is not None:
+            step("touch", self._touch_close)
+        if get("ui") is not None:
+            step("on-screen keyboard process", self._ui_stop, "stopped")
+        for d in list(get("devices", [])):
+            step("ungrab %s" % d.path, d.ungrab)
+            step("close %s" % d.path, d.close)
+        self.devices = []
+        self.gamepad = None
+        for name in ("mouse", "keyboard"):
+            if get(name) is not None:
+                step(name, get(name).close)
+        for flag in ("rg35xxh-gamepad-mode", "rg35xxh-bt-mode", "rg35xxh-wired-mode", INPUTMODE_FRAME):
+            step(flag, set_flag, flag, False)
+        log.info("clean exit: gamepad, vibration and virtual devices released")
+
+
+HEARTBEAT = runtime_flag("rg35xxh-inputd.alive")   # see _heartbeat (watchdog)
+HEARTBEAT_MS = 1000
+LOCK_WAIT = 10.0   # s: how long a new daemon waits for the previous one to finish its clean exit
+
+
+def single_instance():
+    """One daemon at a time (see "clean exit"): returns the held lock file, or None if another
+    daemon still runs after LOCK_WAIT. The kernel drops the lock when the holder's process is gone,
+    so the next daemon never grabs the gamepad while the old one still owns effects on it."""
+    import fcntl
+    f = open(runtime_flag("rg35xxh-inputd.lock"), "w")
+    deadline = time.monotonic() + LOCK_WAIT
+    waited = False
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if waited:
+                log.info("previous daemon gone, starting")
+            return f
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                f.close()
+                return None
+            if not waited:
+                log.info("previous daemon still running: waiting up to %.0f s", LOCK_WAIT)
+                waited = True
+            time.sleep(0.2)
 
 
 def main():
@@ -1033,7 +1245,25 @@ def main():
     debug = os.path.exists(runtime_flag("rg35xxh-inputd.debug"))
     logging.basicConfig(level=logging.DEBUG if debug else logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(message)s")
-    Daemon().run()
+    lock = single_instance()
+    if lock is None:
+        log.error("another rg35xxh-inputd still runs; not starting a second one")
+        sys.exit(1)
+    # Until the main loop installs its own handlers: SIGTERM during start-up still exits through
+    # cleanup (Python's default would just die). The object exists before __init__ runs, so a
+    # half-started daemon is cleaned up too.
+    def early_exit(sig, _frame):
+        log.info("%s during start-up: clean exit", signal.Signals(sig).name)
+        sys.exit(0)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, early_exit)
+    d = Daemon.__new__(Daemon)
+    try:
+        d.__init__()
+        d.run()
+    finally:
+        d.cleanup()
+        lock.close()
 
 
 if __name__ == "__main__":

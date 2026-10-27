@@ -8,6 +8,7 @@ sharp in the app drawer).
                                tile - the one app that plays something.
   app-display.png              Display: a monitor with an HDMI cable to an RG35XX H (no glass, fills the grid).
   app-ssh.png                  Enable SSH: a terminal saying "SSH" (white) over a ">_" prompt, and a key (no glass).
+  (terminal_icon, files_icon, notepad_icon, browser_icon, monitor_icon, code_icon, pdf_icon, archive_icon: default-app icons, written by gen_default_app_icons.py)
   app-recenter.png             Re-center sticks: a stick well seen from above with a crosshair, a faint
                                drifted knob up-right and a blue arrow back to the knob in the centre (no glass).
   app-streams.png              Streams (goblin-tv): a television with legs, a play triangle on the
@@ -333,6 +334,273 @@ def ssh_icon(light=False):
         g[(5 + dx, 15 + dy)] = "G"
     _put(g, SSH_KEY, 17, 18)
     return _tile(_draw(g, colors, SHADE_LIGHT if light else SHADE))
+
+
+# ---- Terminal (default app: foot) ------------------------------------------------------------
+# The Enable SSH terminal without its text and key: a big ">_" prompt. Written under the icon name
+# "foot" by gen_default_app_icons.py (not into the Handtop app icon folder).
+TERM_PROMPT = ["#.......", "##......", ".##.....", "..##....", ".##.....", "##......", "#......."]
+
+
+def terminal_icon(light=False):
+    colors = dict(COLORS_LIGHT if light else COLORS)
+    colors.update(D=(22, 26, 34), G=(232, 234, 238), r=(226, 70, 70), y=(240, 200, 60),
+                  g=(80, 190, 100), T=(79, 88, 105) if light else (200, 205, 214))
+    g = {}
+    _put(g, SSH_TERM, 1, 3)
+    for y, row in enumerate(TERM_PROMPT):                # ">" 4x7, 2 px strokes
+        for x, c in enumerate(row):
+            if c == "#":
+                g[(6 + x, 8 + y)] = "G"
+    for x in range(11, 18):                              # "_" 7x2
+        for y in (13, 14):
+            g[(x, y)] = "G"
+    return _tile(_draw(g, colors, SHADE_LIGHT if light else SHADE))
+
+
+# ---- Files (default app: Thunar) ------------------------------------------------------------
+# A classic blue folder filling the grid: back with a tab, a sheet of paper peeking out, the front
+# panel with a light top edge. One blue set for both themes (like Bluetooth). Written under the icon
+# name "org.xfce.thunar" by gen_default_app_icons.py.
+FOLDER_COLORS = {"B": (52, 92, 158), "F": (86, 140, 214), "H": (159, 195, 255), "S": (44, 76, 132),
+                 "P": (236, 239, 244), "p": (190, 198, 212)}
+FOLDER = (["..BBBBBBBB................",
+           ".BBBBBBBBBB...............",
+           ".BBBBBBBBBBBBBBBBBBBBBBBBB.",
+           ".BBBBBBBBBBBBBBBBBBBBBBBBB.",
+           ".BBPPPPPPPPPPPPPPPPPPPPPBB.",
+           ".BBPPPPPPPPPPPPPPPPPPPPPBB.",
+           ".BBPppppppppppppppppppPPBB.",
+           ".HHHHHHHHHHHHHHHHHHHHHHHHH."]
+          + [".FFFFFFFFFFFFFFFFFFFFFFFFF."] * 11
+          + [".SSSSSSSSSSSSSSSSSSSSSSSSS.",
+             "..SSSSSSSSSSSSSSSSSSSSSSS.."])
+
+
+def files_icon(light=False):
+    g = {}
+    _put(g, FOLDER, 0, 3)
+    im = Image.new("RGBA", (EN, EN), (0, 0, 0, 0))
+    for xy, c in g.items():
+        im.putpixel(xy, FOLDER_COLORS[c] + (255,))
+    return _tile(im)
+
+
+# ---- Text Editor (default app: Mousepad) ----------------------------------------------------
+# A yellow legal pad: dark binding with spiral rings on top, ruled lines and a red margin line,
+# shaded right and bottom edges. One set for both themes. Written under the icon name
+# "org.xfce.mousepad" by gen_default_app_icons.py.
+NOTEPAD_COLORS = {"Y": (250, 214, 92), "y": (214, 172, 56), "L": (198, 160, 62), "M": (222, 92, 80),
+                  "B": (118, 58, 50), "b": (84, 40, 36), "R": (200, 205, 214), "r": (128, 137, 152)}
+NOTEPAD_W = 19
+
+
+def _notepad_rows():
+    rows = []
+    rings = "".join("R" if x in (3, 7, 11, 15) else "." for x in range(NOTEPAD_W))
+    rows.append(rings)                                            # rings above the binding
+    for i in range(3):                                            # binding, rings crossing it
+        band = "B" if i < 2 else "b"
+        rows.append("".join("r" if x in (3, 7, 11, 15) and i == 0 else band for x in range(NOTEPAD_W)))
+    for y in range(20):                                           # paper
+        row = []
+        for x in range(NOTEPAD_W):
+            if x == NOTEPAD_W - 1 or y == 19:
+                row.append("y")
+            elif x == 3:
+                row.append("M")
+            elif y % 3 == 2:
+                row.append("L")
+            else:
+                row.append("Y")
+        rows.append("".join(row))
+    return rows
+
+
+def notepad_icon(light=False):
+    g = {}
+    _put(g, _notepad_rows(), 4, 2)
+    im = Image.new("RGBA", (EN, EN), (0, 0, 0, 0))
+    for xy, c in g.items():
+        im.putpixel(xy, NOTEPAD_COLORS[c] + (255,))
+    return _tile(im)
+
+
+# ---- Web Browser (default app: Chromium) ----------------------------------------------------
+# A blue wireframe globe (latitude / longitude lines, shaded lower right, a small highlight) with a
+# mouse pointer over its lower right. Brand-free, one set for both themes. Written under the icon
+# name "chromium" by gen_default_app_icons.py.
+GLOBE_COLORS = {"O": (58, 120, 214), "o": (40, 86, 164), "L": (159, 195, 255), "H": (214, 230, 255),
+                "K": (22, 26, 34), "P": (240, 242, 246)}
+POINTER = ["K.......",
+           "KK......",
+           "KPK.....",
+           "KPPK....",
+           "KPPPK...",
+           "KPPPPK..",
+           "KPPPPPK.",
+           "KPPPKKKK",
+           "KPKKPK..",
+           "KK.KPK..",
+           "K...KPK.",
+           "....KPK.",
+           ".....KK."]
+
+
+def _globe(g, cx, cy, r):
+    for y in range(EN):
+        for x in range(EN):
+            dx, dy = x + 0.5 - cx, y + 0.5 - cy
+            d = (dx * dx + dy * dy) ** 0.5
+            if d > r:
+                continue
+            c = "o" if d > r - 1.2 or dx + dy > r * 0.95 else "O"
+            if d < r - 1:
+                if any(abs(dy / r - lat) < 0.06 for lat in (-0.5, 0.0, 0.5)):
+                    c = "L"
+                w = max(r * r - dy * dy, 0) ** 0.5
+                if any(abs(abs(dx) - k * w) < 0.55 for k in (0.0, 0.55)):
+                    c = "L"
+            g[(x, y)] = c
+    hx, hy = int(cx - r * 0.55), int(cy - r * 0.55)
+    for xy in ((hx, hy), (hx + 1, hy), (hx, hy + 1)):
+        g[xy] = "H"
+
+
+def browser_icon(light=False):
+    g = {}
+    _globe(g, 12.5, 12.5, 11.5)
+    _put(g, POINTER, 15, 13)
+    im = Image.new("RGBA", (EN, EN), (0, 0, 0, 0))
+    for (x, y), c in g.items():
+        if 0 <= x < EN and 0 <= y < EN:
+            im.putpixel((x, y), GLOBE_COLORS[c] + (255,))
+    return _tile(im)
+
+
+# ---- System Monitor (default app: htop) -----------------------------------------------------
+# The Terminal frame (htop runs in a terminal) with a green heartbeat line across the screen.
+# Dark and light versions like Terminal. Written under the icon name "htop" by
+# gen_default_app_icons.py.
+PULSE = [(3, 12), (8, 12), (10, 7), (12, 16), (14, 10), (15, 12), (23, 12)]   # polyline on the screen
+
+
+def _line(g, a, b, c):
+    (x0, y0), (x1, y1) = a, b
+    n = max(abs(x1 - x0), abs(y1 - y0))
+    for i in range(n + 1):
+        g[(round(x0 + (x1 - x0) * i / n), round(y0 + (y1 - y0) * i / n))] = c
+
+
+def monitor_icon(light=False):
+    colors = dict(COLORS_LIGHT if light else COLORS)
+    colors.update(D=(22, 26, 34), P=(80, 200, 110), r=(226, 70, 70), y=(240, 200, 60),
+                  g=(80, 190, 100), T=(79, 88, 105) if light else (200, 205, 214))
+    g = {}
+    _put(g, SSH_TERM, 1, 3)
+    for a, b in zip(PULSE, PULSE[1:]):
+        _line(g, a, b, "P")
+    return _tile(_draw(g, colors, SHADE_LIGHT if light else SHADE))
+
+
+# ---- Code Editor (default app: micro) -------------------------------------------------------
+# The Terminal frame with short, indented lines of syntax-coloured code. Dark and light versions
+# like Terminal. Written under the icon name "micro" by gen_default_app_icons.py (the overlay's
+# micro.desktop names it; the package points at an SVG file instead of an icon name).
+CODE_LINES = [(0, [("a", 4), ("b", 6)]),            # (indent, [(colour, length), ...]), one every 2 rows
+              (1, [("b", 3), ("G", 2), ("e", 7)]),
+              (1, [("f", 5), ("G", 3)]),
+              (2, [("e", 9)]),
+              (1, [("a", 3), ("b", 5)]),
+              (0, [("G", 2)])]
+
+
+def code_icon(light=False):
+    colors = dict(COLORS_LIGHT if light else COLORS)
+    colors.update(D=(22, 26, 34), G=(232, 234, 238), r=(226, 70, 70), y=(240, 200, 60),
+                  g=(80, 190, 100), T=(79, 88, 105) if light else (200, 205, 214),
+                  a=(198, 120, 221), b=(97, 175, 239), e=(152, 195, 121), f=(229, 192, 123))
+    g = {}
+    _put(g, SSH_TERM, 1, 3)
+    for row, (indent, segments) in enumerate(CODE_LINES):
+        x = 3 + indent * 2
+        for c, n in segments:
+            for i in range(n):
+                g[(x + i, 6 + row * 2)] = c
+            x += n + 1
+    return _tile(_draw(g, colors, SHADE_LIGHT if light else SHADE))
+
+
+# ---- PDF Viewer (default app: qpdfview) -----------------------------------------------------
+# A white page with a folded corner, three grey text lines and a red "PDF" band across the bottom.
+# The light version outlines the page so it stands out on the light background. Written under the
+# icon name "qpdfview" by gen_default_app_icons.py.
+PDF_COLORS = {"P": (240, 242, 246), "p": (196, 203, 215), "F": (214, 220, 230), "L": (150, 158, 172),
+              "R": (214, 64, 58), "W": (255, 255, 255), "O": (138, 147, 163)}
+PDF_GLYPH = {"P": ["###.", "#..#", "###.", "#...", "#..."],
+             "D": ["###.", "#..#", "#..#", "#..#", "###."],
+             "F": ["###", "#..", "##.", "#..", "#.."]}
+
+
+def pdf_icon(light=False):
+    g = {}
+    w, h, fold, x0, y0 = 19, 24, 6, 4, 1                  # page, folded top-right corner
+    for y in range(h):
+        for x in range(w):
+            if y < fold and x > w - fold + y:
+                continue
+            if y < fold and x >= w - fold:
+                c = "p" if x == w - fold + y else "F"     # the fold
+            else:
+                c = "p" if x == w - 1 or y == h - 1 else "P"
+            g[(x0 + x, y0 + y)] = c
+    if light:                                             # outline around the page
+        page = set(g)
+        for (x, y) in list(page):
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                n = (x + dx, y + dy)
+                if n not in page and 0 <= n[0] < EN and 0 <= n[1] < EN:
+                    g[n] = "O"
+    for y, n in ((9, 12), (11, 10), (13, 12)):            # text lines
+        for x in range(n):
+            g[(7 + x, y)] = "L"
+    for y in range(16, 23):                               # red band, wider than the page
+        for x in range(2, 21):
+            g[(x, y)] = "R"
+    x = 5
+    for ch in "PDF":
+        for j, row in enumerate(PDF_GLYPH[ch]):
+            for i, v in enumerate(row):
+                if v == "#":
+                    g[(x + i, 17 + j)] = "W"
+        x += len(PDF_GLYPH[ch][0]) + 1
+    im = Image.new("RGBA", (EN, EN), (0, 0, 0, 0))
+    for xy, c in g.items():
+        im.putpixel(xy, PDF_COLORS[c] + (255,))
+    return _tile(im)
+
+
+# ---- Archive Manager (default app: Xarchiver) -----------------------------------------------
+# The File Manager folder with a zipper down the front panel ("zipped folder"). One set for both
+# themes. Written under the icon name "xarchiver" by gen_default_app_icons.py.
+ARCHIVE_COLORS = dict(FOLDER_COLORS, Z=(70, 78, 94), z=(200, 205, 214))
+
+
+def archive_icon(light=False):
+    g = {}
+    _put(g, FOLDER, 0, 3)
+    x = 13
+    for y in range(11, 18):                               # teeth alternating left / right
+        g[(x, y)] = "Z"
+        g[(x - 1 if y % 2 else x + 1, y)] = "z"
+    for y in range(18, 22):                               # the pull tab with its slot
+        for dx in (-1, 0, 1):
+            g[(x + dx, y)] = "z"
+    g[(x, 19)] = g[(x, 20)] = "Z"
+    im = Image.new("RGBA", (EN, EN), (0, 0, 0, 0))
+    for xy, c in g.items():
+        im.putpixel(xy, ARCHIVE_COLORS[c] + (255,))
+    return _tile(im)
 
 
 # ---- Re-center sticks -----------------------------------------------------------------------

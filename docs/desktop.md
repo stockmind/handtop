@@ -20,49 +20,61 @@ Sway (ROCKNIX's default) is a keyboard-driven tiling WM — unsuitable for gamep
 ## Hardware acceleration
 
 - OpenGL/GLES via Panfrost (Mesa) for the compositor and GL apps (browser rendering, Moonlight).
-- **Hardware video decode for Moonlight** (H.264/HEVC, up to 1080p60) via the Cedrus V4L2 stateless decoder — see `video-decode.md`. The system FFmpeg and mpv use the same VPU through the same patchset and have rendered **zero-copy** since 2026-10-17 (`hwdec=auto-safe` selects the `drm` registration of those decoders, whose dmabufs mpv's DRM PRIME interop takes directly): 1080p HEVC and H.264 play with 0 dropped frames over 10 s, 540p with room to spare. Browsers never reach the VPU: Chromium's VA-API route was built and measured (it decodes on Cedrus, then renders green frames), so browser video stays software-decoded — `video-decode.md`.
+- **Hardware video decode for Moonlight** (H.264/HEVC, up to 1080p60) via the Cedrus V4L2 stateless decoder — see [video-decode.md](video-decode.md). Other players (mpv, browsers) still decode on the CPU.
+
+## Bluetooth without blueman's tray: trade-offs
+
+Since 2026-10-26 blueman's applet and tray no longer run all the time (they took ~55 MB of the
+~1 GB; Handtop's own icon + watcher take ~1 MB). What that changes:
+
+- **Pairing is started from the handheld.** blueman's pairing agent (PIN / passkey prompts) runs
+  only while Bluetooth Manager is open. Pairing from the handheld's Bluetooth Manager works as
+  before; a phone or PC that starts pairing *to* the handheld while the window is closed gets no
+  prompt (and may fail). External Controller mode is not affected (it has its own agent).
+- **No tray menu.** blueman's right-click menu (quick connect to recent devices, turn Bluetooth
+  off, send files) is gone; the same things are in Bluetooth Manager (tap the icon). Already paired
+  devices still reconnect by themselves (that is BlueZ / the device, not the applet).
+- **No connection pop-ups** ("connected to …") from blueman's applet while the window is closed.
+- **No receiving files over Bluetooth (OBEX)** while the window is closed (blueman's transfer
+  service lives in the applet). Rarely used on a handheld.
+- **Remembering "Bluetooth off" is now Handtop's job.** blueman's applet used to remember the
+  on / off choice; bluetoothd alone switches the adapter on at every start (`AutoEnable`, its
+  default). `rg35xxh-bluetooth --watch` saves it (`~/.local/state/rg35xxh-bluetooth-power`, not
+  during External Controller mode's set-up) and switches Bluetooth off again at log-in, so it is
+  briefly on during boot.
+- **The icon is a Waybar module, not a tray item**: it sits right after the input-mode icon,
+  before Wi-Fi and Tailscale, and has no right-click menu.
+- blueman's own tray icon is switched off in the gsettings defaults (`org.blueman.general
+  plugin-list`: `!StatusIcon`, plus `!ShowConnected` and `!StatusNotifierItem`, which would load
+  it again), so opening Bluetooth Manager does not add a second Bluetooth icon.
+
+## Session start and log out
+
+Auto-login on tty1 starts labwc (`/etc/profile.d/zz-rg35xxh-session.sh`); **Log out** ends labwc, getty logs in again and a fresh session starts. labwc runs `/etc/xdg/labwc/autostart` in its own process group. Wayland clients (Waybar, applets, …) end with labwc, but the helpers that are not (input daemon loop, battery icon animation, Tailscale tray) would outlive it: so each autostart first stops the previous session's process group (its id is kept in `$XDG_RUNTIME_DIR/rg35xxh-autostart.pgid`; `SIGTERM`, then it **waits until the group is gone**, up to 5 s, then `SIGKILL`) and only then starts the new helpers, and resets the failed-start counter that `zz-rg35xxh-session.sh` uses (3 failed starts in a row leave a shell on tty1). Found 2026-10-26: after a log-out the taskbar showed two Tailscale icons and two input daemons were running. The first fix stopped the old group without waiting, and the next log-out froze the whole handheld: the old input daemon died while the new one was taking over the gamepad and vibration motor. The wait, and the input daemon's clean exit and single-instance lock, are what prevent this; see [services/input-daemon.md](services/input-daemon.md#stopping-restarting-one-instance) before changing either.
 
 ## Shell components: Waybar + nwg-drawer + wlogout
 
 | Role | Tool | Notes |
 |---|---|---|
-| Panel | **Waybar** | Bottom taskbar, classic-desktop styling: open windows, clock, battery, network, volume, tray |
+| Panel | **Waybar** | Bottom taskbar, classic-desktop styling: open windows, clock, battery, tray |
 | Launcher | **nwg-drawer** | Full-screen app icon grid — usable with mouse/D-pad (type-to-search launchers rejected: no keyboard) |
-| Power menu | **wlogout** | Full-screen large buttons: Shut down / Log out / Restart / Sleep. Opened by Power (tap) |
+| Power menu | **wlogout** | Full-screen large buttons: Sleep, Restart / Log out, Shut down. Opened by Power (tap) |
 | Notifications | **mako** | |
 
 Chosen over LXQt-on-labwc (heavier) and sfwbar (smaller community) for low RAM and gamepad-friendly large targets.
 
 ### Session details (implemented)
 
-- Boot → getty auto-login on tty1 → labwc. Logging out restarts the session; after 3 failed starts a shell is left on tty1. The launcher is `/etc/profile.d/zz-rg35xxh-session.sh`, sourced from `/etc/profile`. Debian's zsh does not read `/etc/profile`, so the overlay ships `/etc/zsh/zprofile` with `emulate sh -c 'source /etc/profile'` — that is what makes the desktop start on the zsh login shell the image now uses (and why switching `rg` to zsh once silently broke it: 2026-10-17, bare tty1 shell after a reboot). Bash login shells are unaffected, so the same image works with either.
+- Boot → getty auto-login on tty1 → labwc. Logging out restarts the session; after 3 failed starts a shell is left on tty1.
 - System-wide defaults in `/etc/xdg/` (labwc, waybar, mako, foot, kanshi); per-user overrides go in `~/.config/`.
 - Normal windows open **maximized** (640×480 screen); dialogs keep their size.
-- Panel: `☰ Apps` (launcher) · open windows · tray · volume · network · battery · clock · `⏻` (power menu).
-- Launcher: `rg35xxh-drawer` (4 columns, 56 px icons, no categories/file search). Power menu: `rg35xxh-power-menu`.
+- Panel: **Apps** (launcher; blue block with a pixel-art 3×3 app grid) · open windows · input-mode icon · Bluetooth icon · tray (Wi-Fi, Tailscale; pixel-art icons from `tools/icons`) · battery · clock · power (red pixel-art power symbol on the bar, opens the power menu). Even gaps: 8 px between status icons, 12 px around the battery / clock text. Volume and brightness show in the pop-up bar ([services/osd.md](services/osd.md)).
+- Launcher: `rg35xxh-drawer` (4 columns, 56 px icons, no categories/file search). Power menu: `rg35xxh-power-menu` ([apps/power-menu.md](apps/power-menu.md)). Theme: [apps/theme.md](apps/theme.md).
 - Physical keyboard: Super+D apps, Super+Enter terminal, Super+E files, Super+X power menu, Alt+F4 close, Print screenshot.
 - **No xdg-desktop-portal**: it delayed Waybar startup (portal activation timeouts) and is only needed for screen sharing/Flatpak; GTK apps use their own file dialogs.
 - Audio: speaker starts at 100 % on a fresh system (`/etc/wireplumber/wireplumber.conf.d/50-rg35xxh.conf`; WirePlumber default is 40 %); the codec DAC and Line Out are set to 100 % by `rg35xxh-hwinit`.
-- Memory: zram swap (100 % of RAM, zstd, priority 100) and nothing else — the 2 GB `/swapfile` on the SD card was dropped in Oct 2026: paging to the card is slow enough to freeze the device (two hard locks with Chromium near 1 GB RSS on this 1 GB board) and wears it out. `earlyoom` (5 % free RAM/swap) kills the browser instead of letting the handheld hang. Chromium flags in `/etc/chromium.d/50-rg35xxh`; uBlock Origin Lite force-installed by policy (`/etc/chromium/policies/managed/ublock-origin-lite.json`, downloaded on first launch).
+- Memory: zram swap only (all of RAM, zstd): paging to the microSD looked like a hang, so the 2 GB `/swapfile` is gone and `earlyoom` kills the browser instead of freezing the device (see the changelog). Chromium flags in `/etc/chromium.d/50-rg35xxh`; uBlock Origin Lite force-installed by policy (`/etc/chromium/policies/managed/ublock-origin-lite.json`, downloaded on first launch).
 - Component logs: `~/.local/state/session/*.log`, labwc: `~/.local/state/labwc.log`.
-
-### Shell (zsh)
-
-- The login shell is **zsh** (`/usr/bin/zsh`, from `base.list`). `build/04d-ohmyzsh.sh` installs Oh My Zsh plus `zsh-autosuggestions` and `zsh-syntax-highlighting` into `/etc/skel/.oh-my-zsh` (all pinned to the revisions the handheld runs), `/etc/skel/.zshrc` loads them with a starship prompt (`starship` is in `dev.list`), and `10-image.sh` copies `/etc/skel` into a fresh `/home/rg` — so a reflash keeps the shell environment. `~/.zshrc` is the file to edit for per-user changes (it also adds `~/.opencode/bin` and `~/.local/bin` to `PATH`).
-- `overlay/etc/zsh/zprofile` (`emulate sh -c 'source /etc/profile'`) is load-bearing: it is what runs `/etc/profile.d/zz-rg35xxh-session.sh` (desktop) and `dev-tools.sh` (tool `PATH`) for a zsh login shell.
-- Oh My Zsh is only a convenience: if `~/.oh-my-zsh` is missing the shell still starts (the `.zshrc` then prints a source error) and the desktop is unaffected.
-
-### External display (mini HDMI) — verified 2026-10-08
-
-- Works with hot-plug: a 1080p monitor came up at 1920×1080 60 Hz, scale 1; taskbar, pointer and windows all fine. No HDMI audio device (only the analog codec appears in ALSA).
-- kanshi profiles: `handheld` (DSI-1 only, runs `rg35xxh-display apply`), `docked` (HDMI-A-1 + DSI-1, runs `rg35xxh-display connected`).
-- **Display app** (`rg35xxh-display`, one drawer entry "Display"; replaced the three "Display: …" entries in 2026-10). On connect it opens on the **handheld** as a layer-shell overlay; while it is open only the handheld screen is on (flag `$XDG_RUNTIME_DIR/rg35xxh-display-picker`), so the pointer cannot end up on the monitor. A 5 s countdown, restarted by any pointer movement or key, then keeps the saved layout; picking a card applies at once. Unplugging closes it. Drawn with cairo (pixel-art illustrations of each layout), follows the dark/light theme; `--preview FILE` renders it to a PNG.
-- Layouts (`~/.config/rg35xxh/display-mode`, also `rg35xxh-display set monitor|extend|mirror`):
-  - **monitor** (default): handheld screen off (backlight off too). Pressing X turns it on as a full-screen keyboard panel — see `keyboard.md`.
-  - **extend**: handheld screen **below** the monitor, centred (x = (monitor width − 640) / 2, y = monitor height): the pointer crosses off the monitor's bottom edge in its middle third.
-  - **mirror**: the monitor switches to 640×480 at the same position as the handheld, so both show the same picture (the monitor scales it up).
-- **Resolution / refresh rate**: lists of the monitor's modes (largest first, refresh rates per resolution; the preferred mode marked) with scroll bars. **Test** turns the monitor on in that mode, apart from the handheld (x = 4000, no shared edge), and asks "Keep this mode?" for 15 s; otherwise it switches back. Kept modes are stored per monitor (make + model + serial) in `~/.config/rg35xxh/display-modes.json`; otherwise the preferred mode. Refresh rates are passed exactly as listed (`1920x1080@239.998Hz`): wlr-randr calls a rounded value an "unknown mode". Verified 2026-10-21: 1080p 240 Hz on a Hansung TFG24F24P runs a real 570 MHz TMDS / TCON clock (60 Hz: 148.5 MHz).
-- **Pointer speed per screen**: after each layout change the tool writes the enabled outputs and a speed factor (diagonal ÷ 800, the handheld's; 1080p ≈ 2.75) to `$XDG_RUNTIME_DIR/rg35xxh-pointer-layout`. The input daemon follows the pointer over that layout (its own relative motion, clamped like wlroots) and scales the stick / D-pad speed by the factor of the screen it is on (`display_speed_scale` in `input.conf`, 0 = off). It moves the pointer to the layout's top-left corner when a two-screen layout starts, so the estimate starts exact; its virtual mouse has no libinput acceleration (labwc `rc.xml`), so the estimate stays exact. Motion from other mice is not seen.
 
 ## Core use
 
@@ -70,9 +82,9 @@ Chosen over LXQt-on-labwc (heavier) and sfwbar (smaller community) for low RAM a
 |---|---|
 | Remote desktop to PC | **Moonlight** (PC runs Sunshine). Hardware decoding: 1080p60 HEVC smooth on 5 GHz Wi-Fi |
 | Parsec | **Not possible** — no Linux ARM64 client |
-| External display | mini HDMI, per-output scaling |
+| External display | mini HDMI, per-output scaling, Display app ([apps/display.md](apps/display.md)) |
 | Keyboard/mouse | USB (host port, hub OK) or Bluetooth, alongside the gamepad controls |
-| On-screen keyboard | Custom, D-pad navigable, English only (see `input-mapping.md`) |
+| On-screen keyboard | Custom, D-pad navigable, English only (see [services/on-screen-keyboard.md](services/on-screen-keyboard.md)) |
 | CJK text | **Display only** (Noto CJK fonts). No input method |
 
 ## App list
@@ -83,17 +95,17 @@ Selection rule: light apps for 1 GB RAM; Qt apps preferred where equal, since mo
 |---|---|---|
 | Remote desktop | `moonlight-qt` (official Moonlight Cloudsmith repo, debian/trixie arm64) | Core use case |
 | Browser | `chromium` + uBlock Origin Lite | Smoothest browser tested on this device (see below). Heavy browsing → use the PC via Moonlight |
-| File manager | `thunar` | Light, Wayland-capable, familiar |
+| File manager | `thunar`, `udisks2`, `gvfs`, `exfatprogs`, `dosfstools`, `eject` | Light, Wayland-capable, familiar. Other drives (TF2 card, USB sticks) mount with a tap — see [apps/files.md](apps/files.md) |
 | Terminal | `foot` | Lightest Wayland terminal; stable app_id `foot` for copy/paste detection |
 | Text editor | `mousepad` (GUI), `micro` + `nano` (terminal) | Simple; micro supports mouse and Ctrl+C/V |
 | Python | `python3`, `python3-venv`, `pipx` | System pip is blocked by Debian; use venvs |
-| SSH | `openssh-client`, `openssh-server`, `tmux`, `mosh` | SSH server off by default; Apps → **Enable SSH** sets your own password and turns it on. tmux/mosh survive dropped connections |
+| SSH | `openssh-client`, `openssh-server`, `tmux`, `mosh` | SSH server off by default; Apps → **Enable SSH** ([apps/enable-ssh.md](apps/enable-ssh.md)) sets your own password and turns it on. tmux/mosh survive dropped connections |
 | Networking | `network-manager`, `network-manager-gnome` (nm-applet) | Wi-Fi from tray; `nmtui` fallback |
-| VPN | `tailscale` (official repo pkgs.tailscale.com, debian/trixie) | Reach the device / PC from anywhere; tray icon via `tailscale systray` |
-| Bluetooth | `bluez`, `blueman` | |
+| VPN | `tailscale` (official repo pkgs.tailscale.com, debian/trixie) | Reach the device / PC from anywhere; see [apps/tailscale-login.md](apps/tailscale-login.md) |
+| Bluetooth | `bluez`, `blueman` | Taskbar icon: `rg35xxh-bluetooth` (Waybar `image#bluetooth`, Handtop pixel icons: off / on / connected; `--watch` follows BlueZ over D-Bus, ~1 MB). Click: Bluetooth Manager (blueman), with blueman's applet (pairing agent) running only while it is open. Replaced blueman's always-running applet + tray (~55 MB) on 2026-10-26; trade-offs below |
 | Audio | `pipewire`, `wireplumber`, `pipewire-pulse`, `pavucontrol` | |
 | Clipboard | `wl-clipboard` | Required by L3/R3 copy/paste |
-| Brightness / volume | `brightnessctl`, `wireplumber` (`wpctl`) | Used by F + Vol and Vol keys; the pop-up bar is Handtop's own `rg35xxh-osd` (`src/osd`: plain C Wayland client, ~2 MB, built by `build/07b-osd.sh`) |
+| Brightness / volume | `brightnessctl`, `wireplumber` (`wpctl`) | Used by F + Vol and Vol keys; the pop-up bar is Handtop's own `rg35xxh-osd`, see [services/osd.md](services/osd.md) |
 | Screenshots | `grim`, `slurp` | |
 | Viewers | `imv` (images), `qpdfview` (PDF), `mpv` (video, VPU decode — see [video-decode.md](video-decode.md)) | |
 | Archives | `xarchiver` | |
@@ -121,14 +133,6 @@ application, so Thunar has no handler and falls back to running a literal `%U`
 ("missing exec"). The image build refreshes both (`build/05-configure-base.sh`);
 an in-place update of the overlay has to do the same.
 
-## Tailscale (added 2026-10-09)
-
-- Installed from Tailscale's official Debian repository; `tailscaled` runs at boot (kernel TUN + WireGuard available, so normal kernel mode, not userspace networking).
-- `rg35xxh-tailscale-operator.service` makes the desktop user Tailscale **operator** (`tailscale set --operator=<user>`), so the tray and `tailscale up/down` work without sudo.
-- **Log in:** Apps → **Tailscale login** (`rg35xxh-tailscale-login`) opens a terminal with `tailscale up --qr`: scan the QR code with a phone (or open the link) and approve. Login persists across reboots; nothing secret is stored on the boot partition.
-- **Tray:** `tailscale systray` is started from the labwc autostart (grey when logged out).
-- Defaults: no exit node, routes from other nodes not accepted, MagicDNS on (`/etc/resolv.conf` → 100.100.100.100 while connected).
-
 ## Browser choice (v0.1.3)
 
 Tested 2026-10-17 on the device: fresh profile per browser, 20 s of scrolling on Wikipedia and on naver.com (ad-heavy), scored 1–5 by hand, CPU and free memory measured during the scroll.
@@ -144,7 +148,6 @@ Tested 2026-10-17 on the device: fresh profile per browser, 20 s of scrolling on
 
 Earlier rounds showed Firefox's rendering path (GPU/CPU WebRender, Wayland/X11), CPU governor, smooth scrolling and frame rate made no noticeable difference; full uBlock Origin alone took 110–270 MB in Firefox's extension process.
 
-
 ## Jellyfin (the media client, v0.2.0)
 
 > The full reference — keys, configuration, the feature set, the mocked
@@ -156,11 +159,11 @@ keypad-first, no menu/dashboard/launcher modes. `Super+p`
 starts it in a terminal. Everything the old suite did (menu, dashboard, play
 browser, shuffle) is gone — the client is the whole UI.
 
-* **Pagination**: 50 rows per page, and the next page is fetched when the
-  cursor gets within five rows of the end, so a 533-item library paints in
-  about a second instead of three (measured on the device: 50 rows = 1.2 s
-  end to end — 0.3 s API, 0.6 s mount, 0.25 s paint — against 3.2 s for 200
-  rows). The `… N more` row shows how much is left and can be selected to
+* **Pagination**: 25 rows per page — mounting a row costs the A53 about
+  17 ms, so 200 rows would freeze the UI for 3.4 s — and the next page is
+  fetched while the cursor is still ten rows away, so the pause happens while
+  you read. A page that arrives keeps the view in place, and a download that
+  finishes only repaints the rows it changed instead of rebuilding the list. The `… N more` row shows how much is left and can be selected to
   pull the next page in.
 * **No placeholder rows**: a list row renders its own text. A row built as a
   container (a `Label` inside a `ListItem`) shows the *class name* — "Row" —
@@ -273,27 +276,7 @@ browser, shuffle) is gone — the client is the whole UI.
   real save → play-local → delete round-trip, and back navigation. Verified on
   textual 2.1.2 (Debian trixie, what ships).
 
-## Light theme (dual theme)
-
-**Apps → Theme** (or `rg35xxh-theme dark|light`, `rg35xxh-theme --get`): dark (default) or light. The choice is one file, `~/.config/rg35xxh/theme`, read by every themed part; a switch applies live.
-
-| Part | How it follows the theme |
-|---|---|
-| Waybar | `rg35xxh-themed waybar` (autostart) adds `-s /etc/xdg/waybar/style-light.css` (imports `style.css`, overrides the colours); the Theme app restarts it |
-| Taskbar icons | input mode and battery scripts pick the `-light` PNGs |
-| Wallpaper | `rg35xxh-themed swaybg`: `#1e2430` / `#dfe4ec` |
-| Notifications | `rg35xxh-themed mako`: `/etc/xdg/mako/config` / `config-light` |
-| Window title bars | labwc theme `Handtop` (`/usr/share/themes/Handtop/labwc/themerc`). Light: the Theme app links `/usr/share/themes/Handtop-Light/labwc/themerc` as `~/.local/share/themes/Handtop/labwc/themerc` (user themes win) and runs `labwc --reconfigure`. `themerc-override` only keeps the title-bar padding |
-| App drawer | `rg35xxh-drawer` copies `/etc/xdg/nwg-drawer/handtop-<theme>.css` into `~/.config/nwg-drawer` (nwg-drawer's `-s` only takes a name there) |
-| Handtop app icons | light: per-user copies of their `.desktop` files in `~/.local/share/applications` with the `-light` icon (marked `X-Handtop-Theme=light`, removed again for dark) |
-| Power menu | `rg35xxh-power-menu`: `/etc/wlogout/style.css` / `style-light.css` (buttons stay mid-blue: wlogout's icons are light) |
-| GTK apps | `gsettings` color-scheme + `gtk-application-prefer-dark-theme` in `~/.config/gtk-3.0/settings.ini`; open apps may need a restart |
-
-Your own `~/.config/waybar/style.css` or `~/.config/mako/config` still wins over both themes.
-
-Not themed yet (stay dark): terminal (foot), volume/brightness bar (`rg35xxh-osd`), on-screen keyboard, External Controller status screen (it already draws from `PALETTES`, so light is new palette entries). Possible later: follow the time of day.
-
-### Streams (`goblin-tv`)
+## Streams (`goblin-tv`)
 
 A keypad-first browser for YouTube and Twitch, with the same feel as `jellyfin`.
 It asks first — **Twitch** or **YouTube** — and Esc returns to that question, so

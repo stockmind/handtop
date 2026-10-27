@@ -1,5 +1,12 @@
 # Handtop
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="media/logo/handtop-wordmark-dark.png">
+    <img src="media/logo/handtop-wordmark-light.png" width="420" alt="Handtop logo: a pixel-art RG35XX H showing a desktop, a keyboard and a mouse pointer">
+  </picture>
+</p>
+
 A full Debian desktop for the **Anbernic RG35XX H**. It turns the handheld into a pocket
 Linux computer: SSH, Moonlight remote desktop, Tailscale, a web browser, a terminal,
 an external monitor over mini HDMI, and everything else Debian's arm64 archive offers.
@@ -13,7 +20,11 @@ an external monitor over mini HDMI, and everything else Debian's arm64 archive o
 - **Desktop:** labwc (Wayland) + Waybar + nwg-drawer + wlogout, 640×480 on the built-in screen
 - **Controls:** a custom input daemon turns the gamepad into mouse + keyboard, with an on-screen keyboard
 
-Status: **v0.2.0**, developed and tested on the RG35XX H.
+Status: **v0.3.0**, developed and tested on the RG35XX H.
+
+<p align="center">
+  <img src="media/handtop-v0.3.0.png" width="800" alt="Handtop v0.3.0: on-screen keyboard over System Monitor, boot screen with the live boot log, the Apps screen and the power menu, all on the RG35XX H">
+</p>
 
 ## Features
 
@@ -31,16 +42,18 @@ Status: **v0.2.0**, developed and tested on the RG35XX H.
 - Chromium with uBlock Origin Lite (installed automatically on first launch when online); zram + 2 GB swap file
 - Boot logs written to the FAT partition, readable from any PC
 
-Full control map: [docs/input-mapping.md](docs/input-mapping.md).
+Full control map: [docs/services/input-daemon.md](docs/services/input-daemon.md).
 
 ## Install
 
 You need a microSD card (16 GB or larger) and balenaEtcher or Rufus.
 
-1. Download `handtop-<date>-v0.2.0.img.xz` and its `.sha256` from the Releases page. If that image does nothing at all on power-on (no LED), your unit has DDR3 RAM: use the `-DDR3` image instead.
+1. Download `handtop-<date>-v0.3.0.img.xz` and its `.sha256` from the Releases page. If that image does nothing at all on power-on (no LED), your unit has DDR3 RAM: use the `-DDR3` image instead.
 2. Flash the `.img.xz` directly (no need to unpack). If Windows offers to format the card afterwards, choose **Cancel**.
 3. Optional: on the `RG35XXHBOOT` drive, fill in `wifi.txt` (SSID, password, country).
 4. Put the card in the **TF1** (left) slot and power on. The first boot takes longer (the system grows to fill the card).
+
+> ⚠️ **Known issue:** Bluetooth is sometimes missing on the first boot after flashing (no adapter: the Bluetooth icon shows it off and External Controller → Bluetooth can't start). Restart once (Power → Restart); it works from then on.
 
 **Login:** user `rg`, password `rg35xxh` (used for sudo). **SSH is off by default**:
 open Apps → **Enable SSH**, which makes you choose your own password first.
@@ -65,7 +78,7 @@ There is no HDMI audio.
 
 ## External Controller (Bluetooth or USB cable)
 
-Use the handheld as a game controller for your PC or phone: **Apps → External Controller**. **Bluetooth**: pair **"Handtop Gamepad"** from the other device (first time only; it reconnects by itself afterwards). The taskbar's input-mode icon turns blue with rainbow stripes while it is on; press Select + Start + L1 + R1 to stop. Unlike gamepad mode, apps on the handheld don't see the controls. The handheld's screen shows the connection, a live view of the controls and the battery while it is on. It shows up as an Xbox Wireless Controller (Xbox-only games work, game vibration on the handheld; after updating from v0.2.0, remove and re-pair it on the PC once); while it is on, classic-Bluetooth accessories connected to the handheld pause. Details: [docs/bt-controller.md](docs/bt-controller.md).
+Use the handheld as a game controller for your PC or phone: **Apps → External Controller**. **Bluetooth**: pair **"Handtop Gamepad"** from the other device (first time only; it reconnects by itself afterwards). The taskbar's input-mode icon turns blue with rainbow stripes while it is on; press Select + Start + L1 + R1 to stop. Unlike gamepad mode, apps on the handheld don't see the controls. The handheld's screen shows the connection, a live view of the controls and the battery while it is on. It shows up as an Xbox Wireless Controller (Xbox-only games work, game vibration on the handheld; after updating from v0.2.0, remove and re-pair it on the PC once); while it is on, classic-Bluetooth accessories connected to the handheld pause. Details: [docs/apps/external-controller.md](docs/apps/external-controller.md).
 
 **USB cable**: connect the handheld's right USB-C port (OTG2/DC) to a PC and pick USB cable. It shows up as a wired Xbox 360 controller (works with Xbox-only games, game vibration on the handheld), and the handheld charges meanwhile. One connection (Bluetooth or cable) at a time.
 
