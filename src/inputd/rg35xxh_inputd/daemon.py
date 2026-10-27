@@ -53,6 +53,11 @@ EXT_MODES = {   # transport: (flag file, notification title, notification text, 
     "usb": ("rg35xxh-wired-mode", "Wired Controller mode",
             "Controls go to the PC over the USB cable. Select + Start + L1 + R1 to stop.", "wired"),
 }
+# Every mode flag we put in $XDG_RUNTIME_DIR, so start-up and clean exit cannot forget one (the
+# keypad flag was missing from both after the fork added it: a log-out from keypad mode left the
+# taskbar showing its icon while the new daemon was in desktop mode).
+MODE_FLAGS = ("rg35xxh-gamepad-mode", "rg35xxh-keys-mode",
+              "rg35xxh-bt-mode", "rg35xxh-wired-mode")
 BT_EVENT = struct.Struct("<HHi")               # evdev type, code, value
 # Mode-change feedback: the taskbar icon shakes and the motor wobbles with it, both driven from
 # here on one clock and one damped-spring model, x(t) = A e^(-DECAY t) sin(2 pi FREQ t):
@@ -187,7 +192,7 @@ class Daemon:
         self.ui_backoff = 2         # s, doubled per failed start (no display after a log-out)
         self.osk_visible = False
         self.ticks = 0
-        for flag in ("rg35xxh-gamepad-mode", "rg35xxh-bt-mode", "rg35xxh-wired-mode", INPUTMODE_FRAME):
+        for flag in (*MODE_FLAGS, INPUTMODE_FRAME):
             set_flag(flag, False)
         self._open_devices()
         self._create_virtual_devices()
@@ -1125,7 +1130,7 @@ class Daemon:
                 pass
             self.bt = None
             log.info("%s: disconnected", EXT_MODES[self.ext][1])
-        for flag, *_ in EXT_MODES.values():
+        for flag in MODE_FLAGS:
             set_flag(flag, False)
 
     def run(self):
