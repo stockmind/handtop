@@ -173,10 +173,9 @@ browser, shuffle) is gone — the client is the whole UI.
   or plays from the cursor down the visible list, `B` goes back (clearing the
   search filter first), `Y` saves, `X` deletes the saved copy (twice), `/`
   searches, `Q` quits. Physical keyboard works the same.
-* **Icon**: `app-goblin.png` (56 px pixel art — the handheld with a play
-  triangle on its screen, drawn by `tools/icons/gen_app_icons.py`, with a
-  `-light` variant the theme script swaps in), shown in the app drawer as
-  "Goblin".
+* **Icon**: `app-jellyfin.png` (56 px pixel art — the jellyfin mark, white on
+  a purple tile, drawn by `tools/icons/gen_app_icons.py`, with a `-light`
+  variant the theme script swaps in), shown in the app drawer as "Jellyfin".
 * **Keypad during playback**: the mpv window has the focus, and
   `/etc/mpv/input-handtop.conf` maps the rest of the pad onto it — D-pad
   left/right seek 15 s, D-pad up/down change the **speed** (0.25x per

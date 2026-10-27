@@ -231,8 +231,8 @@ dropped frames.
 | path | what |
 |---|---|
 | `/usr/local/bin/goblin` | the client (one Python file, no dependencies beyond Textual) |
-| `/usr/local/share/applications/goblin.desktop` | the drawer entry |
-| `/usr/local/share/rg35xxh/icons/app-goblin.png` | the icon (56 px pixel art, plus a `-light` variant) |
+| `/usr/local/share/applications/jellyfin.desktop` | the drawer entry (shown as "Jellyfin") |
+| `/usr/local/share/rg35xxh/icons/app-jellyfin.png` | the icon (56 px pixel art, plus a `-light` variant) |
 | `/etc/mpv/input-handtop.conf` | the pad bindings during playback |
 | `/etc/default/goblin-dash` | the configuration (device state) |
 | `~/Offline/` | the saved copies and their subtitles |

@@ -507,7 +507,7 @@ ListView > ListItem.-highlight { background: #2b3240; }
 
 
 class Goblin(App):
-    TITLE = "goblin"
+    TITLE = "Jellyfin"
     CSS = CSS
     BINDINGS = [
         ("escape", "back", "back"),

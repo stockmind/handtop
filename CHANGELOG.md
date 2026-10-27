@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Change: the client is called **Jellyfin** in the app drawer, with a pixel
+  Jellyfin mark (white on a purple tile) instead of the handheld-with-a-play
+  icon. `jellyfin.desktop` / `app-jellyfin.png`; the binary is still `goblin`,
+  the drawer entry is just what you see.
+
 - Change: Streams asks what to watch on launch — Twitch or YouTube — instead of
   landing on YouTube's topic list; Esc from either source returns to that
   question. One Enter gets from opening the app to live streams, the other to

@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Goblin
+Name=Jellyfin
 Comment=Jellyfin client for the handheld
-Exec=foot -e goblin
-Icon=/usr/local/share/rg35xxh/icons/app-goblin.png
+Exec=foot -T Jellyfin -e goblin
+Icon=/usr/local/share/rg35xxh/icons/app-jellyfin.png
 Terminal=false
 Categories=AudioVideo;Video;Utility;
 Keywords=jellyfin;media;video;movies;series;streaming;tui;handheld;

@@ -37,7 +37,7 @@ WAYBAR_SIGNALS = (8, 9)          # image#inputmode, image#battery
 DATA = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
 LABWC_USER_THEME = os.path.join(DATA, "themes", "Handtop", "labwc", "themerc")
 LABWC_LIGHT = "/usr/share/themes/Handtop-Light/labwc/themerc"
-APPS = ("rg35xxh-theme.desktop", "rg35xxh-bt-controller.desktop", "goblin.desktop",
+APPS = ("rg35xxh-theme.desktop", "rg35xxh-bt-controller.desktop", "jellyfin.desktop",
         "goblin-tv.desktop", "rg35xxh-display.desktop", "rg35xxh-enable-ssh.desktop",
         "rg35xxh-recenter-sticks.desktop")                   # have -light icons
 MARK = "X-Handtop-Theme=light"
@@ -158,6 +158,22 @@ def _app_icons(theme):
                     os.remove(mine)
         except OSError:
             pass
+    # our copies of entries that no longer exist (a renamed app) would linger in the drawer
+    try:
+        for name in os.listdir(user):
+            if name in APPS:
+                continue
+            stale = os.path.join(user, name)
+            try:
+                with open(stale) as f:
+                    if MARK in f.read():
+                        os.remove(stale)
+            except OSError:
+                pass
+    except OSError:
+        pass
+    for name in APPS:
+        mine = os.path.join(user, name)
         if theme != "light" or os.path.exists(mine):
             continue
         try:

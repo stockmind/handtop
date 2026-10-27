@@ -37,6 +37,10 @@ if [ "$WHAT" = all ] || [ "$WHAT" = console ]; then
     # directory has a mimeinfo.cache; without it a fresh home has no handler for
     # a video file (Thunar runs a literal "%U"). Same two commands the image
     # build runs (build/05-configure-base.sh).
+    # rm the pre-2026-10-28 leftovers: the client's drawer entry is now jellyfin.desktop
+    install_as_root "rm -f /usr/local/share/applications/goblin.desktop \
+        /usr/local/share/rg35xxh/icons/app-goblin.png /usr/local/share/rg35xxh/icons/app-goblin-light.png \
+        /home/rg/.local/share/applications/goblin.desktop"
     install_as_root "tar -xzf $STAGE/overlay.tgz -C / && rm -rf $STAGE \
         && systemctl daemon-reload && udevadm control --reload-rules \
         && update-mime-database /usr/share/mime \
