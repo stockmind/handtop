@@ -1,276 +1,130 @@
 # Jellyfin — the media client for the handheld
 
-`jellyfin` is the one media app on the RG35XX H: a single, keypad-first
-Jellyfin client in a terminal. It browses the library, plays what you pick
-fullscreen, keeps your place, follows the subtitle preferences of your
-Jellyfin account, and saves episodes to the SD card.
+Pick something from your Jellyfin server, it plays fullscreen, it remembers
+where you were, and it can save episodes to the card. It runs in a terminal,
+so it also works over SSH.
 
-Start it with `Super+p` — it opens in a terminal window.
+![The library](img/jellyfin-home.png)
 
-![The client on the handheld](img/device-home.png)
+## Setup
 
-Every picture in this document is **mocked**: `tools/jellyfin-mock.py` drives the
-real application (real widgets, real CSS, real layout) against a fake server
-with invented library, series and episode names. These ones are photographs
-of the actual RG35XX H running that mock — the terminal, the font, the
-taskbar and all — so nothing copyrighted is in the repository and the
-pictures cannot drift away from the UI. The same screens are also rendered
-crisply as SVG (`img/jellyfin-*.svg`).
+Two values in `/etc/default/jellyfin`:
 
----
-
-## The screen
-
-Everything fits in one 80×24 terminal, and every row is one line:
-
-```
- Home › Lantern Bay › The Lantern Road                43.0G free  bat 82%  cpu 7%  36°C
- ▸ Lantern Bay
- ▸ Paper Moons
-   ▶ The Long Way Home                             44m  1080p  ita
- ▶ Salt and Smoke                                 41m  1080p  ita
- ▶ Nine Lanterns                                  47m  1080p  ita  »2:45
-```
-
-| part | what it shows |
+| variable | value |
 |---|---|
-| **top line, left** | the breadcrumb: where you are in the library |
-| **top line, right** | free space on the card, battery, CPU load, temperature |
-| **list** | one row per item: `▶` plays, `▸` opens a folder, `»27:31` is a resume point, `ita`/`eng` is the subtitle that will be used, `✓` is a saved copy |
-| **bottom line** | the keys that do something right now |
+| `JELLYFIN_URL` | your server, e.g. `http://mediaserver:8096` |
+| `JELLYFIN_KEY` | a **user access token**, not an API key (see below) |
 
-![Episodes with a resume point and a subtitle track](img/device-episodes.png)
+The server has to allow transcoding: the client asks for a transcode at the
+panel's size (640×480), which the VPU decodes best and the Wi-Fi carries
+easily.
 
-| | |
-|---|---|
-| ![The series library](img/device-series.png) | ![Seasons](img/device-seasons.png) |
+### Getting a token
 
-Libraries are fetched 25 rows at a time and the next page arrives while the
-cursor is still ten rows away, so a 533-item library never holds more than a
-few dozen rows in memory. Mounting a row costs the A53 about 17 ms, so the
-page size is the thing that decides how the scrolling feels; the view keeps
-its place when a page arrives, and a download that finishes only repaints the
-rows it changed.
+An API key makes an anonymous session, and Jellyfin then refuses to store a
+playback position for it — "continue watching" stays empty. Worse, each
+person should have their own session anyway. Mint a token once with the
+user's password:
 
----
+```sh
+curl -s -X POST "$JELLYFIN_URL/Users/AuthenticateByName" \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: MediaBrowser Client="handtop", Device="handtop", DeviceId="handtop", Version="1"' \
+  -d '{"Username":"<user>","Pw":"<password>"}' | jq -r .AccessToken
+```
+
+Put it in `JELLYFIN_KEY`. Revoke it later in the web UI (*Users → the user →
+Active devices*).
+
+### Starting it
+
+Apps → **Jellyfin**, or `Super+p`. The first start reads the file above.
 
 ## Keys
 
-### In the library
+In the library:
 
-| key | action |
+| key | does |
 |---|---|
-| `↑` `↓` | move the cursor |
-| `A` / `Enter` | open a folder, or play the item under the cursor |
-| `B` / `Esc` | go back (clears the search filter first, then leaves the folder) |
-| `Y` / `Space` | **save** the item to the card (an episode, a season, a whole series) |
-| `X` | **delete** the saved copy — press twice to confirm |
-| `/` | search the current folder (server-side, so it finds items on page 40) |
+| `A` / Enter | play, or open the selected folder |
+| `B` / Esc | back one level (clears a search first) |
+| `Y` / Space | save the selected episode, season or series to the card |
+| `X` / Tab | delete the saved copy (press twice) |
+| `/` | search this folder |
 | `Q` | quit |
 
-### While a video plays
+While a video plays:
 
-The mpv window has the focus, so the pad goes straight to it:
-
-| key | action |
+| key | does |
 |---|---|
-| `←` `→` | seek 15 s |
-| `↑` `↓` | speed, ±0.25× per press (the hardware keys do the volume) |
-| `A` / `Enter` | speed back to 1× |
-| `Y` / `Space` | pause / resume |
-| `X` / `Tab` | switch the subtitle track |
-| `B` / `Esc` | close the video and drop back into the library |
+| `B` / Esc | close the video, back to the same row |
+| `Y` / Space | pause |
+| `X` / Tab | next subtitle track |
+| D-pad ← → | seek 15 s |
+| D-pad ↑ ↓ | speed, 0.25× per press |
+| `A` / Enter | speed back to 1× |
 
-### The handheld's own keys
+On the handheld itself: hold **Select** (1 s) for keypad mode, hold it again
+for desktop mode, **Start** for gamepad mode. Hard volume keys and the power
+button work as always.
 
-In **keypad mode** (hold *Select* for a second) the gamepad becomes a
-keyboard: the D-pad is the arrow keys, `A` is `Enter`, `B` is `Esc`, `X` is
-`Tab`, `Y` is `Space`. That is the mode the client is designed for; a USB or
-Bluetooth keyboard works just as well.
+## The screen
 
----
+| part | shows |
+|---|---|
+| top line, left | where you are in the library |
+| top line, right | free space on the card, battery, CPU, temperature |
+| rows | `▶` play, `▸` folder, `»27:31` a resume point, `✓` saved to the card |
+| bottom line | the keys that do something right now |
 
-## What it does
+| | |
+|---|---|
+| ![One series](img/jellyfin-series.png) | ![Seasons](img/jellyfin-seasons.png) |
 
-**Browse.** Libraries → series → seasons → episodes, plus movies, music
-videos and music. Music libraries are listed flat (one row per track), the way
-a jukebox wants them.
+![Episodes, with a resume point and a subtitle track](img/jellyfin-episodes.png)
 
-**Search.** `/` searches the folder you are in, on the server, so a title
-deep in a 533-item library is one keystroke away. `B` clears the filter
-before it leaves the folder.
+Rows show the year for series, the length and resolution for episodes and
+films, and the subtitle track that will be used. A series row opens its
+seasons, a season opens its episodes.
 
-**Resume.** The client reads the stored position of every item and shows it
-as `»27:31`; playing starts there. Coming back from a video (or from a
-download) restores the folder, the pages that were loaded and the row under
-the cursor.
+## Subtitles
 
-Two things make it work: the client keeps its own book of what it watched
-(`~/.local/state/jellyfin/positions.json`), because the server does not always
-keep the position a client reports; and a resumed item is streamed from the
-**original** file (bitrate capped) instead of the transcode — a transcode is
-one growing file that cannot be seeked into, so the video would start at the
-beginning no matter what position was asked for.
+The languages and the mode come from your Jellyfin account, not from the
+client: *Settings → Playback → Subtitles* in the web UI. The client follows
+it — preferred language first, then the file's own default, then the first
+track there is; mode `None` means no subtitles at all.
 
-**Subtitles.** The language comes from **your Jellyfin profile**, not from the
-client: *Settings → Playback → Subtitles* in the web UI sets the preferred
-languages and the mode, and the client follows them (preferred language →
-the media's own default track → the first track there is; mode `None` means
-no subtitles). The row shows the language that will be used. A saved copy
-keeps its subtitle as a sidecar next to the video, which mpv loads by itself.
+Saved copies keep their subtitle as a separate file next to the video, so
+they play with subtitles offline too.
 
-**Save to the card.** `Y` saves the selected item under `~/Offline` — an
-episode, a season, a whole series, a movie, a music video; whatever the
-selection covers. The download runs **detached**: the list stays usable
-while it works, the key line shows the progress, and the saved marks appear
-when it is done. Pressing `Y` again while a download runs **queues** the
-request instead of refusing it — the key line says how many jobs are ahead,
-and they drain one after the other. Three files are saved at a time, which is 1.65× the
-throughput on the handheld's Wi-Fi (a single stream is limited by the
-connection, not by the server). Files that are already there are skipped;
-`X` `X` removes them again — the server's copy is never touched. The free
-space is on the top line, and a save that clearly will not fit is refused
-before it starts.
+## Saving
 
-**Subtitles come with it.** Every saved file gets its subtitle as a sidecar
-next to it (`<name>.srt`), so a saved episode is fully offline — mpv loads
-the sidecar by itself. The track is the one the profile would play: the
-preferred language, else the media's default track, else the first text
-track.
+`Y` on an episode, a season, a series, a film or a music video saves it to
+`~/Offline`; a second `Y` on something saved toggles it off. Several files
+save at once in the background, so the list stays usable. Saved items get a
+`✓` and play from the card instantly.
 
-**Play.** The client asks Jellyfin to transcode to the panel
-(`640×480`, the server keeps the aspect ratio, so 16:9 becomes 640×360) and
-hands the result to mpv, which takes the whole screen. The position is
-reported back to Jellyfin every ten seconds, so the web UI shows what the
-handheld is playing.
+## Settings
 
-**Intro skipping.** If the server knows where the intro of an episode is
-(the media-segments API), the client jumps over it. On Jellyfin the data comes
-from the [*Intro Skipper*](https://github.com/ConfusedPolarBear/intro-skipper)
-plugin; without it there is nothing to skip.
-
-**The status line.** Free space on the card, battery, CPU load and
-temperature, refreshed every five seconds.
-
----
-
-## Configuration
-
-Everything lives in `/etc/default/jellyfin` on the device (that file is
-device state; the repository only ships the template).
-
-```sh
-JELLYFIN_URL="http://192.168.1.60:8096"
-DASH_API_KEY="<a user access token, see below>"
-```
+In `/etc/default/jellyfin`; the defaults are usually right.
 
 | variable | default | what it does |
 |---|---|---|
-| `JELLYFIN_URL` | — | the Jellyfin server |
-| `DASH_API_KEY` | — | a **user access token** (not an API key — see below) |
-| `JELLYFIN_MAX_WIDTH` | `640` | the width the server transcodes to; raise it for the HDMI monitor |
-| `JELLYFIN_MAX_HEIGHT` | `480` | the height the server transcodes to |
-| `JELLYFIN_VIDEO_BITRATE` | 4 bits/pixel/s | the video bitrate of the transcode (≈1.2 Mbit/s at 640×360) |
-| `JELLYFIN_AUDIO_BITRATE` | `96000` | the audio bitrate of the transcode |
-| `JELLYFIN_STREAM_TRANSCODE` | `1` | `0` streams the original file instead of a transcode |
-| `JELLYFIN_DL_TRANSCODE` | `1` | `0` saves the original file instead of a transcode |
-| `JELLYFIN_DL_TRANSCODE_MB` | `1024` | originals above this size are transcoded even if they fit the panel |
-| `JELLYFIN_SUB_LANGUAGES` | — | overrides the profile's subtitle languages, e.g. `ita,eng` |
-| `JELLYFIN_SKIP_INTRO` | `1` | `0` does not skip intros/recaps |
-| `JELLYFIN_DOWNLOAD_WORKERS` | `3` | how many files are saved at once |
-| `JELLYFIN_OFFLINE_DIR` | `~/Offline` | where the saved copies go (never `/tmp`: it is a 128 MB tmpfs) |
+| `JELLYFIN_MAX_WIDTH` | `640` | size the server transcodes to (raise for an HDMI monitor) |
+| `JELLYFIN_MAX_HEIGHT` | `480` | |
+| `JELLYFIN_VIDEO_BITRATE` | ≈1.2 Mbit/s | |
+| `JELLYFIN_SUB_LANGUAGES` | — | override the profile's subtitle languages |
+| `JELLYFIN_DOWNLOAD_WORKERS` | `3` | files saved at once |
+| `JELLYFIN_OFFLINE_DIR` | `~/Offline` | where saved copies go |
+| `JELLYFIN_SKIP_INTRO` | `1` | `0` does not skip intros the server marks |
+| `JELLYFIN_RESUME_MINIMUM` | `10` | positions shorter than this are ignored |
 
----
+## If something is wrong
 
-## The Jellyfin side
-
-### Use a user token, not an API key
-
-An API key creates an **anonymous** session on Jellyfin 12, and the server
-refuses to store a playback position for it. A user access token creates a
-real session: the server logs *"User admin started playback"*, keeps the
-position, and the web UI shows the handheld's progress.
-
-A user token can be minted **without the password**, with the server's
-QuickConnect flow (three `curl` calls; the recipe is in
-[desktop.md](desktop.md#a-user-token-for-the-client)).
-
-### What the client follows from the profile
-
-| profile field | effect |
-|---|---|
-| `SubtitleLanguagePreference` | the preferred subtitle languages, in order |
-| `SubtitleMode` | `Default`, `Always`, `OnlyForced`, `Smart` or `None` |
-
-### What the client writes back
-
-- the playback position, every ten seconds and at the end
-  (`/Sessions/Playing/Progress`), so "continue watching" works
-- the played state, the same way the web client does
-
----
-
-## The mpv side
-
-`/etc/mpv/input-handtop.conf` holds the pad bindings during playback (it is
-read *in addition* to mpv's own bindings).
-
-The decode path is **zero-copy** (`--hwdec=drm`) for every file: the Cedrus
-driver gives the decoded picture a 64-byte aligned stride, so panfrost can
-import the dmabuf whatever the width is (the driver used to align the
-stride to 16 bytes, and panfrost then refused every picture whose width was
-not a multiple of 64 — the video area stayed a flat blue rectangle, and the
-client had to fall back to the copy path). Measured on the device at
-640×360: **16 % CPU** with zero-copy against 28 % for the copy path, and 0
-dropped frames.
-
----
-
-## Files
-
-| path | what |
-|---|---|
-| `/usr/local/bin/jellyfin` | the client (one Python file, no dependencies beyond Textual) |
-| `/usr/local/share/applications/jellyfin.desktop` | the drawer entry (shown as "Jellyfin") |
-| `/usr/local/share/rg35xxh/icons/app-jellyfin.png` | the icon (56 px pixel art, plus a `-light` variant) |
-| `/etc/mpv/input-handtop.conf` | the pad bindings during playback |
-| `/etc/default/jellyfin` | the configuration (device state) |
-| `~/Offline/` | the saved copies and their subtitles |
-
----
-
-## Troubleshooting
-
-**The video is blue.** That is the zero-copy import failing on a stride
-panfrost does not accept. The client predicts the width and checks the real
-one, so it should not happen; if it does, the video switches to the copy
-path by itself within a second.
-
-**No subtitles.** The client follows the profile: check *Settings → Playback
-→ Subtitles* in the web UI, and check that the track is a text one (srt,
-ass, vtt — image subtitles like PGS cannot be rendered as a sidecar).
-
-**The list is empty.** The key line says `cannot reach …` when the server
-cannot be reached.
-
-**The resume point does not move.** The position is stored per user; an API
-key cannot store one. Use a user token.
-
----
-
-## Development
-
-```sh
-# the headless test (needs a Jellyfin server; no device needed)
-JELLYFIN_URL=http://192.168.1.60:8096 JELLYFIN_KEY=… python3 tools/test-jellyfin-tui.py
-
-# regenerate the mocked screenshots in this document
-python3 tools/jellyfin-mock.py docs/img
-
-# run the mock on the handheld itself (for photographing it)
-scp tools/jellyfin-mock.py goblin:/tmp/ && ssh goblin 'foot -e "python3 /tmp/jellyfin-mock.py --live"'
-ssh goblin 'grim /tmp/shot.png'   # and pull the picture back
-
-# push the client to the handheld
-tools/deploy.sh jellyfin
-```
+- **The list is empty, "cannot reach …"** — the server URL or the token is
+  wrong, or the handheld is off the network.
+- **No subtitles** — check the profile (above) and that the file has a text
+  subtitle track (srt, ass, vtt; image subtitles cannot be used).
+- **The resume point does not move** — an API key was used instead of a user
+  token.
+- **It refuses to play** — the server has transcoding disabled.

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Render the jellyfin client with fake data, for the documentation.
+"""Render the Jellyfin client against a demo server, for the documentation.
 
 The mock drives the *real* app - real widgets, real CSS, real layout - and
-only replaces the Jellyfin server with a canned one, so the screenshots
-cannot drift from the UI. Every name in the fake data is invented.
+only replaces the Jellyfin server with a canned one, so the pictures cannot
+drift away from the UI.
 
 Usage:
     python3 tools/jellyfin-mock.py docs/img     # render the pictures
@@ -27,7 +27,7 @@ g = importlib.machinery.SourceFileLoader("jellyfin_app", str(APP)).load_module()
 
 # --------------------------------------------------------------- fake server
 
-def media(width=1920, height=1080, minutes=42, year=2024, subs=("ita",)):
+def media(width=1920, height=1080, minutes=42, year=2024, subs=("eng",)):
     streams = [{"Type": "Video", "Width": width, "Height": height, "Codec": "h264"},
                {"Type": "Audio", "Codec": "aac", "Language": "jpn"}]
     for index, language in enumerate(subs):
@@ -131,7 +131,7 @@ class FakeServer(g.Jellyfin):
         if endpoint.startswith("/Users/") and endpoint.endswith("/Items/Resume"):
             return {"Items": []}
         if endpoint.startswith("/Users/"):
-            return {"Configuration": {"SubtitleLanguagePreference": "ita,eng",
+            return {"Configuration": {"SubtitleLanguagePreference": "eng",
                                       "SubtitleMode": "Always"}}
         if endpoint.startswith("/MediaSegments/"):
             return {"Items": []}
