@@ -162,12 +162,33 @@ writes word N to VE offset `N * 4` with `DWLWriteReg`, and `Vp9AsicRun` then
 writes 0x34/0x38/0x3c and kicks 0x04. The complete map is in
 `docs/vp9-h700-regs.h` (index, byte offset, mask, shift).
 
-What is still open before M2 can land:
+**M2 code landed** (engine still not started). `cedrus_vp9.c` now fills the
+block from the stateless controls: picture size (word 4), width in 4-pixel
+units (word 20), tile flag/counts (word 10), tile columns log2 (word 167), the
+DMA tile table (1776 B, allocated in `start()`), and the reference slots (words
+33-38: `ref_w << 16 | ref_h` and the `<< 14` scales). Device evidence, 720p
+VP9 profile 0, tiles 2/0:
 
-- the reference-slot mapping (index 175 and friends repeat inside the
-  `SetReferenceFrames` loop, so the per-slot indices come from the part of that
-  function after 0x55e8);
+```
+cedrus: VP9 1280x720 profile 0 tiles 2/0: size=0x05001680 width4=0x01410000
+        tile=0x00408002 ref0=0x050002d0 scale0=0x40004000
+```
+
+which is the vendor arithmetic exactly (`(1280+7)/8 << 19 | (720+7)/8 << 6`,
+`((1280+7)&~3)/4 << 16`, `4 << 20 | 1 << 15 | tiled`, `1280 << 16 | 720`,
+`1.0` in 14-bit fixed point); the first frame has `ref0 = 0` because a keyframe
+has no references. H.264 gate re-run after the install: unchanged.
+
+Still open before the engine can be kicked:
+
+- the engine mode word (word 0 is not in the flushed set; `Vp9AsicInit` writes
+  13 into word 3) and the kick sequence (`0x34/0x38/0x3c` = ASIC config words
+  13-15 from `DWLReadAsicConfig`, then `0x04 = 0x11`);
+- the bitstream and output picture addresses: `Vp9AsicSetOutput` fills words
+  0x104/0x18c/0x214 from three plane arrays, and the reference picture
+  addresses sit at 0x10c/0x12c/0x134 and friends - the exact field names need
+  the vendor structure layout;
+- the tile table DMA address register (the vendor hands it to a cache op, not
+  to the block);
 - `SetLoopFilter` and `SetSegmentation` values (M3);
-- the 3744-byte probability block (M4), the `Vp9AsicProbUpdate` layout;
-- the tile table hand-off: `ctx->0x384` is a separate 1776-byte buffer flushed
-  through the vendor's cache op, so cedrus needs a DMA buffer for it.
+- the 3744-byte probability block (M4), the `Vp9AsicProbUpdate` layout.
