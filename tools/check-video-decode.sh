@@ -88,17 +88,17 @@ fi
 grep -aE 'Using hardware decoding|Using software decoding' "$T/mpv.log" | head -2 | sed 's/^/        /'
 
 echo
-echo "mpv --hwdec=auto-safe zero-copy (60 frames, what the image ships):"
-timeout 90 mpv --hwdec=auto-safe --vo=gpu --gpu-context=wayland --no-audio --frames=60 \
-      --msg-level=all=v -- "$FILE" > "$T/mpv-zerocopy.log" 2>&1
-if grep -qa 'Using hardware decoding (drm' "$T/mpv-zerocopy.log" \
-   && grep -qa 'dmabuf interop' "$T/mpv-zerocopy.log"; then
-  chk "mpv renders zero-copy (drmprime EGL dmabuf interop)" 0
+echo "mpv zero-copy, shipped config (60 frames, vo=dmabuf-wayland):"
+timeout 90 mpv --no-config --hwdec=drm --hwdec-codecs=h264,hevc,mpeg2video,vp8,vp9 \
+      --vo=dmabuf-wayland --no-audio --frames=60 \
+      --msg-level=all=info -- "$FILE" > "$T/mpv-zerocopy.log" 2>&1
+if grep -qa 'Using hardware decoding (drm' "$T/mpv-zerocopy.log"; then
+  chk "mpv renders zero-copy (drmprime, dmabuf-wayland)" 0
 else
-  chk "mpv renders zero-copy (drmprime EGL dmabuf interop)" 1
+  chk "mpv renders zero-copy (drmprime, dmabuf-wayland)" 1
 fi
-grep -aE 'Using hardware decoding|dmabuf interop|Using software decoding' "$T/mpv-zerocopy.log" \
-  | head -3 | sed 's/^/        /'
+grep -aE 'Using hardware decoding|Using software decoding|Cannot convert' "$T/mpv-zerocopy.log" \
+  | head -2 | sed 's/^/        /'
 
 # A picture whose width is not a multiple of 64 is the case the driver's
 # 64-byte stride exists for: Mali only imports linear surfaces whose stride
