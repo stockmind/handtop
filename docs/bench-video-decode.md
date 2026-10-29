@@ -73,3 +73,53 @@ bash tools/bench-video-matrix.sh
 The source clip is not in the repo (copyright, and 159 MB); re-create it from the
 Jellyfin server with the item id and offsets recorded in this file's header, or
 use any 90 s 1080p clip and re-derive the numbers - the ratios are what matter.
+
+## Matrix by codec and player (2026-10-29)
+
+Every row below was measured on the device; blank cells were not measured rather
+than guessed. Metric: VPU interrupts in `/proc/interrupts` over 10 s (one per
+decoded frame - 24 fps content gives ~240), CPU of the player's process tree as
+a share of one core, RSS of that tree.
+
+### mpv, zero-copy (`--hwdec=drm --vo=dmabuf-wayland`), 90 s clips
+
+| codec | ms/frame | % of one core @24 fps | VPU |
+|---|---|---|---|
+| H.264 1080p | 8.2 | 20 | yes (242 irq/10 s) |
+| HEVC 1080p | 8.1 | 19 | yes |
+| HEVC 720p 10-bit | 7.4 | 18 | yes |
+| VP9 1080p | 7.6 | 18 | yes (244 irq/10 s) |
+| VP9 720p 10-bit | 6.9 | 16 | yes |
+| VP8 720p | 6.8 | 16 | yes |
+| MPEG-2 1080p | 7.2 | 17 | yes |
+
+Software decode in mpv for the same H.264 clip: 107 % of one core, 0 interrupts.
+Per-codec software numbers are in the ffmpeg `sw->null` column above
+(32-49 ms/frame for H.264/HEVC/VP9, 12-13 ms/frame for MPEG-2/VP8).
+
+### Players, H.264 and VP9 1080p
+
+| player | decode | VPU irq/10 s | CPU | RAM |
+|---|---|---|---|---|
+| VLC (`--avcodec-hw=vaapi`) | VPU | 241-289 | **3-4 %** | ~142 MB |
+| mpv (`--hwdec=drm`) | VPU | 242 | **9 %** | ~129 MB |
+| Chromium (VA-API) | VPU | 242 (H.264), 244 (VP9) | 129 % (H.264), 57 % (VP9) | ~1.0 GB |
+| mpv (`--hwdec=no`) | software | 0 | ~107 % | - |
+| Firefox ESR (VA-API attempted) | software | 0 | 182-186 % | not measured |
+
+- **All seven codecs are hardware-decoded in mpv and VLC.** VLC was verified per
+  codec with the interrupt counter: VP9 8-bit 240, VP9 10-bit 241, VP8 242,
+  MPEG-2 241, HEVC 10-bit 241, H.264 289.
+- **Chromium** hardware-decodes H.264 and VP9 through VA-API (interrupt counts
+  match the frame count); its cost is the browser, not the decoder - 57 % for VP9
+  vs 129 % for H.264, and ~265 % on YouTube (page + compositor + 1 GB runtime).
+- **Firefox** never reached the VPU in any run (0 interrupts), with or without
+  `media.ffmpeg.vaapi.enabled`, force-enabled hardware decode,
+  `MOZ_DISABLE_RDD_SANDBOX` and `gfx.webrender.all`.
+- RAM is the browser tax: mpv/VLC live in 130-140 MB, Chromium in ~1 GB.
+
+A fully automated sweep of 7 codecs x 4 players x hw/sw was attempted twice on
+2026-10-29; both runs stalled on the device (the harness blocked when a player's
+process tree was empty), so this table combines the measurements that did
+complete. Re-running `tools/bench-video-matrix.sh` with a fixed process sampler
+is the way to fill the blank cells.
