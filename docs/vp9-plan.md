@@ -197,9 +197,24 @@ libva-v4l2request: decoding vp9 via /dev/video0 [cedrus] (media /dev/media0)
 `/etc/mpv/mpv.conf` now lists `vp9` in `hwdec-codecs`, so the image's default
 player uses it without any flag.
 
-Remaining: 10-bit and odd widths (M7, needs `0412`/`0413`/`0417`; recipe in
-`build/kernel/libreelec/README.md`), a 1080p VP9 soak, and M8 becomes "review
-Jernej's series rather than post a competing one".
+**M7 - 10-bit works, odd widths only zero-copy.** With `0412`/`0413`/`0415`/
+`0417`/`0418` added, the capture queue offers P010 and profile 2 decodes
+bit-exactly:
+
+```
+VP9 10-bit 720p: 60/60 frames, 0 decode errors, PSNR average:inf (p010le)
+VP9 8-bit 720p:  identical to software
+H.264 1080p:     122 frames, 0 decode errors
+```
+
+Widths that are not a multiple of 64 (854, 1366) decode correctly zero-copy
+(`--hwdec=drm`: real picture on screen) but the *copy* path is black or blocky.
+H.264 shows the same corruption there, so it is the 64-byte stride behaviour,
+not the VP9 backend; the copy path's stride handling needs its own look.
+
+What is left: a 1080p VP9 soak (the earlier "device died" was a Wi-Fi
+re-association, not a hang), the copy-path stride bug above, and M8 becomes
+"review Jernej's series rather than post a competing one".
 
 ## What the hand-rolled experiment established (superseded, kept for the record)
 
