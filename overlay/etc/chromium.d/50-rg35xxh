@@ -1,2 +1,9 @@
 # RG35XX H: run Chromium as a native Wayland client and skip the default-browser prompt.
 export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --ozone-platform=wayland --no-default-browser-check"
+
+# Video: keep YouTube on VP9, which the video engine decodes in hardware.
+# Without this the page negotiates AV1 (this SoC has no AV1 decoder) and
+# decodes it on the CPU at 200-300 % of one core; with it the player reports
+# vp09.* and libva hands the frames to /dev/video0. The extension only hides
+# AV1 from YouTube's capability queries - see docs/video-decode.md.
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --load-extension=/usr/lib/handtop/yt-prefer-vp9"

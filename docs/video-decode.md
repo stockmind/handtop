@@ -144,24 +144,31 @@ Two things about heights are worth knowing.
 
 ### YouTube in the browser
 
-Measured 2026-10-29 on the device, Chromium 155, `LIBVA_DRIVER_NAME=v4l2_request`
-and `LIBVA_V4L2_TRACE=1`, two videos (Big Buck Bunny 4K60, "Me at the zoo"):
+YouTube picks its codec by asking the browser what it can play, and this
+Chromium advertises AV1 - which the H616/H700 has no decoder for. Netflix-style
+DASH player, software dav1d, 200-300 % of one core at 480p, and VA-API never
+gets a frame (the driver initialises, `decoding ... via /dev/video0` never
+appears). Measured on the device 2026-10-29 with the player's own stats
+(`getStatsForNerds()` over CDP): `codecs: av01.0.04M.08 (397)`.
+
+Hiding AV1 from the page's capability queries flips it to VP9, and the VPU
+takes over. The image now ships a two-file extension for that
+(`/usr/lib/handtop/yt-prefer-vp9`, loaded by `/etc/chromium.d/50-rg35xxh`): it
+overrides `MediaSource.isTypeSupported`, `HTMLMediaElement.canPlayType` and
+`navigator.mediaCapabilities.decodingInfo` for `av01` only, only on
+youtube.com. Verified with Chromium launched exactly as the image does:
 
 ```
-cpu: 246-283 % of one core, video plays, no dropped/failed frames visible
-libva-v4l2request: detected ...      <- driver initialised
-"decoding ... via /dev/video0"       <- never appears
+codecs: vp09.00.51.08.01.01.01.01.00 (244) / opus (251)   <- VP9 now
+libva-v4l2request: decoding vp9 via /dev/video0 [cedrus]  <- VPU, was absent before
 ```
 
-So YouTube still runs on the CPU even though the same browser decodes a *local*
-VP9 file on the VPU (the trace shows `decoding vp9 via /dev/video0 [cedrus]` and
-the screenshot is the real picture). The difference is the delivery path: at
-`file://` Chromium uses the normal decoder, for YouTube it goes through MSE, and
-this build does not hand MSE frames to VA-API. Whether the stream it picks is
-AV1 (which this SoC cannot decode at all, only the CPU can) or VP9 is not
-settled - the watch page advertises `av01.*` codecs to a browser-like client, so
-AV1 is the likely pick. Both halves (MSE -> VA-API, and hiding AV1 so YouTube
-falls back to VP9) are browser-side work, not driver work.
+The same trick was confirmed first by injecting the override over CDP without
+the extension, so the extension is only packaging. Delete it (or its
+`--load-extension` flag) for stock behaviour; AV1 content is then decoded on the
+CPU again. A clean playback-CPU figure for YouTube still needs a profile with
+the consent wall accepted - the fresh profiles used for these runs stop at that
+wall, and the numbers there measure the wall, not the video.
 
 ### Throughput: zero-copy vs copy
 

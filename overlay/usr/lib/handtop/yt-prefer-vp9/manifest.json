@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Prefer VP9 (hardware decode)",
+  "version": "1.0",
+  "description": "Hides AV1 from media capability queries so YouTube serves VP9, which the Allwinner video engine in this device decodes in hardware. Loaded by /etc/chromium.d/50-rg35xxh; see docs/video-decode.md.",
+  "content_scripts": [
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN",
+      "js": ["prefer-vp9.js"]
+    }
+  ]
+}
