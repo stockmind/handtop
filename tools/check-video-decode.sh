@@ -139,21 +139,30 @@ fi
 # key frames decoded and everything looked fine in a short test.
 vp9_check() {
 	local f=$1 label=$2
-	local wh psnr rc
+	local wh pix_fmt raw_fmt psnr rc
 	wh=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$f")
+	pix_fmt=$(ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$f")
+	case "$pix_fmt" in
+		yuv420p) raw_fmt=nv12 ;;
+		yuv420p10le) raw_fmt=p010le ;;
+		*) chk "VP9 $label has supported pixel format ($pix_fmt)" 1; return ;;
+	esac
 	timeout 120 ffmpeg -hide_banner -nostdin -v verbose -hwaccel v4l2request \
 		-hwaccel_output_format drm_prime -i "$f" -frames:v 10 \
-		-vf hwdownload,format=nv12 -f rawvideo "$T/vp9-hw.yuv" -y > "$T/vp9-hw.log" 2>&1
+		-vf "hwdownload,format=$raw_fmt" -f rawvideo "$T/vp9-hw.yuv" -y > "$T/vp9-hw.log" 2>&1
 	rc=$?
 	grep -qa 'Using V4L2 media driver cedrus' "$T/vp9-hw.log" \
 		&& chk "VP9 $label goes through the VPU (cedrus)" 0 \
 		|| chk "VP9 $label goes through the VPU (cedrus)" 1
 	[ $rc -eq 0 ] && chk "VP9 $label decodes without crashing (exit 0)" 0 \
 		|| chk "VP9 $label decodes without crashing (exit $rc)" 1
+	if [ $rc -ne 0 ]; then
+		tail -20 "$T/vp9-hw.log" | sed 's/^/        /'
+	fi
 	timeout 120 ffmpeg -hide_banner -nostdin -v error -i "$f" -frames:v 10 \
-		-pix_fmt nv12 -f rawvideo "$T/vp9-sw.yuv" -y >/dev/null 2>&1
-	psnr=$(ffmpeg -hide_banner -nostdin -f rawvideo -pix_fmt nv12 -s "$wh" -i "$T/vp9-hw.yuv" \
-		-f rawvideo -pix_fmt nv12 -s "$wh" -i "$T/vp9-sw.yuv" -lavfi psnr -f null - 2>&1 \
+		-pix_fmt "$raw_fmt" -f rawvideo "$T/vp9-sw.yuv" -y >/dev/null 2>&1
+	psnr=$(ffmpeg -hide_banner -nostdin -f rawvideo -pix_fmt "$raw_fmt" -s "$wh" -i "$T/vp9-hw.yuv" \
+		-f rawvideo -pix_fmt "$raw_fmt" -s "$wh" -i "$T/vp9-sw.yuv" -lavfi psnr -f null - 2>&1 \
 		| grep -o 'average:[^ ]*' | head -1)
 	case "$psnr" in
 	average:inf|average:infinity*)

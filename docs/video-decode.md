@@ -79,8 +79,8 @@ same modules deployed by hand rather than that image.
 Verified on the device 2026-10-29 with 8-bit profile 0, 720p: the VPU decodes
 the clip and the frames come out **bit-identical to a software decode**
 (`PSNR average:inf`, 60/60 frames, `0 decode errors`); 1080p reports
-`0 decode errors` as well. `tools/check-video-decode.sh` has a VP9 section that
-decodes 10 frames twice (VPU and software) and fails below 35 dB.
+`0 decode errors` as well. `tools/check-video-decode.sh` compares 10 frames from
+the VPU and software in matching NV12 or P010 formats, and fails below 35 dB.
 
 1080p and 4K are bit-exact too (`PSNR average:inf`). Paced playback of
 the 1080p24 clip, 30 s per run, whole-mpv CPU as a share of one core:
@@ -121,23 +121,28 @@ LibreELEC's, and its header carries the align sweep.
 
 Two things about heights are worth knowing.
 
-- **A line of green/magenta at the bottom in Chromium.** Fixed 2026-10-29
-  (`0431-cedrus-vp9-clear-padding.patch`): the padding rows are cleared in
-  `cedrus_vp9_setup()`, ~23 KB per frame, so they are black instead of stale
-  colour noise. Background: the driver reports a
-  16-aligned capture height (1088 for a 1080-line stream, 240 for 234), because
+- **A line of green/magenta at the bottom in Chromium.** The reported line was
+  already present before our padding patches; the original file and codec were
+  not recorded. Patch `0432-cedrus-clear-padding-all-codecs.patch` clears capture
+  padding rows in `cedrus_device_run()` for supported linear 4:2:0 layouts, using
+  neutral chroma, about 23 KB per frame. On Goblin, Chromium hardware-decoded
+  VP9 at 1920x804 with a 1920x816 capture surface after this patch; the captured
+  screen showed no tinted bottom line. Other codecs have not been visually
+  checked. Background: the driver
+  rounds capture height to 16 lines (1088 for 1080, 240 for 234), because
   the engine writes the reconstruct surface in 16-line blocks and the chroma
   plane has to sit where the hardware puts it. Chromium's VA-API path sizes its
-  surfaces from that format, so up to 15 padding rows are part of the picture it
-  displays, and the bottom edge shows their (garbage) chroma - a thin green and
-  magenta line. mpv and ffmpeg take the coded size from the bitstream and crop
+  surfaces from that format, so up to 15 padding rows can be part of the picture
+  it displays. Before the clear, stale chroma produced a thin green or magenta
+  line. mpv and ffmpeg take the coded size from the bitstream and crop
   the padding off, which is why they look clean. Reporting the coded height
   instead was tried on 2026-10-29 and is /not/ an option: the chroma plane then
   lands at `bpl*coded_h` while the engine writes it at `bpl*ALIGN(coded_h,16)`,
   and any height that is not a multiple of 16 hangs the engine (the decode never
   completes, the process becomes unkillable and shutdown waits for its 90 s
-  timeout). A fix belongs in the VA driver (size the surface from the coded
-  size) or in the consumer (crop), not in cedrus.
+  timeout). Clearing the padding in cedrus keeps the aligned capture size the
+  engine requires; cropping in the VA driver or consumer is another possible
+  way to hide it.
 
 - **10-bit with a height that is not a multiple of 16** (234, 360) is close but
   not exact: `PSNR 32.8 dB` at 416x234 and `59.9 dB` at 640x360, against `inf`

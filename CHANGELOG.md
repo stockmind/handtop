@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix: Cedrus padding clears now respect planar and semiplanar layouts and odd
+  heights; the VP9 decode gate compares 10-bit frames as P010.
+
 - New: VP9 decodes on the VPU, and so does H.265 Main10. The video engine on
   this SoC has a VP9 decoder in the H.265 slot that mainline cedrus never
   driver'd; the image now carries Jernej Skrabec's out-of-tree series (from

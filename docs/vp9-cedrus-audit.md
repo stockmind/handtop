@@ -10,12 +10,11 @@ check it rather than trust it. Branch `vp9-cedrus`, merged to `main` at
 |---|---|---|---|
 | 1 | VP9 backend for cedrus (H.265 engine slot), P010 output, 10-bit helpers, H.265 P010 | `build/kernel/libreelec/0410…0421` | no — Jernej Skrabec via LibreELEC, see `build/kernel/libreelec/README.md` |
 | 2 | VP9 reference stride (`SCALE1_STRIDE_ALIGN`) derived from the reconstruct surface | `build/kernel/libreelec/0430-cedrus-vp9-stride-align.patch` | yes |
-| 3 | Clear the 16-line padding rows, VP9 only | `build/kernel/libreelec/0431-…` | yes |
-| 4 | Same padding clear for every codec, in `cedrus_device_run()` | `build/kernel/libreelec/0432-…` | yes |
-| 5 | Ship `v4l2-vp9.ko` (helper module ROCKNIX lacks) + symbol/vermagic checks | `build/06b-cedrus.sh` | yes |
-| 6 | mpv defaults: `vo=dmabuf-wayland,gpu`, `vp9` in `hwdec-codecs` | `overlay/etc/mpv/mpv.conf` | yes |
-| 7 | YouTube on VP9 (extension hiding AV1 from capability queries) | `overlay/usr/lib/handtop/yt-prefer-vp9/`, `overlay/etc/chromium.d/50-rg35xxh` | yes |
-| 8 | Gates and harnesses | `tools/check-video-decode.sh`, `tools/bench-video-matrix.sh`, `tools/vp9-soak.sh`, `tools/check-video-matrix.sh` | yes |
+| 3 | Clear linear 4:2:0 capture padding rows for every codec, in `cedrus_device_run()` | `build/kernel/libreelec/0432-…` | yes |
+| 4 | Ship `v4l2-vp9.ko` (helper module ROCKNIX lacks) + symbol/vermagic checks | `build/06b-cedrus.sh` | yes |
+| 5 | mpv defaults: `vo=dmabuf-wayland,gpu`, `vp9` in `hwdec-codecs` | `overlay/etc/mpv/mpv.conf` | yes |
+| 6 | YouTube on VP9 (extension hiding AV1 from capability queries) | `overlay/usr/lib/handtop/yt-prefer-vp9/`, `overlay/etc/chromium.d/50-rg35xxh` | yes |
+| 7 | Gates and harnesses | `tools/check-video-decode.sh`, `tools/bench-video-matrix.sh`, `tools/vp9-soak.sh`, `tools/check-video-matrix.sh` | yes |
 
 Patch chain order matters: `0001`,`0002` (in `build/kernel/`) then
 `build/kernel/libreelec/*` sorted. Verified to apply cleanly from a pristine
@@ -74,11 +73,13 @@ because of exactly that mistake.
 
 ## Claims that are NOT established (do not cite)
 
-1. **H.264/HEVC padding-row artifact fixed** — the code is in (`0432`), decode is
-   bit-exact, but the visual before/after comparison failed twice: the test
-   clips were letterboxed and the crop geometry was wrong, so both "before" and
-   "after" looked identical (black). The VP9 instance of the same artifact was
-   confirmed gone; H.264/HEVC is inferred, not shown.
+1. **Padding-row artifact across codecs is only partly verified visually.** The
+   originally reported green/magenta line predated our patches, but its source
+   file and codec were not recorded. With the revised `0432` module, Chromium
+   hardware-decoded VP9 at 1920x804 (capture surface 1920x816) on Goblin, and a
+   screen capture showed no tinted bottom line. H.264/HEVC remain unverified;
+   earlier comparisons for those clips were unusable because letterboxing and
+   crop geometry made both views black.
 2. **Firefox hardware decode** — it plays, but no VA-API activity was ever
    observed. "Unmeasured", not "broken".
 3. **Per-codec numbers for Chromium, VLC-software, Firefox RAM** — the automated
