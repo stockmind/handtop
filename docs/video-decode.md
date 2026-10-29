@@ -67,6 +67,15 @@ cedrus has no backend for it; this image carries Jernej Skrabec's out-of-tree
 series (provenance and applied patches: `build/kernel/libreelec/README.md`),
 plus the `v4l2-vp9` helper module it needs, which ROCKNIX does not ship.
 
+An image with all of it builds from the repo: `build/06b-cedrus.sh` applies the
+patch series, builds `sunxi-cedrus.ko` plus `v4l2-vp9.ko`, checks their symbol
+versions against ROCKNIX's modules and installs both; `build/10-image.sh` then
+packs `handtop-20261029-ef99793.img.xz`. `modules.dep` on that image lists
+`extra/sunxi-cedrus.ko: kernel/drivers/media/v4l2-core/v4l2-vp9.ko`, and
+`/etc/mpv/mpv.conf` carries the `vp9` whitelist entry and the
+`vo=dmabuf-wayland,gpu` default. The device under test here still runs the
+same modules deployed by hand rather than that image.
+
 Verified on the device 2026-10-29 with 8-bit profile 0, 720p: the VPU decodes
 the clip and the frames come out **bit-identical to a software decode**
 (`PSNR average:inf`, 60/60 frames, `0 decode errors`); 1080p reports
