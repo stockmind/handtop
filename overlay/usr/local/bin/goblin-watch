@@ -2,8 +2,10 @@
 # Play a video/stream URL through the VPU:  goblin-watch <url> [mpv options]
 #
 # yt-dlp extracts (YouTube, Twitch, ...), mpv plays it zero-copy via the Cedrus
-# VPU. H.264 is preferred because that is the only codec the hardware decodes,
-# and YouTube's DASH video and audio streams are muxed by mpv.
+# VPU. H.264 is preferred: it is the codec YouTube is most likely to have in
+# every resolution, it costs the least CPU on this box, and the hardware decodes
+# it. VP9/HEVC/VP8/MPEG-2 decode on the same block now (docs/video-decode.md), so
+# they are acceptable fallbacks when a stream has no H.264.
 #
 # Height cap: 480p by default. The panel is 640x480, and 480p costs 29% of one
 # core against 49% for 720p on the same video (measured 2026-10-23), with no

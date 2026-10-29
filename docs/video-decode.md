@@ -142,33 +142,47 @@ Two things about heights are worth knowing.
   in the P010 conversion path for the partial 16-line block; typical video
   heights (480, 576, 720, 1080) are unaffected.
 
-### YouTube in the browser
+### YouTube: the browser vs the native player
 
-YouTube picks its codec by asking the browser what it can play, and this
-Chromium advertises AV1 - which the H616/H700 has no decoder for. Netflix-style
-DASH player, software dav1d, 200-300 % of one core at 480p, and VA-API never
-gets a frame (the driver initialises, `decoding ... via /dev/video0` never
-appears). Measured on the device 2026-10-29 with the player's own stats
-(`getStatsForNerds()` over CDP): `codecs: av01.0.04M.08 (397)`.
+Measured on the device 2026-10-29, 854x480 stream of one video, CPU as a share of
+one core:
 
-Hiding AV1 from the page's capability queries flips it to VP9, and the VPU
-takes over. The image now ships a two-file extension for that
-(`/usr/lib/handtop/yt-prefer-vp9`, loaded by `/etc/chromium.d/50-rg35xxh`): it
-overrides `MediaSource.isTypeSupported`, `HTMLMediaElement.canPlayType` and
-`navigator.mediaCapabilities.decodingInfo` for `av01` only, only on
-youtube.com. Verified with Chromium launched exactly as the image does:
+| path | decoder | CPU |
+|---|---|---|
+| Chromium, AV1 (what YouTube picks by default) | software dav1d | ~280 % |
+| Chromium, VP9 forced by the shipped extension | software | ~240 % |
+| `goblin-tv` -> `goblin-watch` -> mpv (`bv*[vcodec^=avc1]`) | zero-copy VPU | ~21 % |
 
-```
-codecs: vp09.00.51.08.01.01.01.01.00 (244) / opus (251)   <- VP9 now
-libva-v4l2request: decoding vp9 via /dev/video0 [cedrus]  <- VPU, was absent before
-```
+What the browser does and does not do:
 
-The same trick was confirmed first by injecting the override over CDP without
-the extension, so the extension is only packaging. Delete it (or its
-`--load-extension` flag) for stock behaviour; AV1 content is then decoded on the
-CPU again. A clean playback-CPU figure for YouTube still needs a profile with
-the consent wall accepted - the fresh profiles used for these runs stop at that
-wall, and the numbers there measure the wall, not the video.
+- YouTube normally negotiates **AV1**, and the H616/H700 has no AV1 decoder, so
+  it decodes on the CPU (player stats fetched over CDP:
+  `codecs: av01.0.04M.08 (397)`).
+- A two-file extension shipped in the image (`/usr/lib/handtop/yt-prefer-vp9`,
+  loaded from `/etc/chromium.d/50-rg35xxh`) hides AV1 from
+  `MediaSource.isTypeSupported`, `canPlayType` and
+  `mediaCapabilities.decodingInfo` on youtube.com only, so YouTube serves
+  **VP9** instead (`codecs: vp09.00.51.08... (244)`, confirmed by the player).
+- That does **not** move the decode to the VPU. Chromium's MSE pipeline keeps
+  decoding in software even for VP9: libva logs
+  `decoding vp9 via /dev/video0 [cedrus]` once at setup and then stops, and the
+  CPU cost stays at ~240 %. The VPU is only used for progressive playback
+  (`file://`, direct streams) - the same VP9 file opened from disk goes through
+  `/dev/video0` frame after frame.
+- Tried and did not change it: `--enable-features=VaapiVideoDecoder`,
+  `AcceleratedVideoDecodeLinuxGL`, `AcceleratedVideoDecodeLinuxZeroCopyGL`,
+  `--enable-accelerated-video-decode`, `--ignore-gpu-blocklist`,
+  `--use-gl=egl` / `--use-angle=gl` / `--use-angle=gles`,
+  `--disable-features=Dav1dVideoDecoder`, and a Chrome/90 user agent. The GPU
+  process does log `Failed to create and initialize Vulkan implementation`
+  (`vkCreateInstance` -9) on every launch, which may be related but disabling
+  Vulkan did not help either.
+
+The extension is still shipped because VP9 software decoding costs ~15 % less
+than AV1 on this SoC, and it is what makes the "which codec did the page pick"
+question answerable. For actual VPU playback of YouTube, use the native client:
+`goblin-tv` browses and hands the URL to `goblin-watch`, which plays it through
+mpv with hardware decoding - that is the ~21 % row above.
 
 ### Throughput: zero-copy vs copy
 
