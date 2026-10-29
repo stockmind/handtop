@@ -1,0 +1,242 @@
+diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus.c b/drivers/staging/media/sunxi/cedrus/cedrus.c
+--- a/drivers/staging/media/sunxi/cedrus/cedrus.c	2026-10-21 14:23:10.242171443 +0200
++++ b/drivers/staging/media/sunxi/cedrus/cedrus.c	2026-10-29 16:47:57.757839130 +0100
+@@ -237,6 +237,18 @@
+ 	},
+ 	{
+ 		.cfg = {
++			.id	= V4L2_CID_STATELESS_VP9_FRAME,
++		},
++		.capabilities	= CEDRUS_CAPABILITY_VP9_DEC,
++	},
++	{
++		.cfg = {
++			.id	= V4L2_CID_STATELESS_VP9_COMPRESSED_HDR,
++		},
++		.capabilities	= CEDRUS_CAPABILITY_VP9_DEC,
++	},
++	{
++		.cfg = {
+ 			.id = V4L2_CID_STATELESS_HEVC_DECODE_PARAMS,
+ 		},
+ 		.capabilities	= CEDRUS_CAPABILITY_H265_DEC,
+@@ -651,6 +663,17 @@
+ 	.mod_rate	= 600000000,
+ };
+ 
++static const struct cedrus_variant sun50i_h616_cedrus_variant = {
++	.capabilities	= CEDRUS_CAPABILITY_UNTILED |
++			  CEDRUS_CAPABILITY_MPEG2_DEC |
++			  CEDRUS_CAPABILITY_H264_DEC |
++			  CEDRUS_CAPABILITY_H265_DEC |
++			  CEDRUS_CAPABILITY_H265_10_DEC |
++			  CEDRUS_CAPABILITY_VP8_DEC |
++			  CEDRUS_CAPABILITY_VP9_DEC,
++	.mod_rate	= 600000000,
++};
++
+ static const struct of_device_id cedrus_dt_match[] = {
+ 	{
+ 		.compatible = "allwinner,sun4i-a10-video-engine",
+@@ -698,7 +721,7 @@
+ 	},
+ 	{
+ 		.compatible = "allwinner,sun50i-h616-video-engine",
+-		.data = &sun50i_h6_cedrus_variant,
++		.data = &sun50i_h616_cedrus_variant,
+ 	},
+ 	{ /* sentinel */ }
+ };
+diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_dec.c b/drivers/staging/media/sunxi/cedrus/cedrus_dec.c
+--- a/drivers/staging/media/sunxi/cedrus/cedrus_dec.c	2026-08-16 23:32:26.000000000 +0200
++++ b/drivers/staging/media/sunxi/cedrus/cedrus_dec.c	2026-10-29 16:47:30.308998226 +0100
+@@ -86,6 +86,13 @@
+ 			V4L2_CID_STATELESS_VP8_FRAME);
+ 		break;
+ 
++	case V4L2_PIX_FMT_VP9_FRAME:
++		run.vp9.frame_params = cedrus_find_control_data(ctx,
++			V4L2_CID_STATELESS_VP9_FRAME);
++		run.vp9.hdr = cedrus_find_control_data(ctx,
++			V4L2_CID_STATELESS_VP9_COMPRESSED_HDR);
++		break;
++
+ 	default:
+ 		break;
+ 	}
+diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus.h b/drivers/staging/media/sunxi/cedrus/cedrus.h
+--- a/drivers/staging/media/sunxi/cedrus/cedrus.h	2026-08-16 23:32:26.000000000 +0200
++++ b/drivers/staging/media/sunxi/cedrus/cedrus.h	2026-10-29 16:47:24.469244825 +0100
+@@ -34,6 +34,7 @@
+ #define CEDRUS_CAPABILITY_MPEG2_DEC	BIT(3)
+ #define CEDRUS_CAPABILITY_VP8_DEC	BIT(4)
+ #define CEDRUS_CAPABILITY_H265_10_DEC	BIT(5)
++#define CEDRUS_CAPABILITY_VP9_DEC	BIT(6)
+ 
+ enum cedrus_irq_status {
+ 	CEDRUS_IRQ_NONE,
+@@ -81,6 +82,11 @@
+ 	const struct v4l2_ctrl_vp8_frame		*frame_params;
+ };
+ 
++struct cedrus_vp9_run {
++	const struct v4l2_ctrl_vp9_frame		*frame_params;
++	const struct v4l2_ctrl_vp9_compressed_hdr	*hdr;
++};
++
+ struct cedrus_run {
+ 	struct vb2_v4l2_buffer	*src;
+ 	struct vb2_v4l2_buffer	*dst;
+@@ -90,6 +96,7 @@
+ 		struct cedrus_mpeg2_run	mpeg2;
+ 		struct cedrus_h265_run	h265;
+ 		struct cedrus_vp8_run	vp8;
++		struct cedrus_vp9_run	vp9;
+ 	};
+ };
+ 
+@@ -206,6 +213,7 @@
+ extern struct cedrus_dec_ops cedrus_dec_ops_h264;
+ extern struct cedrus_dec_ops cedrus_dec_ops_h265;
+ extern struct cedrus_dec_ops cedrus_dec_ops_vp8;
++extern struct cedrus_dec_ops cedrus_dec_ops_vp9;
+ 
+ static inline void cedrus_write(struct cedrus_dev *dev, u32 reg, u32 val)
+ {
+diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_video.c b/drivers/staging/media/sunxi/cedrus/cedrus_video.c
+--- a/drivers/staging/media/sunxi/cedrus/cedrus_video.c	2026-10-22 02:13:56.846790892 +0200
++++ b/drivers/staging/media/sunxi/cedrus/cedrus_video.c	2026-10-29 16:47:33.723854025 +0100
+@@ -56,6 +56,11 @@
+ 		.capabilities	= CEDRUS_CAPABILITY_VP8_DEC,
+ 	},
+ 	{
++		.pixelformat	= V4L2_PIX_FMT_VP9_FRAME,
++		.directions	= CEDRUS_DECODE_SRC,
++		.capabilities	= CEDRUS_CAPABILITY_VP9_DEC,
++	},
++	{
+ 		.pixelformat	= V4L2_PIX_FMT_NV12,
+ 		.directions	= CEDRUS_DECODE_DST,
+ 		.capabilities	= CEDRUS_CAPABILITY_UNTILED,
+@@ -128,6 +133,7 @@
+ 	case V4L2_PIX_FMT_H264_SLICE:
+ 	case V4L2_PIX_FMT_HEVC_SLICE:
+ 	case V4L2_PIX_FMT_VP8_FRAME:
++	case V4L2_PIX_FMT_VP9_FRAME:
+ 		/* Zero bytes per line for encoded source. */
+ 		bytesperline = 0;
+ 		/* Choose some minimum size since this can't be 0 */
+@@ -372,6 +378,9 @@
+ 	case V4L2_PIX_FMT_VP8_FRAME:
+ 		ctx->current_codec = &cedrus_dec_ops_vp8;
+ 		break;
++	case V4L2_PIX_FMT_VP9_FRAME:
++		ctx->current_codec = &cedrus_dec_ops_vp9;
++		break;
+ 	}
+ 
+ 	/* Propagate format information to capture. */
+diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c
+--- a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c	2026-10-29 16:48:16.297640623 +0100
+@@ -0,0 +1,91 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Cedrus VPU driver
++ *
++ * VP9 backend for the Allwinner H616/H700 VPU.
++ *
++ * The VE register map is not documented in the H616 user manual; the offsets
++ * below come from the vendor decoder (libawvp9Hw.so, Vp9Asic* functions).
++ *
++ * Work in progress: the codec is advertised and the controls are wired up,
++ * register programming is not implemented yet, so every job is refused with
++ * -EINVAL instead of producing garbage.
++ */
++
++#include <linux/types.h>
++
++#include <media/videobuf2-dma-contig.h>
++
++#include "cedrus.h"
++#include "cedrus_hw.h"
++#include "cedrus_regs.h"
++
++static enum cedrus_irq_status
++cedrus_vp9_irq_status(struct cedrus_ctx *ctx)
++{
++	struct cedrus_dev *dev = ctx->dev;
++	u32 reg = cedrus_read(dev, VE_H264_STATUS);
++
++	/* FIXME: VP9 status bits are not known yet, share the VP8 ones. */
++	if (reg & (VE_H264_STATUS_DECODE_ERR_INT |
++		   VE_H264_STATUS_VLD_DATA_REQ_INT))
++		return CEDRUS_IRQ_ERROR;
++
++	if (reg & VE_H264_CTRL_SLICE_DECODE_INT)
++		return CEDRUS_IRQ_OK;
++
++	return CEDRUS_IRQ_NONE;
++}
++
++static void cedrus_vp9_irq_clear(struct cedrus_ctx *ctx)
++{
++	cedrus_write(ctx->dev, VE_H264_STATUS, VE_H264_STATUS_INT_MASK);
++}
++
++static void cedrus_vp9_irq_disable(struct cedrus_ctx *ctx)
++{
++	struct cedrus_dev *dev = ctx->dev;
++	u32 reg = cedrus_read(dev, VE_H264_CTRL);
++
++	cedrus_write(dev, VE_H264_CTRL, reg & ~VE_H264_CTRL_INT_MASK);
++}
++
++static int cedrus_vp9_setup(struct cedrus_ctx *ctx, struct cedrus_run *run)
++{
++	const struct v4l2_ctrl_vp9_frame *frame = run->vp9.frame_params;
++	const struct v4l2_ctrl_vp9_compressed_hdr *hdr = run->vp9.hdr;
++
++	if (!frame || !hdr) {
++		v4l2_err(&ctx->dev->v4l2_dev, "VP9: missing frame controls\n");
++		return -EINVAL;
++	}
++
++	v4l2_dbg(1, 2, &ctx->dev->v4l2_dev,
++		 "VP9 %ux%u profile %u, %u/%u header bytes, tiles %u/%u\n",
++		 frame->frame_width_minus_1 + 1,
++		 frame->frame_height_minus_1 + 1, frame->profile,
++		 frame->uncompressed_header_size,
++		 frame->compressed_header_size,
++		 frame->tile_cols_log2, frame->tile_rows_log2);
++
++	/* Register programming lands in M2. */
++	return -EINVAL;
++}
++
++static void cedrus_vp9_stop(struct cedrus_ctx *ctx)
++{
++	cedrus_engine_disable(ctx->dev);
++}
++
++static void cedrus_vp9_trigger(struct cedrus_ctx *ctx)
++{
++}
++
++struct cedrus_dec_ops cedrus_dec_ops_vp9 = {
++	.irq_clear	= cedrus_vp9_irq_clear,
++	.irq_disable	= cedrus_vp9_irq_disable,
++	.irq_status	= cedrus_vp9_irq_status,
++	.setup		= cedrus_vp9_setup,
++	.stop		= cedrus_vp9_stop,
++	.trigger	= cedrus_vp9_trigger,
++};
+diff -urN a/drivers/staging/media/sunxi/cedrus/Makefile b/drivers/staging/media/sunxi/cedrus/Makefile
+--- a/drivers/staging/media/sunxi/cedrus/Makefile	2026-08-16 23:32:26.000000000 +0200
++++ b/drivers/staging/media/sunxi/cedrus/Makefile	2026-10-29 16:47:24.439246092 +0100
+@@ -3,4 +3,4 @@
+ 
+ sunxi-cedrus-y = cedrus.o cedrus_video.o cedrus_hw.o cedrus_dec.o \
+ 		 cedrus_mpeg2.o cedrus_h264.o cedrus_h265.o \
+-		 cedrus_vp8.o
++		 cedrus_vp8.o cedrus_vp9.o

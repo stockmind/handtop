@@ -100,3 +100,22 @@ CPU for 10 s of 1080p24 H.264 through `v4l2request` + `drm_prime`:
 `utime=0.517 stime=0.387 rtime=2.220` = 41 % of one core; that is the number
 to keep flat when VP9 lands. The zero-copy mpv failure is the known
 `drmprime` EGL interop gap, unrelated to this work.
+
+**M1 done** (2026-10-29). `cedrus_vp9.c` added, the codec is advertised and
+the two stateless controls exist; `setup` refuses every job with `-EINVAL`:
+
+```
+v4l2-ctl -d /dev/video0 --list-formats-out
+  [4]: 'VP9F' (VP9 Frame, compressed)
+v4l2-ctl -d /dev/video0 --list-ctrls
+  vp9_frame_decode_parameters 0x00a40a2c (vp9-frame)
+  vp9_probabilities_updates   0x00a40a2d
+dmesg (ffmpeg -hwaccel v4l2request on vp9-720p.mkv):
+  cedrus: VP9 1280x720 profile 0, 10/162 header bytes, tiles 2/0
+  cedrus: Failed to setup decoding job: -22
+```
+
+The H.264 gate above still passes unchanged (same three `ok` lines and the
+same pre-existing zero-copy `FAIL`). Note for the check script: it picks the
+first video file under `~/Downloads`, so VP9 test clips live in
+`~/test-media`, not there, or every run measures VP9 by accident.
