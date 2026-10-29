@@ -185,18 +185,18 @@ has no references. H.264 gate re-run after the install: unchanged.
 Vp9AsicProbUpdate(ctx)           /* 3744-byte probability block */
 Vp9AsicInitPicture(ctx)          /* 17 fields, block words 3.. */
 Vp9AsicStrmPosUpdate(ctx, pos, len)   /* block word 6, bits 25..31 */
-Vp9AsicRun(ctx)                  /* flush block, 0x34/0x38/0x3c, 0x04 = 0x11 */
+Vp9AsicRun(ctx)                  /* flush block, then 0x04 = 0x11 */
 ctx->wait_irq()
 ```
 
-`Vp9AsicRun` reads block words 13-15 (`ctx+0x50`, `ctx+0x54`, `ctx+0x58`)
-and writes them to VE 0x34/0x38/0x3c right before the kick; those three words
-are AXI/bus configuration filled once from `DWLReadAsicConfig`, not per-frame.
+Block words 13-15 (`ctx+0x50/0x54/0x58`) are AXI/bus configuration filled once
+from `DWLReadAsicConfig`, and word 0 is the engine mode: it is written by
+libVE's `enableDecoder` (`bfi` of a 4-bit codec id into bits 0-3, plus bit 4 for
+codec id 0x116), never by the VP9 block, so a flush must leave word 0 alone.
 
-Picture addresses: `SetOutput` and `SetReferenceFrames` read three arrays of
+Picture addresses: `SetOutput` and `SetReferenceFrames` read arrays of
 `DWLRefFrm` descriptors at `ctx+0x3f4`, `ctx+0x4f4`, `ctx+0x5f4` (16-byte
-records, plane address in the second word, allocated by `Vp9MallocRefFrm`
-per index) and copy the address into these block offsets:
+records, plane address in the second word) and copy them into:
 
 | field | current picture | ref 0 | ref 1 | ref 2 |
 |---|---|---|---|---|
@@ -206,13 +206,33 @@ per index) and copy the address into these block offsets:
 | ref w<<16\|h | - | 0x084 | 0x088 | 0x08c |
 | hscale<<16\|vscale | - | 0x090 | 0x094 | 0x098 |
 
-Ref-valid bits are block words 0x2c (bits 2 and 0, refs 1 and 2) and 0x34
-(bit 10, ref 0). The uneven spacing of the luma/chroma offsets is the vendor
-structure layout, not an array: their `DWLRefFrm` record is copied field by
-field, so the next step is to read `DWLAllocRefFrm`/`Vp9MallocRefFrm` in
-libVE for that record and mirror it into cedrus's own block write.
+Ref-valid bits are block word 0x2c (bits 2 and 0, refs 1 and 2) and 0x34
+(bit 10, ref 0).
 
-Also still open: the engine mode word (word 0 is not in the flushed set;
-`Vp9AsicInit` writes 13 into word 3), the tile-table DMA address register (the
-vendor hands it to a cache op, not to the block), `SetLoopFilter` and
-`SetSegmentation` values (M3) and the 3744-byte probability block (M4).
+**M2 result: the engine starts but never completes.** The driver flushes words
+1-183 (skipping 0x04 and the AXI words 0x34/0x38/0x3c), writes the bitstream
+into the VLD words the H.264/VP8 path uses (0x230/0x234/0x238/0x23c), and pumps
+0x04. Mode is set through `cedrus_engine_enable()` (currently a guess: the H265
+mode bit). Device evidence, 720p VP9 profile 0:
+
+```
+cedrus: VP9 1280x720 profile 0 tiles 2/0: size=0x05001680 ... ref0=0x050002d0
+cedrus: frame processing timed out!          (2 s watchdog, every frame)
+/proc/interrupts 1c0e000.video-codec: 2054 -> 2054   (no IRQ at all)
+0x00 = 0x00130004  (mode 4 + DDR bits), 0x04 = 0x00030000 mask bits static
+```
+
+No crash, no bus error, and H.264 decodes normally right after (the watchdog
+resets the engine), so the block/kick plumbing is sound but the engine is
+missing something. Tried kick values 0x1, 0x3, 0x11, 0x101, 0x80000001: none
+raise the IRQ, and 0x04 reads back 0x300 before any kick, so those bits are
+reset values, not completion status. Because it cannot work yet, the engine is
+**not** started by default: `vp9_kick` (module parameter, default 0) gates it
+and setup keeps returning `-EINVAL`.
+
+Most likely blockers, in order: the probability block (M4, the engine cannot
+entropy-decode without it), the tile-table DMA address, and the real engine
+mode/interrupt-enable bits. Next step is the offline oracle: run
+`libawvp9Hw.so` under `qemu-arm` with the vendor `DWL*` shims for one frame of
+a known clip, dump the 184 words plus every `DWLWriteReg`, and diff that against
+what cedrus writes.

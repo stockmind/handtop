@@ -125,6 +125,21 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus.h b/drivers/staging/media/
  
  static inline void cedrus_write(struct cedrus_dev *dev, u32 reg, u32 val)
  {
+diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_hw.c b/drivers/staging/media/sunxi/cedrus/cedrus_hw.c
+--- a/drivers/staging/media/sunxi/cedrus/cedrus_hw.c	2026-10-22 02:13:56.846585908 +0200
++++ b/drivers/staging/media/sunxi/cedrus/cedrus_hw.c	2026-10-29 17:30:08.755626094 +0100
+@@ -57,6 +57,11 @@
+ 		reg |= VE_MODE_DEC_H265;
+ 		break;
+ 
++	/* FIXME: the VP9 engine mode bit is not known yet; H265 is a guess. */
++	case V4L2_PIX_FMT_VP9_FRAME:
++		reg |= VE_MODE_DEC_H265;
++		break;
++
+ 	default:
+ 		return -EINVAL;
+ 	}
 diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_video.c b/drivers/staging/media/sunxi/cedrus/cedrus_video.c
 --- a/drivers/staging/media/sunxi/cedrus/cedrus_video.c	2026-10-22 02:13:56.846790892 +0200
 +++ b/drivers/staging/media/sunxi/cedrus/cedrus_video.c	2026-10-29 16:47:33.723854025 +0100
@@ -160,8 +175,8 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_video.c b/drivers/staging/
  	/* Propagate format information to capture. */
 diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c
 --- a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c	2026-10-29 17:19:46.650872653 +0100
-@@ -0,0 +1,258 @@
++++ b/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c	2026-10-29 17:33:06.518418561 +0100
+@@ -0,0 +1,365 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Cedrus VPU driver
@@ -189,6 +204,11 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/me
 +#include "cedrus_hw.h"
 +#include "cedrus_regs.h"
 +
++static unsigned int vp9_kick;
++module_param(vp9_kick, uint, 0644);
++MODULE_PARM_DESC(vp9_kick,
++		 "Bring-up: value written to the VP9 start register (0 = do not start the engine)");
++
 +/* Parameter block words (byte offset = word * 4, from docs/vp9-h700-regs.h). */
 +#define VE_VP9_PIC_MODE		0x00c	/* Vp9AsicInit writes 13 here */
 +#define VE_VP9_PIC_MODE_INIT	13
@@ -206,6 +226,23 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/me
 +#define VE_VP9_TILE_COLS_LOG2	0x29c
 +#define VE_VP9_REF_SIZE		0x084	/* per slot: ref_w << 16 | ref_h */
 +#define VE_VP9_REF_SCALE	0x090	/* per slot: hscale << 16 | vscale */
++
++#define VE_VP9_PIC_LUMA		0x104	/* current picture, per plane */
++#define VE_VP9_PIC_CHROMA	0x18c
++#define VE_VP9_PIC_PLANE3	0x214
++#define VE_VP9_REF_LUMA_0	0x10c
++#define VE_VP9_REF_LUMA_1	0x12c
++#define VE_VP9_REF_LUMA_2	0x134
++#define VE_VP9_REF_CHROMA	0x194	/* +0x20 ref 1, +0x28 ref 2 */
++#define VE_VP9_REF_CHROMA_1	0x1b4
++#define VE_VP9_REF_CHROMA_2	0x1bc
++#define VE_VP9_REF_PLANE3	0x21c
++#define VE_VP9_REF_VALID	0x02c	/* bits 2 and 0: refs 1 and 2 */
++#define VE_VP9_REF0_VALID	0x034	/* bit 10 */
++#define VE_VP9_VLD_ADDR		0x230	/* same VLD block H.264/VP8 use */
++#define VE_VP9_VLD_OFFSET	0x234
++#define VE_VP9_VLD_LEN		0x238
++#define VE_VP9_VLD_END		0x23c
 +
 +#define CEDRUS_VP9_REF_SLOTS	3
 +
@@ -260,6 +297,19 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/me
 +				   CEDRUS_VP9_TILE_BUF_SIZE, DMA_TO_DEVICE);
 +}
 +
++/*
++ * Reference pictures: block layout recovered from the vendor SetReferenceFrames
++ * call sites. Luma and chroma offsets are not evenly spaced because the vendor
++ * copies fields of its own DWLRefFrm record; the offsets below are the ones it
++ * writes.
++ */
++static const u16 cedrus_vp9_ref_luma[3] = {
++	VE_VP9_REF_LUMA_0, VE_VP9_REF_LUMA_1, VE_VP9_REF_LUMA_2
++};
++static const u16 cedrus_vp9_ref_chroma[3] = {
++	VE_VP9_REF_CHROMA, VE_VP9_REF_CHROMA_1, VE_VP9_REF_CHROMA_2
++};
++
 +static void cedrus_vp9_fill_refs(struct cedrus_ctx *ctx,
 +				 const struct v4l2_ctrl_vp9_frame *frame,
 +				 u32 width, u32 height)
@@ -274,16 +324,24 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/me
 +	for (i = 0; i < CEDRUS_VP9_REF_SLOTS; i++) {
 +		struct vb2_buffer *buf = vb2_find_buffer(cap_q, ts[i]);
 +		struct v4l2_pix_format *fmt = &ctx->dst_fmt;
++		dma_addr_t addr;
 +		u32 ref_w, ref_h, hscale, vscale;
 +
 +		if (!buf)
 +			continue;
 +
-+		/* Reference frames are decoded at the capture resolution. */
++		addr = vb2_dma_contig_plane_dma_addr(buf, 0);
 +		ref_w = fmt->width;
 +		ref_h = fmt->height;
 +		hscale = (ref_w << 14) / width;
 +		vscale = (ref_h << 14) / height;
++
++		block[cedrus_vp9_ref_luma[i] / 4] = (u32)addr;
++		block[cedrus_vp9_ref_chroma[i] / 4] = (u32)(addr +
++			(dma_addr_t)fmt->bytesperline * fmt->height);
++		if (i == 0)
++			block[VE_VP9_REF_PLANE3 / 4] = (u32)(addr +
++				(dma_addr_t)fmt->bytesperline * fmt->height);
 +
 +		cedrus_vp9_field_set(block, VE_VP9_REF_SIZE + i * 4,
 +				     0xffff, 16, ref_w);
@@ -293,8 +351,59 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/me
 +				     0xffff, 16, hscale);
 +		cedrus_vp9_field_set(block, VE_VP9_REF_SCALE + i * 4,
 +				     0xffff, 0, vscale);
-+	}
 +
++		if (i == 0)
++			cedrus_vp9_field_set(block, VE_VP9_REF0_VALID, 1, 10, 1);
++		else
++			cedrus_vp9_field_set(block, VE_VP9_REF_VALID, 1,
++					     i == 1 ? 2 : 0, 1);
++	}
++}
++
++static void cedrus_vp9_fill_output(struct cedrus_ctx *ctx,
++				   struct cedrus_run *run)
++{
++	struct v4l2_pix_format *fmt = &ctx->dst_fmt;
++	u32 *block = ctx->codec.vp9.block;
++	dma_addr_t addr = cedrus_dst_buf_addr(ctx, &run->dst->vb2_buf, 0);
++	u32 chroma_off = fmt->bytesperline * fmt->height;
++
++	block[VE_VP9_PIC_LUMA / 4] = (u32)addr;
++	block[VE_VP9_PIC_CHROMA / 4] = (u32)(addr + chroma_off);
++	block[VE_VP9_PIC_PLANE3 / 4] = (u32)(addr + chroma_off);
++}
++
++static void cedrus_vp9_fill_stream(struct cedrus_ctx *ctx,
++				   struct cedrus_run *run)
++{
++	struct vb2_buffer *src_buf = &run->src->vb2_buf;
++	dma_addr_t addr = vb2_dma_contig_plane_dma_addr(src_buf, 0);
++	u32 size = vb2_get_plane_payload(src_buf, 0);
++	u32 *block = ctx->codec.vp9.block;
++
++	block[VE_VP9_VLD_ADDR / 4] = (u32)addr;
++	block[VE_VP9_VLD_OFFSET / 4] = 0;
++	block[VE_VP9_VLD_LEN / 4] = size * 8;
++	block[VE_VP9_VLD_END / 4] = (u32)(addr + size);
++}
++
++/* Every flushed field of the block goes out as VE register word * 4. */
++static void cedrus_vp9_flush(struct cedrus_ctx *ctx)
++{
++	struct cedrus_dev *dev = ctx->dev;
++	unsigned int i;
++
++	for (i = 1; i < CEDRUS_VP9_BLOCK_WORDS; i++) {
++		/*
++		 * Word 0 is the engine mode, owned by cedrus_engine_enable();
++		 * 0x04 is start/interrupt, written on trigger; 0x34/0x38/0x3c
++		 * are the AXI configuration the vendor reads from the hardware.
++		 */
++		if (i * 4 == 0x04 || i * 4 == 0x34 || i * 4 == 0x38 ||
++		    i * 4 == 0x3c)
++			continue;
++		cedrus_write(dev, i * 4, ctx->codec.vp9.block[i]);
++	}
 +}
 +
 +static enum cedrus_irq_status
@@ -305,6 +414,7 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/me
 +
 +	/* FIXME: the VP9 status bits are still being decoded; the vendor shim
 +	 * polls 0x04 & 0x53900 for "engine did something". */
++	v4l2_dbg(1, 2, &ctx->dev->v4l2_dev, "VP9 irq, 0x04 = 0x%08x\n", reg);
 +	if (reg & 0x53900)
 +		return CEDRUS_IRQ_OK;
 +
@@ -352,6 +462,8 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/me
 +
 +	memset(block, 0, sizeof(ctx->codec.vp9.block));
 +
++	cedrus_engine_enable(ctx);
++
 +	cedrus_vp9_field_set(block, VE_VP9_PIC_MODE, 0x3f, 27,
 +			     VE_VP9_PIC_MODE_INIT);
 +	cedrus_vp9_field_set(block, VE_VP9_PIC_SIZE, VE_VP9_PIC_SIZE_MASK,
@@ -375,6 +487,8 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/me
 +
 +	cedrus_vp9_fill_tiles(ctx, frame, width, height);
 +	cedrus_vp9_fill_refs(ctx, frame, width, height);
++	cedrus_vp9_fill_output(ctx, run);
++	cedrus_vp9_fill_stream(ctx, run);
 +
 +	ctx->codec.vp9.tile_cols_log2 = frame->tile_cols_log2;
 +	ctx->codec.vp9.tile_rows_log2 = frame->tile_rows_log2;
@@ -389,8 +503,12 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/me
 +		 cedrus_vp9_field_get(block, VE_VP9_REF_SIZE),
 +		 cedrus_vp9_field_get(block, VE_VP9_REF_SCALE));
 +
-+	/* M3+: program the block, bitstream/output addresses and kick 0x04. */
-+	return -EINVAL;
++	cedrus_vp9_flush(ctx);
++
++	if (!vp9_kick)
++		return -EINVAL;
++
++	return 0;
 +}
 +
 +static void cedrus_vp9_stop(struct cedrus_ctx *ctx)
@@ -409,6 +527,10 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/me
 +
 +static void cedrus_vp9_trigger(struct cedrus_ctx *ctx)
 +{
++	struct cedrus_dev *dev = ctx->dev;
++
++	/* Vendor kick: start + interrupt enable. */
++	cedrus_write(dev, 0x04, vp9_kick);
 +}
 +
 +struct cedrus_dec_ops cedrus_dec_ops_vp9 = {
