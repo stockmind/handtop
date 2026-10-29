@@ -22,10 +22,12 @@
   memory/CMA and no decoder errors. `mpv.conf` now lists `vp9` in
   `hwdec-codecs` and prefers `vo=dmabuf-wayland` (subtitles and OSD verified
   there), and `tools/check-video-decode.sh` gates VP9 against a software
-  decode, including a width that is not a multiple of 64. Not covered: VP9
-  profile 2 (P010) at a width that is not a multiple of 64 decodes to garbage
-  (9.6 dB against software at 854x480; 1280x720 P010 and HEVC Main10 at 854 are
-  both bit-exact). YouTube in Chromium still decodes on the CPU (246-283 % of
+  decode, including a width that is not a multiple of 64, and 8- and 10-bit
+  both. Two caveats, both in `docs/video-decode.md`: Chromium's VA path shows up
+  to 15 rows of padding at the bottom of clips whose height is not a multiple of
+  16 (the driver reports a 16-aligned height on purpose; making it report the
+  coded height hangs the engine), and 10-bit at such heights (234, 360) is close
+  but not bit-exact (32.8/59.9 dB) while 480/576/720/1080 are `inf`. YouTube in Chromium still decodes on the CPU (246-283 % of
   one core): the browser only hands `file://` VP9 playback to the VPU, not the
   MSE path YouTube uses, and the stream it picks is most likely AV1, which this
   SoC has no decoder for. See `docs/video-decode.md`.

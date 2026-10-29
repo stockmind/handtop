@@ -108,24 +108,39 @@ picture (`libva-v4l2request: decoding vp9 via /dev/video0 [cedrus]`).
 
 The 40 % CPU target from the plan is beaten (11 %).
 
-One VP9 case is still wrong: **profile 2 (10-bit) at a width that is not a
-multiple of 64** (854x480 P010) decodes to garbage - `PSNR average:9.6` against
-software, while 1280x720 P010 is `inf` and HEVC Main10 is `inf` at 854 as well.
-It is VP9-specific and lives in the P010 conversion path, not in the shared
-hidden-surface strides: changing `cedrus_dst_frame_fmt()` to give the hidden
-NV12 surface the 64-byte stride (the obvious first move) broke VP9 10-bit at
-*every* width and dropped HEVC Main10 720p from `inf` to 14 dB, so that was
-reverted. All 8-bit widths are fine, so this only bites VP9 profile 2 at odd
-widths. Widths that are not a
-multiple of 64 (416, 854, 1366) were broken at first - key frames decoded, every
-inter frame was garbage - because the VP9 backend kept the vendor's
-`SCALE1_STRIDE_ALIGN(1)`, the value for the 16-byte stride cedrus used before
-`0002-cedrus-64-byte-stride.patch` made it 64-byte aligned. The engine then
-read reference pictures back with a 16-byte aligned stride. Deriving the field
-from `bytesperline` (value 3 for a 64-byte stride) fixes it: 416, 854, 854+copy,
-1366, 1280, 1920, 3840 and 720p P010 are all `PSNR average:inf` against software
-now. The patch is `build/kernel/libreelec/0430-cedrus-vp9-stride-align.patch`,
-ours rather than LibreELEC's, and its header carries the align sweep.
+Widths that are not a multiple of 64 (416, 854, 1366) were broken at first -
+key frames decoded, every inter frame was garbage - because the VP9 backend kept
+the vendor's `SCALE1_STRIDE_ALIGN(1)`, the value for the 16-byte stride cedrus
+used before `0002-cedrus-64-byte-stride.patch` made it 64-byte aligned. The
+engine then read reference pictures back with a 16-byte aligned stride.
+Deriving the field from the reconstruct surface fixes 8- and 10-bit:
+416, 854, 854+copy, 1366, 1280, 1920, 3840, 448x256 and 720p P010 are all
+`PSNR average:inf` against software. The patch is
+`build/kernel/libreelec/0430-cedrus-vp9-stride-align.patch`, ours rather than
+LibreELEC's, and its header carries the align sweep.
+
+Two things about heights are worth knowing.
+
+- **A line of green/magenta at the bottom in Chromium.** The driver reports a
+  16-aligned capture height (1088 for a 1080-line stream, 240 for 234), because
+  the engine writes the reconstruct surface in 16-line blocks and the chroma
+  plane has to sit where the hardware puts it. Chromium's VA-API path sizes its
+  surfaces from that format, so up to 15 padding rows are part of the picture it
+  displays, and the bottom edge shows their (garbage) chroma - a thin green and
+  magenta line. mpv and ffmpeg take the coded size from the bitstream and crop
+  the padding off, which is why they look clean. Reporting the coded height
+  instead was tried on 2026-10-29 and is /not/ an option: the chroma plane then
+  lands at `bpl*coded_h` while the engine writes it at `bpl*ALIGN(coded_h,16)`,
+  and any height that is not a multiple of 16 hangs the engine (the decode never
+  completes, the process becomes unkillable and shutdown waits for its 90 s
+  timeout). A fix belongs in the VA driver (size the surface from the coded
+  size) or in the consumer (crop), not in cedrus.
+
+- **10-bit with a height that is not a multiple of 16** (234, 360) is close but
+  not exact: `PSNR 32.8 dB` at 416x234 and `59.9 dB` at 640x360, against `inf`
+  for 256, 288, 432, 480 and 720. 8-bit at the same heights is `inf`, so this is
+  in the P010 conversion path for the partial 16-line block; typical video
+  heights (480, 576, 720, 1080) are unaffected.
 
 ### YouTube in the browser
 
