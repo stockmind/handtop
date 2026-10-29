@@ -81,6 +81,20 @@ ssh goblin   # install to /lib/modules/7.2.0/extra/, depmod, modprobe -r/+
 pruned when the tree is packed), otherwise the module build stops at
 `asm/compiler.h: No such file or directory`.
 
+With the VP9 series the driver also needs the `v4l2-vp9` helper module, which
+ROCKNIX does not ship: build it too, refresh the symvers and install both.
+
+```
+sudo make -C $T -j32 M=drivers/media/v4l2-core modules
+sudo sh -c "cat $T/drivers/media/v4l2-core/Module.symvers >> $T/Module.symvers"
+sudo make -C $T -j32 M=drivers/staging/media/sunxi/cedrus modules
+# device: install v4l2-vp9.ko -> /lib/modules/7.2.0/kernel/drivers/media/v4l2-core/
+#         install sunxi-cedrus.ko -> /lib/modules/7.2.0/extra/, depmod, reload
+```
+
+If `.config` gained a symbol (as `select V4L2_VP9` does), `make olddefconfig`
+alone leaves `include/config/auto.conf` stale - run `make syncconfig`.
+
 ## Progress
 
 **M0 done** (2026-10-29). Module rebuilt from the unmodified tree and reloaded
@@ -119,6 +133,45 @@ The H.264 gate above still passes unchanged (same three `ok` lines and the
 same pre-existing zero-copy `FAIL`). Note for the check script: it picks the
 first video file under `~/Downloads`, so VP9 test clips live in
 `~/test-media`, not there, or every run measures VP9 by accident.
+
+**M2-M4 — done, by adopting an existing implementation.** The hand-rolled
+parameter-block work (below, kept for the record) was superseded by Jernej
+Skrabec's cedrus VP9 series, found on 2026-10-29 via a code search for
+`cedrus_vp9` and taken from LibreELEC.tv's Allwinner patch set. Full provenance,
+authors and per-file purpose: `build/kernel/libreelec/README.md`. The series is
+written against a 7.2 rebase and applies cleanly to the ROCKNIX tree on top of
+`build/kernel/0001`/`0002`; its own commit message says the register layout and
+the probability-table DMA buffer format were reverse engineered from the same
+vendor blob (`libawvp9HwAL.so`) we were picking apart - it shares the H.265
+engine slot and register bank, which is why our "block at VE offset 0" reading
+could never work.
+
+Applied: `0410` (don't CPU-map source buffers), `0411` (the VP9 backend,
+`cedrus_vp9.c`, 1297 lines), `0421` (`select V4L2_VP9`). Downloaded but not
+applied yet: `0412`/`0413`/`0415`/`0417`/`0418` (10-bit and mode-bit naming).
+
+**M5 - verified at 720p.** 8-bit VP9 profile 0 on the device, hardware path
+against a software decode of the same clip:
+
+```
+ffmpeg -hwaccel v4l2request -hwaccel_output_format drm_prime -i vp9-720p.mkv \
+       -vf hwdownload,format=nv12 -f rawvideo hw.yuv
+[AVHWFramesContext] Using V4L2 media driver cedrus (7.2.0) for VP9F
+60 frames decoded; 0 decode errors
+ffmpeg ... -lavfi psnr hw.yuv sw.yuv
+PSNR y:inf u:inf v:inf average:inf        <- bit-identical to software
+```
+
+1080p: `60 frames decoded; 0 decode errors`, Cedrus engaged. Then the device
+stopped answering (ARP FAILED for 192.168.1.143) while a second 1080p run was in
+flight - power, thermal or a VPU-induced hang is not yet distinguished. Reuse
+the power/CMA sampler from the soak notes before calling 1080p good.
+
+Remaining: mpv and Chromium (M6), 10-bit and odd widths (M7, needs `0412`/
+`0413`/`0417`/`0418`), and the upstream submission (M8) becomes "review
+Jernej's series rather than post a competing one".
+
+## What the hand-rolled experiment established (superseded, kept for the record)
 
 **M2 — in progress.** The vendor stack (recap: `libawvp9Hw.so` on the H616
 Android image, artifacts and helper scripts under `/tmp/opencode`, re-fetchable

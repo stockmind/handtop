@@ -44,6 +44,10 @@ if [ ! -f "$T/.rg35xxh-patched" ]; then
     for f in $(ls "$d"/*.patch 2>/dev/null | sort); do patch -d "$T" -p1 -s --forward < "$f"; done
   done
   for f in "$TOP"/build/kernel/*.patch; do patch -d "$T" -p1 -s --forward < "$f"; done
+  # Third-party patches (provenance and authors: build/kernel/libreelec/README.md).
+  for f in $(ls "$TOP"/build/kernel/libreelec/*.patch 2>/dev/null | sort); do
+    patch -d "$T" -p1 -s --forward < "$f"
+  done
   touch "$T/.rg35xxh-patched"
 fi
 
@@ -62,17 +66,21 @@ cp "$K/rocknix.config" "$T/.config"
 make -C "$T" -s olddefconfig
 make -C "$T" -s -j"$(nproc)" vmlinux modules
 
-# 4. Every symbol version the module imports must match ROCKNIX's own modules
+# 4. Every symbol version the module imports must match ROCKNIX's own modules.
+# cedrus now also needs the v4l2-vp9 helper module (VP9 probability adaptation),
+# which ROCKNIX does not ship, so it is built and installed with it.
 KO="$T/drivers/staging/media/sunxi/cedrus/sunxi-cedrus.ko"
+VKO="$T/drivers/media/v4l2-core/v4l2-vp9.ko"
 for m in $(find "$ROCKNIX_EX/modules/$KVER" -name '*.ko*'); do /sbin/modprobe --dump-modversions "$m" 2>/dev/null; done \
   | sort -u -k2 > "$K/rocknix.versions"
-bad=$(/sbin/modprobe --dump-modversions "$KO" | awk 'NR==FNR{r[$2]=$1; next} ($2 in r) && r[$2]!=$1' "$K/rocknix.versions" -)
+bad=$(/sbin/modprobe --dump-modversions "$KO" "$VKO" | awk 'NR==FNR{r[$2]=$1; next} ($2 in r) && r[$2]!=$1' "$K/rocknix.versions" -)
 [ -z "$bad" ] || die "symbol version mismatch against the ROCKNIX kernel:\n$bad"
 [ "$(/sbin/modinfo -F vermagic "$KO")" = "$(/sbin/modinfo -F vermagic "$(find "$ROCKNIX_EX/modules/$KVER" -name '*.ko*' | head -1)")" ] \
   || die "vermagic mismatch"
 
 # 5. Install
 install -D -m644 "$KO" "$ROOTFS/usr/lib/modules/$KVER/extra/sunxi-cedrus.ko"
+install -D -m644 "$VKO" "$ROOTFS/usr/lib/modules/$KVER/kernel/drivers/media/v4l2-core/v4l2-vp9.ko"
 chroot_mount
 in_chroot "depmod -a $KVER"
 echo "Cedrus decoder module installed ($(/sbin/modinfo -F vermagic "$KO"))."
