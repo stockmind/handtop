@@ -73,7 +73,7 @@ the clip and the frames come out **bit-identical to a software decode**
 `0 decode errors` as well. `tools/check-video-decode.sh` has a VP9 section that
 decodes 10 frames twice (VPU and software) and fails below 35 dB.
 
-1080p is bit-exact too (`PSNR average:inf`, 10/10 frames). Paced playback of
+1080p and 4K are bit-exact too (`PSNR average:inf`). Paced playback of
 the 1080p24 clip, 30 s per run, whole-mpv CPU as a share of one core:
 
 | path | CPU |
@@ -86,7 +86,8 @@ the 1080p24 clip, 30 s per run, whole-mpv CPU as a share of one core:
 Zero-copy is what makes VP9 cheap; the copy path downloads every frame and is
 as expensive as software decoding. A 5-minute soak of the shipped config showed
 12 % average CPU, 60/60 samples alive, flat CmaFree and RSS, and no decoder
-errors. The `--hwdec=v4l2request` spelling falls back to software for VP9;
+errors. Other content, same harness: 720p VP9 9 % (8- and 10-bit), 4K VP9
+(3840x2160, bit-exact too) 13 %, H.264 1080p 15 %. The `--hwdec=v4l2request` spelling falls back to software for VP9;
 `--hwdec=drm` is the zero-copy name, and `vp9` is in `hwdec-codecs` so mpv tries
 it at all.
 

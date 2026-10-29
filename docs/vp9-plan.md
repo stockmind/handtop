@@ -164,38 +164,35 @@ twice and fails below 35 dB); on the device it reports
 `ok VP9 goes through the VPU (cedrus)`, `ok VP9 decodes without crashing`,
 `ok VP9 output matches software (average:inf)`.
 
-**M6 - mpv works, Chromium untested.** 1080p VP9 profile 0, 240 frames with
-`--untimed` (throughput and CPU from one `time -p` run per config) and real-time
-playback of 10 s at 24 fps:
+**M6 - done, and well past the target.** mpv with the shipped config
+(`vo=dmabuf-wayland`, `hwdec=auto-safe` -> zero-copy `drm`, `vp9` in
+`hwdec-codecs`). Paced playback, whole-mpv CPU as a share of one core, 20-30 s
+per run:
 
-| path | fps | CPU, untimed | CPU, real-time |
-|---|---|---|---|
-| software (`--hwdec=no`) | 97.6 | 214 % | 116 % |
-| copy (`--hwdec=v4l2request-copy`) | 62.0 | 108 % | 100 % |
-| zero-copy (`--hwdec=drm`, `vo=gpu`) | 105.7 | 91 % | 59 % |
-| zero-copy + `vo=dmabuf-wayland` | - | - | 48 % |
+| content | CPU |
+|---|---|
+| VP9 720p 8-bit | 9 % |
+| VP9 720p 10-bit | 9 % |
+| VP9 1080p 8-bit | 11 % |
+| VP9 4K (3840x2160) | 13 % |
+| VP9 1080p, zero-copy + `vo=gpu` | 21 % |
+| VP9 1080p, copy path (`v4l2request-copy`) | 106 % |
+| VP9 1080p, software | 107 % |
+| H.264 1080p (shipped config) | 15 % |
 
-So VP9 lands at 48 % of one core for 1080p24 zero-copy against 116 % in
-software, a 2.4x saving; the plan's 40 % target is not met yet (the same
-`vo=dmabuf-wayland` config is what the image ships for H.264, see
-`docs/video-decode.md`). Note the spelling: `--hwdec=v4l2request` falls back to
-software for VP9, `--hwdec=drm` is the zero-copy name that works.
+The plan asked for <= 40 % at 1080p24; the shipped config is 11 %. Zero-copy is
+what does it: the copy path downloads every frame and ends up as expensive as
+software decoding, which is why `vo=dmabuf-wayland` is now first in `mpv.conf`
+(subtitles and OSD were verified to render on it; screenshots taken with a
+`.srt` and `--osd-msg1`).
 
-Correction to the earlier note: the device did not hang. It dropped its Wi-Fi
-association for ~6 min (`wlan0: associated` in dmesg, uptime kept climbing) and
-came back by itself.
+A 5-minute soak of 1080p VP9 with the shipped config: 12 % average CPU, 60/60
+samples alive, flat `CmaFree` (105 MB) and RSS (61 MB), no decoder errors, no
+dmesg complaints.
 
-Chromium (155, the image's browser) engages the same path - the VA driver
-advertises `VAProfileVP9Profile0/Profile2` now that the kernel decodes VP9, and
-a fullscreen 1080p VP9 file renders the real picture:
-
-```
-libva-v4l2request: decoding vp9 via /dev/video0 [cedrus] (media /dev/media0)
-(ffmpeg -hwaccel vaapi: 11 frames decoded, 0 decode errors)
-```
-
-`/etc/mpv/mpv.conf` now lists `vp9` in `hwdec-codecs`, so the image's default
-player uses it without any flag.
+Chromium: the VA driver advertises `VAProfileVP9Profile0/Profile2`, ffmpeg's
+`vaapi` hwaccel decodes VP9 through `/dev/video0` (0 errors), and a fullscreen
+VP9 file in Chromium renders the real picture.
 
 **M7 - 10-bit works, odd widths only zero-copy.** With `0412`/`0413`/`0415`/
 `0417`/`0418` added, the capture queue offers P010 and profile 2 decodes
