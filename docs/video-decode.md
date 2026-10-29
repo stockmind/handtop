@@ -73,12 +73,22 @@ the clip and the frames come out **bit-identical to a software decode**
 `0 decode errors` as well. `tools/check-video-decode.sh` has a VP9 section that
 decodes 10 frames twice (VPU and software) and fails below 35 dB.
 
-1080p is bit-exact too (`PSNR average:inf`, 10/10 frames). Measured with mpv on
-the same clip, 10 s of real-time playback at 24 fps, whole-process CPU as a share
-of one core: software 116 %, `--hwdec=v4l2request-copy` 100 %,
-`--hwdec=drm` with `vo=gpu` 59 %, `--hwdec=drm` with `vo=dmabuf-wayland` 48 %.
-Use `--hwdec=drm`; the `--hwdec=v4l2request` spelling falls back to software for
-VP9, and `vp9` has to be added to `hwdec-codecs` before mpv will try it.
+1080p is bit-exact too (`PSNR average:inf`, 10/10 frames). Paced playback of
+the 1080p24 clip, 30 s per run, whole-mpv CPU as a share of one core:
+
+| path | CPU |
+|---|---|
+| shipped config (`vo=dmabuf-wayland`, zero-copy `drm`) | 11 % |
+| zero-copy `--hwdec=drm`, `vo=gpu` | 21 % |
+| copy `--hwdec=v4l2request-copy`, `vo=gpu` | 106 % |
+| software, `vo=gpu` | 107 % |
+
+Zero-copy is what makes VP9 cheap; the copy path downloads every frame and is
+as expensive as software decoding. A 5-minute soak of the shipped config showed
+12 % average CPU, 60/60 samples alive, flat CmaFree and RSS, and no decoder
+errors. The `--hwdec=v4l2request` spelling falls back to software for VP9;
+`--hwdec=drm` is the zero-copy name, and `vp9` is in `hwdec-codecs` so mpv tries
+it at all.
 
 10-bit (profile 2) is in as well: the capture queue now offers P010 and a
 `yuv420p10le` clip decodes bit-identically (`PSNR average:inf` over 10 frames
@@ -86,10 +96,12 @@ dumped as `p010le`). Chromium 155 decodes VP9 through the same driver - vainfo
 lists `VAProfileVP9Profile0/Profile2` and a fullscreen file renders the real
 picture (`libva-v4l2request: decoding vp9 via /dev/video0 [cedrus]`).
 
-Two things are open. The 40 % CPU target is not met yet (48 %), and at widths
-that are not a multiple of 64 (854, 1366) the **copy** path is black or blocky
-while zero-copy is fine - the same corruption shows up for H.264 there, so it is
-the 64-byte stride behaviour, not the VP9 backend.
+The 40 % CPU target from the plan is beaten (11 %). One thing is open: at
+widths that are not a multiple of 64 (854, 1366) mpv's **copy** path
+(`--hwdec=v4l2request-copy`) renders rainbow garbage while zero-copy is correct,
+and ffmpeg's own `hwdownload` of the same frames is correct too, so the frames
+are fine and it is mpv's download path. H.264 shows the same corruption there,
+so it predates VP9.
 
 ### Throughput: zero-copy vs copy
 
