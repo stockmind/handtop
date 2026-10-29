@@ -26,6 +26,7 @@ kernel we build against. GPL-2.0, same license as the driver.
 | 0430-cedrus-vp9-stride-align.patch | **ours**: derive `SCALE1_STRIDE_ALIGN` from the capture stride | yes |
 | 0412-media-cedrus-Add-P010-capture-format-and-shared-10-b.patch | P010 capture + shared 10-bit handling | yes |
 | 0413-media-cedrus-Add-VP9-P010-output-support.patch | VP9 P010 output | yes |
+| 0414-media-cedrus-Add-H265-P010-output-support.patch | H.265 P010 output (without it HEVC Main10 decodes to garbage) | yes |
 | 0415-media-cedrus-Name-H616-VP9-mode-register-bits.patch | names the VP9 mode bits | yes |
 | 0417-media-cedrus-add-format-filtering-based-on-depth-and.patch | format filtering by bit depth | yes |
 | 0418-media-cedrus-filter-p010-by-depth.patch | wires the depth filter into P010 | yes, rebased - see below |
@@ -57,9 +58,11 @@ ours, and the header of the patch says so.
 
 ```
 capture formats: P010, NV12, ST12, NV21, YU12, YV12
-VP9 8-bit 720p   60/60 frames, 0 decode errors, PSNR average:inf
-VP9 10-bit 720p  60/60 frames, 0 decode errors, PSNR average:inf (p010le)
-H.264 1080p     122 frames, 0 decode errors
+VP9 8-bit 720p/854/1366/1080p/4K   PSNR average:inf
+VP9 10-bit 720p                    PSNR average:inf (p010le)
+HEVC 8-bit 1080p / 960x540         PSNR average:inf
+HEVC Main10 720p                   PSNR average:inf (p010le, needs 0414)
+H.264 1080p / 854x480              PSNR average:inf
 ```
 
 Widths that are not a multiple of 64 (416, 854, 1366) were broken in the first

@@ -1,28 +1,20 @@
 From: stockmind <slysimo@gmail.com>
-Subject: [PATCH] media: cedrus: filter P010 by depth (0418 rebased)
+Subject: [PATCH] media: cedrus: filter P010 by depth (0418 rebased onto 0414)
 
 LibreELEC's 0418-media-cedrus-Filter-P010-by-depth-like-AFBC-formats.patch does
-not apply as-is to a tree without the AFBC patches: its second hunk deletes
-cedrus_is_10bit_dst_format_supported(), which by then is already gone in our
-tree. This is that patch with the hunks rebased: add .depth = 10 to the P010
-format, drop the per-format helper, and let cedrus_find_format() filter on
-fmt->depth. Same change, same author's design, only the context is ours.
+not apply to this tree: 0414 already brings the generic .depth filter into
+cedrus_find_format(), so 0417's per-format helper (and the P010 skip block that
+0417 adds) are now dead weight and the patch's hunks drift.
 
-Original: LibreELEC.tv projects/Allwinner/patches/linux/0418-*.patch,
-author Jernej Skrabec <jernej.skrabec@gmail.com>.
+This is the same change with the hunks rebased: drop
+cedrus_is_10bit_dst_format_supported() and the skip block that calls it, and
+leave the depth filtering to fmt->depth. Design and intent are Jernej Skrabec's
+from 0418 (LibreELEC.tv projects/Allwinner/patches/linux/); only the context is
+ours.
 ---
-diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_video.c pb/drivers/staging/media/sunxi/cedrus/cedrus_video.c
 --- a/drivers/staging/media/sunxi/cedrus/cedrus_video.c
 +++ b/drivers/staging/media/sunxi/cedrus/cedrus_video.c
-@@ -60,6 +60,7 @@
- 		.directions	= CEDRUS_DECODE_DST,
- 		.capabilities	= CEDRUS_CAPABILITY_UNTILED |
- 				  CEDRUS_CAPABILITY_H265_10_DEC,
-+		.depth		= 10,
- 	},
- 	{
- 		.pixelformat	= V4L2_PIX_FMT_NV12,
-@@ -89,19 +90,6 @@
+@@ -89,21 +89,6 @@
  
  #define CEDRUS_FORMATS_COUNT	ARRAY_SIZE(cedrus_formats)
  
@@ -32,6 +24,8 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_video.c pb/drivers/staging
 -		return false;
 -
 -	switch (ctx->src_fmt.pixelformat) {
+-	case V4L2_PIX_FMT_HEVC_SLICE:
+-		return cedrus_is_capable(ctx, CEDRUS_CAPABILITY_H265_10_DEC);
 -	case V4L2_PIX_FMT_VP9_FRAME:
 -		return true;
 -	default:
@@ -42,7 +36,7 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_video.c pb/drivers/staging
  static struct cedrus_format *cedrus_find_format(struct cedrus_ctx *ctx,
  						u32 pixelformat, u32 directions)
  {
-@@ -123,17 +111,6 @@
+@@ -125,17 +110,6 @@
  		    fmt->src_format != ctx->src_fmt.pixelformat)
  			continue;
  
@@ -60,22 +54,5 @@ diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_video.c pb/drivers/staging
  		if (fmt->pixelformat == pixelformat)
  			break;
  
-diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_video.c.orig pb/drivers/staging/media/sunxi/cedrus/cedrus_video.c.orig
---- a/drivers/staging/media/sunxi/cedrus/cedrus_video.c.orig	2026-10-29 18:01:37.097810331 +0100
-+++ b/drivers/staging/media/sunxi/cedrus/cedrus_video.c.orig	2026-10-29 18:01:37.099601580 +0100
-@@ -116,6 +116,13 @@
- 		    !(fmt->directions & directions))
- 			continue;
- 
-+		if (fmt->depth && fmt->depth != ctx->bit_depth)
-+			continue;
-+
-+		if (fmt->src_format &&
-+		    fmt->src_format != ctx->src_fmt.pixelformat)
-+			continue;
-+
- 		/*
- 		 * The 10-bit P010 format is only usable when the current
- 		 * stream is actually 10-bit; skip it otherwise so the
 -- 
 2.43.0

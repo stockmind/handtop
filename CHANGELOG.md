@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- New: VP9 decodes on the VPU, and so does H.265 Main10. The video engine on
+  this SoC has a VP9 decoder in the H.265 slot that mainline cedrus never
+  driver'd; the image now carries Jernej Skrabec's out-of-tree series (from
+  LibreELEC's Allwinner patch set, authors and per-patch purpose in
+  `build/kernel/libreelec/README.md`) plus the `v4l2-vp9` helper module it
+  needs, which ROCKNIX does not ship. Output is bit-identical to a software
+  decode at 720p, 854x480, 1366x768, 1080p and 4K, 8- and 10-bit
+  (`PSNR average:inf`). One fix on top is ours: the VP9 backend kept the
+  vendor's `SCALE1_STRIDE_ALIGN(1)` (16-byte stride) after `0002` made the
+  capture stride 64-byte aligned, so key frames decoded and every inter frame
+  read its references with the wrong stride - invisible at 1280/1920/3840,
+  broken at 416/854/1366. `0430-cedrus-vp9-stride-align.patch` derives the
+  field from `bytesperline`; the patch header has the align sweep and
+  `docs/video-decode.md` the details. 10-bit also needed `0414` (H.265 P010
+  output): without it HEVC Main10 decoded to garbage, which is why it is in
+  the set. Measured with mpv on 1080p24: 11 % of one core zero-copy against
+  107 % in software, 9 % at 720p, 13 % at 4K, and a 5-minute soak showed flat
+  memory/CMA and no decoder errors. `mpv.conf` now lists `vp9` in
+  `hwdec-codecs` and prefers `vo=dmabuf-wayland` (subtitles and OSD verified
+  there), and `tools/check-video-decode.sh` gates VP9 against a software
+  decode, including a width that is not a multiple of 64.
+
+
 - Fix: `04c` uses upstream's checks again (`grep -w … >/dev/null`, not `grep -qw`):
   with `pipefail`, `-q` stops reading ffmpeg's long list at the first match, grep
   dies of SIGPIPE and the build fails on a check that actually passed. The
