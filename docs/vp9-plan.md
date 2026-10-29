@@ -179,16 +179,40 @@ which is the vendor arithmetic exactly (`(1280+7)/8 << 19 | (720+7)/8 << 6`,
 `1.0` in 14-bit fixed point); the first frame has `ref0 = 0` because a keyframe
 has no references. H.264 gate re-run after the install: unchanged.
 
-Still open before the engine can be kicked:
+**Frame flow, from `Vp9HwDecoderDecode` (vaddr 0x3b74 of `libawvp9Hw.so`):**
 
-- the engine mode word (word 0 is not in the flushed set; `Vp9AsicInit` writes
-  13 into word 3) and the kick sequence (`0x34/0x38/0x3c` = ASIC config words
-  13-15 from `DWLReadAsicConfig`, then `0x04 = 0x11`);
-- the bitstream and output picture addresses: `Vp9AsicSetOutput` fills words
-  0x104/0x18c/0x214 from three plane arrays, and the reference picture
-  addresses sit at 0x10c/0x12c/0x134 and friends - the exact field names need
-  the vendor structure layout;
-- the tile table DMA address register (the vendor hands it to a cache op, not
-  to the block);
-- `SetLoopFilter` and `SetSegmentation` values (M3);
-- the 3744-byte probability block (M4), the `Vp9AsicProbUpdate` layout.
+```
+Vp9AsicProbUpdate(ctx)           /* 3744-byte probability block */
+Vp9AsicInitPicture(ctx)          /* 17 fields, block words 3.. */
+Vp9AsicStrmPosUpdate(ctx, pos, len)   /* block word 6, bits 25..31 */
+Vp9AsicRun(ctx)                  /* flush block, 0x34/0x38/0x3c, 0x04 = 0x11 */
+ctx->wait_irq()
+```
+
+`Vp9AsicRun` reads block words 13-15 (`ctx+0x50`, `ctx+0x54`, `ctx+0x58`)
+and writes them to VE 0x34/0x38/0x3c right before the kick; those three words
+are AXI/bus configuration filled once from `DWLReadAsicConfig`, not per-frame.
+
+Picture addresses: `SetOutput` and `SetReferenceFrames` read three arrays of
+`DWLRefFrm` descriptors at `ctx+0x3f4`, `ctx+0x4f4`, `ctx+0x5f4` (16-byte
+records, plane address in the second word, allocated by `Vp9MallocRefFrm`
+per index) and copy the address into these block offsets:
+
+| field | current picture | ref 0 | ref 1 | ref 2 |
+|---|---|---|---|---|
+| luma | 0x104 | 0x10c | 0x12c | 0x134 |
+| chroma | 0x18c | 0x194 | 0x1b4 | 0x1bc |
+| third plane | 0x214 | 0x21c | - | - |
+| ref w<<16\|h | - | 0x084 | 0x088 | 0x08c |
+| hscale<<16\|vscale | - | 0x090 | 0x094 | 0x098 |
+
+Ref-valid bits are block words 0x2c (bits 2 and 0, refs 1 and 2) and 0x34
+(bit 10, ref 0). The uneven spacing of the luma/chroma offsets is the vendor
+structure layout, not an array: their `DWLRefFrm` record is copied field by
+field, so the next step is to read `DWLAllocRefFrm`/`Vp9MallocRefFrm` in
+libVE for that record and mirror it into cedrus's own block write.
+
+Also still open: the engine mode word (word 0 is not in the flushed set;
+`Vp9AsicInit` writes 13 into word 3), the tile-table DMA address register (the
+vendor hands it to a cache op, not to the block), `SetLoopFilter` and
+`SetSegmentation` values (M3) and the 3744-byte probability block (M4).
