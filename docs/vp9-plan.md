@@ -219,121 +219,15 @@ What is left: a 1080p VP9 soak (the earlier "device died" was a Wi-Fi
 re-association, not a hang), the copy-path stride bug above, and M8 becomes
 "review Jernej's series rather than post a competing one".
 
-## What the hand-rolled experiment established (superseded, kept for the record)
+## History: the hand-rolled attempt (superseded)
 
-**M2 — in progress.** The vendor stack (recap: `libawvp9Hw.so` on the H616
-Android image, artifacts and helper scripts under `/tmp/opencode`, re-fetchable
-from the Transpeed 6K image) does not write VE registers field by field. Per
-frame it builds a **parameter block in memory** and hands it to the engine:
-
-- `Vp9AsicInit` memsets 0x2e0 bytes at `ctx+0x1c` and presets one field;
-- every `Vp9AsicSet*` call is `SetDecRegister(ctx+0x1c, index, value)`, a masked
-  read-modify-write into that block; the descriptor table gives
-  `{word_offset, mask, shift}` per index, so the offsets in
-  `vp9-h700-fields.h` (second column) are **byte offsets inside the block**,
-  not `index * 4`;
-- `FlushDecRegisters(handle, inst, ctx+0x1c)` pushes the block out,
-  `Vp9AsicRun` then writes 0x34/0x38/0x3c and kicks with `0x04`.
-
-Because those kick registers (0x04, 0x34, 0x38, 0x3c) coincide with block words
-1, 13, 14 and 15, the block base is the start of the VE window, i.e. VP9 does
-not use the H.264/VP8 block at 0x200. 0x04 is both the start bit and the
-interrupt/status register (the vendor kernel shim `google_vp9.c` polls
-`+0x04 & 0x53900` and writes `0x04 = 0x11` to start).
-
-Semantics recovered so far, mapped onto `struct v4l2_ctrl_vp9_frame`:
-
-| vendor | meaning |
-|---|---|
-| 24, 25, 164 (`SetPictureDimensions`) | `(w+7)>>3`, `(h+7)>>3`, `((w+7)&~3)>>2` |
-| 371 (`SetTileInfo`) | `tile_cols_log2` |
-| 70 | tiled flag (`tile_cols_log2 \|\| tile_rows_log2`) |
-| 68, 69 | tile column/row counts (`1 << log2`, clamped to 1 when untiled) |
-| tile table (`ctx->0x384`, 1776 B) | per tile, 32 bits: `width << 16 \| height`, both in 64-pixel units, rows outer, then a cache flush of the table |
-| 175..185 (`SetReferenceFrames`) | per ref slot: buffer index and `(ref_w << 14) / cur_w`, `(ref_h << 14) / cur_h` (the same hscale/vscale rkvdec computes) |
-| 20, 73, 192-195, 200-201 (`SetLoopFilter`) | still to decode |
-| 102-104, 112-115, 122-135, 142-161, 166-173 (`SetSegmentation`) | 8 segments x features, still to decode |
-| `Vp9AsicProbUpdate` | 3744-byte probability block, layout open |
-
-**Resolved** (same day): the descriptor table is at vaddr 0xd034 of
-`libawvp9Hw.so`, 392 entries of 16 bytes `{ word, mask_index, shift, flushed }`,
-`mask(n) = (1 << n) - 1`. 353 fields are flushed, into 184 words, so the block
-is 736 bytes and its base is the start of the VE window: `FlushDecRegisters`
-writes word N to VE offset `N * 4` with `DWLWriteReg`, and `Vp9AsicRun` then
-writes 0x34/0x38/0x3c and kicks 0x04. The complete map is in
-`docs/vp9-h700-regs.h` (index, byte offset, mask, shift).
-
-**M2 code landed** (engine still not started). `cedrus_vp9.c` now fills the
-block from the stateless controls: picture size (word 4), width in 4-pixel
-units (word 20), tile flag/counts (word 10), tile columns log2 (word 167), the
-DMA tile table (1776 B, allocated in `start()`), and the reference slots (words
-33-38: `ref_w << 16 | ref_h` and the `<< 14` scales). Device evidence, 720p
-VP9 profile 0, tiles 2/0:
-
-```
-cedrus: VP9 1280x720 profile 0 tiles 2/0: size=0x05001680 width4=0x01410000
-        tile=0x00408002 ref0=0x050002d0 scale0=0x40004000
-```
-
-which is the vendor arithmetic exactly (`(1280+7)/8 << 19 | (720+7)/8 << 6`,
-`((1280+7)&~3)/4 << 16`, `4 << 20 | 1 << 15 | tiled`, `1280 << 16 | 720`,
-`1.0` in 14-bit fixed point); the first frame has `ref0 = 0` because a keyframe
-has no references. H.264 gate re-run after the install: unchanged.
-
-**Frame flow, from `Vp9HwDecoderDecode` (vaddr 0x3b74 of `libawvp9Hw.so`):**
-
-```
-Vp9AsicProbUpdate(ctx)           /* 3744-byte probability block */
-Vp9AsicInitPicture(ctx)          /* 17 fields, block words 3.. */
-Vp9AsicStrmPosUpdate(ctx, pos, len)   /* block word 6, bits 25..31 */
-Vp9AsicRun(ctx)                  /* flush block, then 0x04 = 0x11 */
-ctx->wait_irq()
-```
-
-Block words 13-15 (`ctx+0x50/0x54/0x58`) are AXI/bus configuration filled once
-from `DWLReadAsicConfig`, and word 0 is the engine mode: it is written by
-libVE's `enableDecoder` (`bfi` of a 4-bit codec id into bits 0-3, plus bit 4 for
-codec id 0x116), never by the VP9 block, so a flush must leave word 0 alone.
-
-Picture addresses: `SetOutput` and `SetReferenceFrames` read arrays of
-`DWLRefFrm` descriptors at `ctx+0x3f4`, `ctx+0x4f4`, `ctx+0x5f4` (16-byte
-records, plane address in the second word) and copy them into:
-
-| field | current picture | ref 0 | ref 1 | ref 2 |
-|---|---|---|---|---|
-| luma | 0x104 | 0x10c | 0x12c | 0x134 |
-| chroma | 0x18c | 0x194 | 0x1b4 | 0x1bc |
-| third plane | 0x214 | 0x21c | - | - |
-| ref w<<16\|h | - | 0x084 | 0x088 | 0x08c |
-| hscale<<16\|vscale | - | 0x090 | 0x094 | 0x098 |
-
-Ref-valid bits are block word 0x2c (bits 2 and 0, refs 1 and 2) and 0x34
-(bit 10, ref 0).
-
-**M2 result: the engine starts but never completes.** The driver flushes words
-1-183 (skipping 0x04 and the AXI words 0x34/0x38/0x3c), writes the bitstream
-into the VLD words the H.264/VP8 path uses (0x230/0x234/0x238/0x23c), and pumps
-0x04. Mode is set through `cedrus_engine_enable()` (currently a guess: the H265
-mode bit). Device evidence, 720p VP9 profile 0:
-
-```
-cedrus: VP9 1280x720 profile 0 tiles 2/0: size=0x05001680 ... ref0=0x050002d0
-cedrus: frame processing timed out!          (2 s watchdog, every frame)
-/proc/interrupts 1c0e000.video-codec: 2054 -> 2054   (no IRQ at all)
-0x00 = 0x00130004  (mode 4 + DDR bits), 0x04 = 0x00030000 mask bits static
-```
-
-No crash, no bus error, and H.264 decodes normally right after (the watchdog
-resets the engine), so the block/kick plumbing is sound but the engine is
-missing something. Tried kick values 0x1, 0x3, 0x11, 0x101, 0x80000001: none
-raise the IRQ, and 0x04 reads back 0x300 before any kick, so those bits are
-reset values, not completion status. Because it cannot work yet, the engine is
-**not** started by default: `vp9_kick` (module parameter, default 0) gates it
-and setup keeps returning `-EINVAL`.
-
-Most likely blockers, in order: the probability block (M4, the engine cannot
-entropy-decode without it), the tile-table DMA address, and the real engine
-mode/interrupt-enable bits. Next step is the offline oracle: run
-`libawvp9Hw.so` under `qemu-arm` with the vendor `DWL*` shims for one frame of
-a known clip, dump the 184 words plus every `DWLWriteReg`, and diff that against
-what cedrus writes.
+Before finding the LibreELEC series we reverse engineered the vendor decoder
+(`libawvp9Hw.so` from the H616 Android image) far enough to recover the whole
+VP9 parameter block: 184 words, 353 flushed fields with their masks/shifts
+(`docs/vp9-h700-regs.h`), the tile-table format, the reference fields and the
+kick sequence. That work is what made the series' register names readable, but
+it is not in the build any more - 0411 in `build/kernel/libreelec/` does the
+same job, better, and shares the H.265 register bank (our version assumed the
+block sat at VE offset 0, which was the wrong bank). The full notes are in the
+git history of this file (`git log -p docs/vp9-plan.md`) if that knowledge is
+ever needed again.
