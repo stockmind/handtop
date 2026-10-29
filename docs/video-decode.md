@@ -150,7 +150,7 @@ one core:
 | path | decoder | CPU |
 |---|---|---|
 | Chromium, AV1 (what YouTube picks by default) | software dav1d | ~280 % |
-| Chromium, VP9 forced by the shipped extension | software | ~240 % |
+| Chromium, VP9 forced by the extension | software | ~290 % |
 | `goblin-tv` -> `goblin-watch` -> mpv (`bv*[vcodec^=avc1]`) | zero-copy VPU | ~21 % |
 
 What the browser does and does not do:
@@ -158,8 +158,9 @@ What the browser does and does not do:
 - YouTube normally negotiates **AV1**, and the H616/H700 has no AV1 decoder, so
   it decodes on the CPU (player stats fetched over CDP:
   `codecs: av01.0.04M.08 (397)`).
-- A two-file extension shipped in the image (`/usr/lib/handtop/yt-prefer-vp9`,
-  loaded from `/etc/chromium.d/50-rg35xxh`) hides AV1 from
+- A two-file extension in the image (`/usr/lib/handtop/yt-prefer-vp9`, **not
+  enabled by default** - uncomment its `--load-extension` line in
+  `/etc/chromium.d/50-rg35xxh`) hides AV1 from
   `MediaSource.isTypeSupported`, `canPlayType` and
   `mediaCapabilities.decodingInfo` on youtube.com only, so YouTube serves
   **VP9** instead (`codecs: vp09.00.51.08... (244)`, confirmed by the player).
@@ -178,9 +179,10 @@ What the browser does and does not do:
   (`vkCreateInstance` -9) on every launch, which may be related but disabling
   Vulkan did not help either.
 
-The extension is still shipped because VP9 software decoding costs ~15 % less
-than AV1 on this SoC, and it is what makes the "which codec did the page pick"
-question answerable. For actual VPU playback of YouTube, use the native client:
+The extension is kept (but off) because it is what makes the "which codec did
+the page pick" question answerable, and it is one `--load-extension` line away
+from mattering the day Chromium routes MSE to VA-API. It does not save
+measurable CPU today. For actual VPU playback of YouTube, use the native client:
 `goblin-tv` browses and hands the URL to `goblin-watch`, which plays it through
 mpv with hardware decoding - that is the ~21 % row above.
 

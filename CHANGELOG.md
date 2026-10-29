@@ -30,10 +30,10 @@
   but not bit-exact (32.8/59.9 dB) while 480/576/720/1080 are `inf`. YouTube:
   the browser still decodes on the CPU (~280 % of one core for AV1, ~240 % with
   VP9 forced) because Chromium's MSE path does not hand frames to VA-API in this
-  build; a two-file extension shipped in the image
-  (`/usr/lib/handtop/yt-prefer-vp9`, loaded from `/etc/chromium.d/50-rg35xxh`)
-  makes YouTube serve VP9 instead of AV1, which is cheaper in software but still
-  not the VPU. The VPU path for YouTube is the native client: `goblin-tv` ->
+  build; a two-file extension in the image
+  (`/usr/lib/handtop/yt-prefer-vp9`, off by default) makes YouTube serve VP9
+  instead of AV1, which is still software - it costs about the same, so it is
+  left disabled. The VPU path for YouTube is the native client: `goblin-tv` ->
   `goblin-watch` -> mpv plays it zero-copy at ~21 % of one core. Details and
   everything tried in `docs/video-decode.md`.
 
