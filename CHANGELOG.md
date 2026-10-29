@@ -25,7 +25,10 @@
   decode, including a width that is not a multiple of 64. Not covered: VP9
   profile 2 (P010) at a width that is not a multiple of 64 decodes to garbage
   (9.6 dB against software at 854x480; 1280x720 P010 and HEVC Main10 at 854 are
-  both bit-exact).
+  both bit-exact). YouTube in Chromium still decodes on the CPU (246-283 % of
+  one core): the browser only hands `file://` VP9 playback to the VPU, not the
+  MSE path YouTube uses, and the stream it picks is most likely AV1, which this
+  SoC has no decoder for. See `docs/video-decode.md`.
 
 
 - Fix: `04c` uses upstream's checks again (`grep -w … >/dev/null`, not `grep -qw`):

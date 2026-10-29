@@ -127,6 +127,27 @@ from `bytesperline` (value 3 for a 64-byte stride) fixes it: 416, 854, 854+copy,
 now. The patch is `build/kernel/libreelec/0430-cedrus-vp9-stride-align.patch`,
 ours rather than LibreELEC's, and its header carries the align sweep.
 
+### YouTube in the browser
+
+Measured 2026-10-29 on the device, Chromium 155, `LIBVA_DRIVER_NAME=v4l2_request`
+and `LIBVA_V4L2_TRACE=1`, two videos (Big Buck Bunny 4K60, "Me at the zoo"):
+
+```
+cpu: 246-283 % of one core, video plays, no dropped/failed frames visible
+libva-v4l2request: detected ...      <- driver initialised
+"decoding ... via /dev/video0"       <- never appears
+```
+
+So YouTube still runs on the CPU even though the same browser decodes a *local*
+VP9 file on the VPU (the trace shows `decoding vp9 via /dev/video0 [cedrus]` and
+the screenshot is the real picture). The difference is the delivery path: at
+`file://` Chromium uses the normal decoder, for YouTube it goes through MSE, and
+this build does not hand MSE frames to VA-API. Whether the stream it picks is
+AV1 (which this SoC cannot decode at all, only the CPU can) or VP9 is not
+settled - the watch page advertises `av01.*` codecs to a browser-like client, so
+AV1 is the likely pick. Both halves (MSE -> VA-API, and hiding AV1 so YouTube
+falls back to VP9) are browser-side work, not driver work.
+
 ### Throughput: zero-copy vs copy
 
 Two paths reach the VPU, and since 2026-10-17 both work. **Zero-copy**
