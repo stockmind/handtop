@@ -231,3 +231,37 @@ same job, better, and shares the H.265 register bank (our version assumed the
 block sat at VE offset 0, which was the wrong bank). The full notes are in the
 git history of this file (`git log -p docs/vp9-plan.md`) if that knowledge is
 ever needed again.
+
+## References and credits
+
+Nothing here was written from scratch where something existing did the job.
+Where each piece came from:
+
+- **VP9 backend**: Jernej Skrabec <jernej.skrabec@gmail.com>, the cedrus
+  maintainer, via LibreELEC's Allwinner patch set:
+  <https://github.com/LibreELEC/LibreELEC.tv/tree/master/projects/Allwinner/patches/linux>
+  (files `0410`-`0418`, `0421`; each carries his `Signed-off-by` and a
+  `[PATCH nnn/419]` number against his 7.2 rebase). Applied patches, per-file
+  purpose and what we changed are in `build/kernel/libreelec/README.md`.
+  Found through a code search for `cedrus_vp9` on <https://grep.app>.
+- **Rebased `0418`**: same change, hunks re-anchored for 0414; the patch header
+  says so.
+- **H.616 video-engine compatible string (`build/kernel/0001`)**: Chen-Yu Tsai
+  <wens@kernel.org>, "[PATCH v3 4/7] staging: media: sunxi: cedrus: add H616
+  variant", linux-media, 2026-07-12, thread:
+  <https://lore.kernel.org/all/20260712030011.3778169-5-wens@kernel.org/>
+  (backported unchanged).
+- **64-byte stride (`build/kernel/0002`)**: ours, from the earlier
+  "blue video" work in `docs/video-decode.md`; the GPU (panfrost) refuses
+  linear surfaces whose stride/offset are not 64-byte aligned.
+- **`0430` reference-stride fix**: ours. Symptom, sweep and measurements are in
+  the patch header; it is the one piece of the VP9 work that is new.
+- **Vendor blob used for the earlier reverse engineering**: `libawvp9Hw.so`,
+  `libawvp9Hso`/`libVE.so`/`libvdecoder.so` from the Transpeed 6K H616 Android
+  10 image (`https://disk.yandex.ru/d/-PklEDkwRRYJXw`, fetched by hand), plus
+  the vendor kernel shim `google_vp9.c` from the same BSP. Nothing from it ships;
+  it only informed the reverse engineering that the register map in
+  `docs/vp9-h700-regs.h` documents.
+- **Userspace pieces we rely on, unmodified**: Kwiboo's FFmpeg
+  (`v4l2-request-n7.1.3`, pinned in `build/config.sh`), libva-v4l2-request (the
+  VA driver), mpv.
