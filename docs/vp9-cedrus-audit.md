@@ -74,12 +74,17 @@ because of exactly that mistake.
 ## Claims that are NOT established (do not cite)
 
 1. **Padding-row artifact across codecs is only partly verified visually.** The
-   originally reported green/magenta line predated our patches, but its source
-   file and codec were not recorded. With the revised `0432` module, Chromium
-   hardware-decoded VP9 at 1920x804 (capture surface 1920x816) on Goblin, and a
-   screen capture showed no tinted bottom line. H.264/HEVC remain unverified;
-   earlier comparisons for those clips were unusable because letterboxing and
-   crop geometry made both views black.
+   originally reported green/magenta line predated our padding patches, but its
+   source file and codec were not recorded. On Goblin, we compared the saved
+   pre-neutral-clear module (`d47916f`) and revised module (`97b3647`) using the
+   same 1920x804 VP9 film clip in Chromium; both runs hardware-decoded through
+   Cedrus with a 1920x816 NV12 capture surface, and neither screenshot showed
+   the tinted line. This confirms the symptom does not reproduce on that clip;
+   it does not establish that the patch fixes the originally reported video.
+   A recreated blue/green/magenta VP9 pattern also decoded through Cedrus, but
+   its screenshot captured the desktop rather than playback, so it provides no
+   visual result. The original test video remains unidentified, and H.264/HEVC
+   have not been visually compared.
 2. **Firefox hardware decode** — it plays, but no VA-API activity was ever
    observed. "Unmeasured", not "broken".
 3. **Per-codec numbers for Chromium, VLC-software, Firefox RAM** — the automated

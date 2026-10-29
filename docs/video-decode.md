@@ -121,14 +121,18 @@ LibreELEC's, and its header carries the align sweep.
 
 Two things about heights are worth knowing.
 
-- **A line of green/magenta at the bottom in Chromium.** The reported line was
-  already present before our padding patches; the original file and codec were
-  not recorded. Patch `0432-cedrus-clear-padding-all-codecs.patch` clears capture
-  padding rows in `cedrus_device_run()` for supported linear 4:2:0 layouts, using
-  neutral chroma, about 23 KB per frame. On Goblin, Chromium hardware-decoded
-  VP9 at 1920x804 with a 1920x816 capture surface after this patch; the captured
-  screen showed no tinted bottom line. Other codecs have not been visually
-  checked. Background: the driver
+- **A line of green/magenta at the bottom in Chromium.** The report predates our
+  padding patches, and the original video and codec are unknown. Patch
+  `0432-cedrus-clear-padding-all-codecs.patch` clears capture padding rows in
+  `cedrus_device_run()` for supported linear 4:2:0 layouts, using neutral chroma,
+  about 23 KB per frame. A Goblin A/B with Chromium used the same 1920x804 VP9
+  clip and 1920x816 NV12 capture surface on the saved pre-fix and revised
+  modules. Both screenshots were clean, so that clip does not reproduce the
+  reported artifact and the visual A/B does not demonstrate a fix. A recreated
+  blue/green/magenta VP9 pattern reached Cedrus, but the screenshot caught the
+  desktop rather than playback; it is not a visual result. The original video
+  remains unidentified, and H.264/HEVC have not been visually compared.
+  Background: the driver
   rounds capture height to 16 lines (1088 for 1080, 240 for 234), because
   the engine writes the reconstruct surface in 16-line blocks and the chroma
   plane has to sit where the hardware puts it. Chromium's VA-API path sizes its
