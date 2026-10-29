@@ -144,47 +144,35 @@ Two things about heights are worth knowing.
 
 ### YouTube: the browser vs the native player
 
-Measured on the device 2026-10-29, 854x480 stream of one video, CPU as a share of
-one core:
+Measured on the device 2026-10-29 on one 854x480@30 stream, with the video
+engine's interrupt counter (`/proc/interrupts`, `1c0e000.video-codec`, one
+interrupt per decoded frame - the honest per-frame signal, unlike libva's
+`decoding ... via /dev/video0` line, which is printed once per decoder):
 
-| path | decoder | CPU |
+| path | VPU interrupts / 10 s | CPU |
 |---|---|---|
-| Chromium, AV1 (what YouTube picks by default) | software dav1d | ~280 % |
-| Chromium, VP9 forced by the extension | software | ~290 % |
-| `goblin-tv` -> `goblin-watch` -> mpv (`bv*[vcodec^=avc1]`) | zero-copy VPU | ~21 % |
+| Chromium, default (YouTube negotiates AV1) | **0** | ~300 % |
+| Chromium + prefer-VP9 extension (page picks `vp09.*`) | **319** | ~265 % |
+| `goblin-tv` -> `goblin-watch` -> mpv (avc1, zero-copy) | 242 | ~21 % |
 
-What the browser does and does not do:
+So YouTube *does* run on the VPU in Chromium - the browser's VA-API path works
+- but only when the page serves VP9. YouTube otherwise picks AV1, which this SoC
+cannot decode at all, and then the four A53s do it (~300 % of one core). The
+extension shipped in the image (`/usr/lib/handtop/yt-prefer-vp9`, loaded from
+`/etc/chromium.d/50-rg35xxh`) hides AV1 from `MediaSource.isTypeSupported`,
+`canPlayType` and `mediaCapabilities.decodingInfo` on youtube.com only, so the
+player reports `vp09.00.51.08...` and the VPU takes over.
 
-- YouTube normally negotiates **AV1**, and the H616/H700 has no AV1 decoder, so
-  it decodes on the CPU (player stats fetched over CDP:
-  `codecs: av01.0.04M.08 (397)`).
-- A two-file extension in the image (`/usr/lib/handtop/yt-prefer-vp9`, **not
-  enabled by default** - uncomment its `--load-extension` line in
-  `/etc/chromium.d/50-rg35xxh`) hides AV1 from
-  `MediaSource.isTypeSupported`, `canPlayType` and
-  `mediaCapabilities.decodingInfo` on youtube.com only, so YouTube serves
-  **VP9** instead (`codecs: vp09.00.51.08... (244)`, confirmed by the player).
-- That does **not** move the decode to the VPU. Chromium's MSE pipeline keeps
-  decoding in software even for VP9: libva logs
-  `decoding vp9 via /dev/video0 [cedrus]` once at setup and then stops, and the
-  CPU cost stays at ~240 %. The VPU is only used for progressive playback
-  (`file://`, direct streams) - the same VP9 file opened from disk goes through
-  `/dev/video0` frame after frame.
-- Tried and did not change it: `--enable-features=VaapiVideoDecoder`,
-  `AcceleratedVideoDecodeLinuxGL`, `AcceleratedVideoDecodeLinuxZeroCopyGL`,
-  `--enable-accelerated-video-decode`, `--ignore-gpu-blocklist`,
-  `--use-gl=egl` / `--use-angle=gl` / `--use-angle=gles`,
-  `--disable-features=Dav1dVideoDecoder`, and a Chrome/90 user agent. The GPU
-  process does log `Failed to create and initialize Vulkan implementation`
-  (`vkCreateInstance` -9) on every launch, which may be related but disabling
-  Vulkan did not help either.
+The VPU doing the frames does not make the browser cheap: ~265 % of one core is
+Chromium's page, compositor and 1 GB-browser overhead on this SoC, against ~21 %
+for the same stream through mpv. Use mpv (`goblin-watch`, `goblin-tv`) when
+battery matters; the browser path is there because YouTube in a browser is
+sometimes what you want.
 
-The extension is kept (but off) because it is what makes the "which codec did
-the page pick" question answerable, and it is one `--load-extension` line away
-from mattering the day Chromium routes MSE to VA-API. It does not save
-measurable CPU today. For actual VPU playback of YouTube, use the native client:
-`goblin-tv` browses and hands the URL to `goblin-watch`, which plays it through
-mpv with hardware decoding - that is the ~21 % row above.
+Earlier in this session the same measurement was read as "Chromium decodes in
+software", because libva's one-line log was mistaken for a per-frame signal.
+The interrupt counter settled it: local `file://` VP9 is 244 interrupts/10 s at
+57 % CPU, local H.264 242 at 129 %, both on the VPU.
 
 ### Decode matrix across codecs
 

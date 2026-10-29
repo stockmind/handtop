@@ -39,19 +39,18 @@ How to read this:
 
 ## Browsers
 
-| player | file | CPU |
-|---|---|---|
-| Chromium (kiosk, `file://`) | H.264 1080p | 129 % of one core |
-| Chromium (kiosk, `file://`) | VP9 1080p | 82 % of one core |
-| Firefox ESR (kiosk, `file://`) | H.264 1080p | 8 % (video not playing - see below) |
+| player | file | VPU interrupts / 10 s | CPU |
+|---|---|---|---|
+| Chromium (kiosk, `file://`) | H.264 1080p | 242 | 129 % of one core |
+| Chromium (kiosk, `file://`) | VP9 1080p | 244 | 57 % of one core |
+| Chromium (YouTube, VP9 via the extension) | VP9 854x480@30 | 319 | 265 % |
+| Chromium (YouTube, default AV1) | AV1 854x480@30 | 0 | ~300 % |
+| Firefox ESR (kiosk, `file://`) | H.264 1080p | 0 | 182-186 % |
 
-Chromium decodes both on the CPU: libva logs one `decoding ... via /dev/video0`
-line at setup and then stops, and 82-129 % of one core matches software decode
-rather than the 16-20 % the same codec costs in mpv. Firefox at 8 % is not a
-result - the kiosk window was idle in that run (the same run reports no libva
-activity at all), so Firefox is unmeasured here. Neither browser is a useful
-video player on this device today: the native client
-(`goblin-tv` / `goblin-watch` -> mpv) is.
+Chromium really does decode on the VPU (the interrupt counts equal the frame
+count), but it still costs 57-129 % of one core for local files and ~265 % for
+YouTube, because the browser process tree - page, compositor, 1 GB-footprint
+runtime - dwarfs the decode. Firefox never touched the VPU in these runs.
 
 ## What this means
 

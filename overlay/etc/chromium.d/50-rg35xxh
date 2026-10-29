@@ -1,15 +1,10 @@
 # RG35XX H: run Chromium as a native Wayland client and skip the default-browser prompt.
 export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --ozone-platform=wayland --no-default-browser-check"
 
-# YouTube and the video engine: not enabled, because it does not work.
-#
-# The extension below hides AV1 from YouTube's capability queries, so the page
-# serves VP9 instead of AV1 (`vp09.*` instead of `av01.*`, verified over CDP).
-# The VPU still does not get the frames: Chromium's MSE pipeline decodes in
-# software either way (~290 % of one core for VP9, ~280 % for AV1 at 480p),
-# while the same file opened from disk is decoded on the VPU frame by frame.
-# Uncomment to force VP9 anyway; for actual hardware YouTube playback use
-# goblin-tv -> goblin-watch -> mpv (~21 %, zero-copy). Details:
-# docs/video-decode.md, "YouTube: the browser vs the native player".
-#
-# export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --load-extension=/usr/lib/handtop/yt-prefer-vp9"
+# Video: keep YouTube on VP9, which the video engine decodes in hardware.
+# Without this the page negotiates AV1 (no AV1 decoder in this SoC) and decodes
+# it on the CPU. Verified with the VPU's interrupt counter: 0 interrupts/10 s
+# for AV1, 319 for the VP9 stream the page picks with this extension. The
+# extension only hides AV1 from YouTube's capability queries.
+# See docs/video-decode.md.
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --load-extension=/usr/lib/handtop/yt-prefer-vp9"
