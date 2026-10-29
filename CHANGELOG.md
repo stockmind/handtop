@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fix: mpv no longer drops the video track on software-decoded files. The
+  `dmabuf-wayland` VO only accepts dmabuf frames and mpv does not fall back to
+  the next VO when the filter chain fails, so every AV1 file (off the hwdec
+  whitelist) played audio with no picture; `scripts/vo-by-codec.lua` now picks
+  the VO from the file's video codec.
+
 - Fix: Cedrus padding clears now respect planar and semiplanar layouts and odd
   heights; the VP9 decode gate compares 10-bit frames as P010.
 

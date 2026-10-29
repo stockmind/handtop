@@ -72,8 +72,9 @@ patch series, builds `sunxi-cedrus.ko` plus `v4l2-vp9.ko`, checks their symbol
 versions against ROCKNIX's modules and installs both; `build/10-image.sh` then
 packs `handtop-20261029-ef99793.img.xz`. `modules.dep` on that image lists
 `extra/sunxi-cedrus.ko: kernel/drivers/media/v4l2-core/v4l2-vp9.ko`, and
-`/etc/mpv/mpv.conf` carries the `vp9` whitelist entry and the
-`vo=dmabuf-wayland,gpu` default. The device under test here still runs the
+`/etc/mpv/mpv.conf` carries the `vp9` whitelist entry, the
+`vo=dmabuf-wayland,gpu` default and the `vo-by-codec.lua` script that picks
+between them (see below). The device under test here still runs the
 same modules deployed by hand rather than that image.
 
 Verified on the device 2026-10-29 with 8-bit profile 0, 720p: the VPU decodes
@@ -247,11 +248,33 @@ variants behind it, software last — plus `profile=fast`. `auto-safe` picks the
 zero-copy method by itself (`mpv --hwdec=auto-safe -v` logs `Trying hardware
 decoding via hevc-drm`) and skips it when the VO has no usable interop.
 `vo=dmabuf-wayland` is cheaper still, and since 2026-10-29 it is the first VO in
-the list (`vo=dmabuf-wayland,gpu`, `gpu` as the fallback): subtitles and OSD were
-measured to render on it (screenshots with a `.srt` and `--osd-msg1`), so the
-old "video only" caveat no longer applies to this image. On 1080p VP9 it costs
-6.1 ms/frame against 8.5 ms/frame on `gpu`, both with `profile=fast`. The
-software path is unchanged and still the unstable one (next section).
+the list (`vo=dmabuf-wayland,gpu`): subtitles and OSD were measured to render on
+it (screenshots with a `.srt` and `--osd-msg1`), so the old "video only" caveat
+no longer applies to this image. On 1080p VP9 it costs 6.1 ms/frame against
+8.5 ms/frame on `gpu`, both with `profile=fast`. The software path is unchanged
+and still the unstable one (next section).
+
+### The AV1 trap: dmabuf-wayland takes only dmabuf frames
+
+`vo=dmabuf-wayland,gpu` does not mean "zero-copy where possible": mpv only falls
+back to the next VO when a VO fails to *initialise*. dmabuf-wayland initialises
+fine and then rejects the frames of anything decoded in software, which is every
+codec off the whitelist — AV1 above all, since this SoC has no AV1 decoder:
+
+```
+[hwupload] upload yuv420p -> drm_prime[yuv420p]
+[hwupload] failed to upload frame
+[cplayer] Could not initialize video chain.
+[cplayer] Video: no video
+```
+
+Audio keeps playing, so the file looks like it has no picture at all. Found
+2026-10-30 on a 4K AV1 mkv (3840x1772, dav1d at ~15 fps, so even on `gpu` it is
+a slideshow); the same file with `--vo=gpu` plays. `overlay/etc/mpv/scripts/`
+`vo-by-codec.lua` now sets the VO from the file's video codec: the zero-copy
+list for the whitelisted codecs, plain `gpu` for the rest. It is keyed on the
+codec, not on the decoder's actual choice, so a whitelisted codec the VPU
+rejects at runtime can still land back on dmabuf-wayland.
 
 ### Versus the software path (what an image without this PR does)
 
