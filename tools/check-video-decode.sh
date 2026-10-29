@@ -131,42 +131,64 @@ fi
 # docs/video-decode.md. Decode a clip twice, once through the VPU and once in
 # software, and require the first 10 frames to be bit-identical: "decodes with
 # no errors" alone has already passed on frames that were visually wrong.
+#
+# A second run picks a clip whose width is not a multiple of 64. That is the
+# case that was broken until 2026-10-29: the VP9 backend kept the vendor's
+# SCALE1_STRIDE_ALIGN(1) (16-byte stride) while the capture stride is 64-byte
+# aligned, so every inter frame read its references with the wrong stride,
+# key frames decoded and everything looked fine in a short test.
+vp9_check() {
+	local f=$1 label=$2
+	local wh psnr rc
+	wh=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$f")
+	timeout 120 ffmpeg -hide_banner -nostdin -v verbose -hwaccel v4l2request \
+		-hwaccel_output_format drm_prime -i "$f" -frames:v 10 \
+		-vf hwdownload,format=nv12 -f rawvideo "$T/vp9-hw.yuv" -y > "$T/vp9-hw.log" 2>&1
+	rc=$?
+	grep -qa 'Using V4L2 media driver cedrus' "$T/vp9-hw.log" \
+		&& chk "VP9 $label goes through the VPU (cedrus)" 0 \
+		|| chk "VP9 $label goes through the VPU (cedrus)" 1
+	[ $rc -eq 0 ] && chk "VP9 $label decodes without crashing (exit 0)" 0 \
+		|| chk "VP9 $label decodes without crashing (exit $rc)" 1
+	timeout 120 ffmpeg -hide_banner -nostdin -v error -i "$f" -frames:v 10 \
+		-pix_fmt nv12 -f rawvideo "$T/vp9-sw.yuv" -y >/dev/null 2>&1
+	psnr=$(ffmpeg -hide_banner -nostdin -f rawvideo -pix_fmt nv12 -s "$wh" -i "$T/vp9-hw.yuv" \
+		-f rawvideo -pix_fmt nv12 -s "$wh" -i "$T/vp9-sw.yuv" -lavfi psnr -f null - 2>&1 \
+		| grep -o 'average:[^ ]*' | head -1)
+	case "$psnr" in
+	average:inf|average:infinity*)
+		chk "VP9 $label matches software ($psnr)" 0 ;;
+	average:*)
+		awk -v a="${psnr#average:}" 'BEGIN { exit !(a + 0 >= 35) }' \
+			&& chk "VP9 $label matches software ($psnr, >= 35 dB)" 0 \
+			|| chk "VP9 $label matches software ($psnr, below 35 dB)" 1 ;;
+	*)
+		chk "VP9 $label matches software (no PSNR measured)" 1 ;;
+	esac
+}
+
 echo
 echo "VP9 hardware decode (10 frames, compared against software):"
-VP9F=""
+VP9F=""; VP9ODD=""
 for f in "$HOME"/test-media/vp9*.mkv "$HOME"/test-media/vp9*.webm "$HOME"/Downloads/*vp9*.mkv; do
-  [ -r "$f" ] || continue
-  [ "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$f" 2>/dev/null)" = vp9 ] || continue
-  VP9F="$f"; break
+	[ -r "$f" ] || continue
+	[ "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$f" 2>/dev/null)" = vp9 ] || continue
+	w=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$f" 2>/dev/null)
+	if [ -z "$VP9F" ]; then
+		VP9F="$f"
+	elif [ -z "$VP9ODD" ] && [ $((w % 64)) -ne 0 ]; then
+		VP9ODD="$f"
+	fi
 done
 if [ -n "$VP9F" ]; then
-  WH=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$VP9F")
-  timeout 120 ffmpeg -hide_banner -nostdin -v verbose -hwaccel v4l2request \
-        -hwaccel_output_format drm_prime -i "$VP9F" -frames:v 10 \
-        -vf hwdownload,format=nv12 -f rawvideo "$T/vp9-hw.yuv" -y > "$T/vp9-hw.log" 2>&1
-  rc=$?
-  grep -qa 'Using V4L2 media driver cedrus' "$T/vp9-hw.log" \
-    && chk "VP9 goes through the VPU (cedrus)" 0 \
-    || chk "VP9 goes through the VPU (cedrus)" 1
-  [ $rc -eq 0 ] && chk "VP9 decodes without crashing (exit 0)" 0 \
-    || chk "VP9 decodes without crashing (exit $rc)" 1
-  timeout 120 ffmpeg -hide_banner -nostdin -v error -i "$VP9F" -frames:v 10 \
-        -pix_fmt nv12 -f rawvideo "$T/vp9-sw.yuv" -y >/dev/null 2>&1
-  psnr=$(ffmpeg -hide_banner -nostdin -f rawvideo -pix_fmt nv12 -s "$WH" -i "$T/vp9-hw.yuv" \
-           -f rawvideo -pix_fmt nv12 -s "$WH" -i "$T/vp9-sw.yuv" -lavfi psnr -f null - 2>&1 \
-         | grep -o 'average:[^ ]*' | head -1)
-  case "$psnr" in
-    average:inf|average:infinity*)
-      chk "VP9 output matches software ($psnr)" 0 ;;
-    average:*)
-      awk -v a="${psnr#average:}" 'BEGIN { exit !(a + 0 >= 35) }' \
-        && chk "VP9 output matches software ($psnr, >= 35 dB)" 0 \
-        || chk "VP9 output matches software ($psnr, below 35 dB)" 1 ;;
-    *)
-      chk "VP9 output matches software (no PSNR measured)" 1 ;;
-  esac
+	vp9_check "$VP9F" ""
+	if [ -n "$VP9ODD" ]; then
+		vp9_check "$VP9ODD" "at $(( $(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$VP9ODD") % 64 ))-off-64 width"
+	else
+		echo "  skip  VP9 width-not-multiple-of-64 check (no such clip; vp9-*.mkv in ~/test-media)"
+	fi
 else
-  echo "  skip  VP9 check (no test clip; put one in ~/test-media/vp9-*.mkv)"
+	echo "  skip  VP9 check (no test clip; put one in ~/test-media/vp9-*.mkv)"
 fi
 
 echo
