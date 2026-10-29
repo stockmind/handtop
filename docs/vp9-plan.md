@@ -62,3 +62,41 @@ device and a commit on the fork branch `vp9-cedrus` (patch under
 - keep `docs/video-decode.md` honest at each step (VP9 still software until M5)
 - unknowns to close offline before M4: probability block layout, the last
   header fields of `Vp9DecodeFrameTag`
+
+## Module build loop (no reflash)
+
+The decoder is the only piece that changes, so skip `build/06b-cedrus.sh`'s
+full-image path:
+
+```
+T=work/kernel/linux-7.2-rocknix-20261001
+sudo ARCH=arm64 CROSS_COMPILE=$PWD/work/kernel/gcc15/bin/aarch64-none-linux-gnu- \
+     make -C $T -j32 M=drivers/staging/media/sunxi/cedrus modules
+scp $T/drivers/staging/media/sunxi/cedrus/sunxi-cedrus.ko goblin:~/
+ssh goblin   # install to /lib/modules/7.2.0/extra/, depmod, modprobe -r/+
+~/check-video-decode.sh    # H.264 regression gate
+```
+
+`make prepare` must have run once in `$T` (the generated `asm/` headers are
+pruned when the tree is packed), otherwise the module build stops at
+`asm/compiler.h: No such file or directory`.
+
+## Progress
+
+**M0 done** (2026-10-29). Module rebuilt from the unmodified tree and reloaded
+on the device, H.264 unchanged:
+
+```
+ffmpeg -hwaccel v4l2request / check-video-decode.sh
+  ok    decodes without crashing (exit 0)
+  ok    Cedrus VPU engaged (not software)
+  ok    no decode errors
+  122 frames decoded; 0 decode errors
+mpv --hwdec=v4l2request-copy:  ok    hardware decoding used
+RESULT: VPU path NOT working (zero-copy mpv FAIL, pre-existing)
+```
+
+CPU for 10 s of 1080p24 H.264 through `v4l2request` + `drm_prime`:
+`utime=0.517 stime=0.387 rtime=2.220` = 41 % of one core; that is the number
+to keep flat when VP9 lands. The zero-copy mpv failure is the known
+`drmprime` EGL interop gap, unrelated to this work.
