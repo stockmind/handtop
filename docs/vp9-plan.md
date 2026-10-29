@@ -185,9 +185,21 @@ Correction to the earlier note: the device did not hang. It dropped its Wi-Fi
 association for ~6 min (`wlan0: associated` in dmesg, uptime kept climbing) and
 came back by itself.
 
-Remaining: Chromium/VA-API with VP9, 10-bit and odd widths (M7, needs `0412`/
-`0413`/`0417`; recipe in `build/kernel/libreelec/README.md`), and M8 becomes
-"review Jernej's series rather than post a competing one".
+Chromium (155, the image's browser) engages the same path - the VA driver
+advertises `VAProfileVP9Profile0/Profile2` now that the kernel decodes VP9, and
+a fullscreen 1080p VP9 file renders the real picture:
+
+```
+libva-v4l2request: decoding vp9 via /dev/video0 [cedrus] (media /dev/media0)
+(ffmpeg -hwaccel vaapi: 11 frames decoded, 0 decode errors)
+```
+
+`/etc/mpv/mpv.conf` now lists `vp9` in `hwdec-codecs`, so the image's default
+player uses it without any flag.
+
+Remaining: 10-bit and odd widths (M7, needs `0412`/`0413`/`0417`; recipe in
+`build/kernel/libreelec/README.md`), a 1080p VP9 soak, and M8 becomes "review
+Jernej's series rather than post a competing one".
 
 ## What the hand-rolled experiment established (superseded, kept for the record)
 
