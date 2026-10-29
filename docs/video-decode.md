@@ -140,9 +140,12 @@ So `overlay/etc/mpv/mpv.conf` ships `hwdec=auto-safe` — zero-copy first, the c
 variants behind it, software last — plus `profile=fast`. `auto-safe` picks the
 zero-copy method by itself (`mpv --hwdec=auto-safe -v` logs `Trying hardware
 decoding via hevc-drm`) and skips it when the VO has no usable interop.
-`vo=dmabuf-wayland` is faster still but renders video only — no OSD, no
-subtitles — so it remains an option rather than the default. The software path is
-unchanged and still the unstable one (next section).
+`vo=dmabuf-wayland` is cheaper still, and since 2026-10-29 it is the first VO in
+the list (`vo=dmabuf-wayland,gpu`, `gpu` as the fallback): subtitles and OSD were
+measured to render on it (screenshots with a `.srt` and `--osd-msg1`), so the
+old "video only" caveat no longer applies to this image. On 1080p VP9 it costs
+6.1 ms/frame against 8.5 ms/frame on `gpu`, both with `profile=fast`. The
+software path is unchanged and still the unstable one (next section).
 
 ### Versus the software path (what an image without this PR does)
 
