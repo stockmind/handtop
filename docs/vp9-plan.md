@@ -154,10 +154,20 @@ Semantics recovered so far, mapped onto `struct v4l2_ctrl_vp9_frame`:
 | 102-104, 112-115, 122-135, 142-161, 166-173 (`SetSegmentation`) | 8 segments x features, still to decode |
 | `Vp9AsicProbUpdate` | 3744-byte probability block, layout open |
 
-Blocked on: the descriptor table itself (index -> word offset/mask/shift), which
-the earlier extraction only resolved for the fields it saw in call arguments
-(index 371 had no descriptor row, which is what exposed the mistake), and the
-probability block layout. Recovering the table is mechanical: dump the 392
-16-byte descriptor entries at vaddr 0xd034 of `libawvp9Hw.so` with
-`arm-linux-gnueabihf-objdump`/`readelf`, then re-read the `SetDecRegister`
-call sites with the real word offsets instead of the `index * 4` guess.
+**Resolved** (same day): the descriptor table is at vaddr 0xd034 of
+`libawvp9Hw.so`, 392 entries of 16 bytes `{ word, mask_index, shift, flushed }`,
+`mask(n) = (1 << n) - 1`. 353 fields are flushed, into 184 words, so the block
+is 736 bytes and its base is the start of the VE window: `FlushDecRegisters`
+writes word N to VE offset `N * 4` with `DWLWriteReg`, and `Vp9AsicRun` then
+writes 0x34/0x38/0x3c and kicks 0x04. The complete map is in
+`docs/vp9-h700-regs.h` (index, byte offset, mask, shift).
+
+What is still open before M2 can land:
+
+- the reference-slot mapping (index 175 and friends repeat inside the
+  `SetReferenceFrames` loop, so the per-slot indices come from the part of that
+  function after 0x55e8);
+- `SetLoopFilter` and `SetSegmentation` values (M3);
+- the 3744-byte probability block (M4), the `Vp9AsicProbUpdate` layout;
+- the tile table hand-off: `ctx->0x384` is a separate 1776-byte buffer flushed
+  through the vendor's cache op, so cedrus needs a DMA buffer for it.
