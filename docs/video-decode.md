@@ -73,12 +73,17 @@ the clip and the frames come out **bit-identical to a software decode**
 `0 decode errors` as well. `tools/check-video-decode.sh` has a VP9 section that
 decodes 10 frames twice (VPU and software) and fails below 35 dB.
 
-Open on this path: 1080p still needs a soak (the device dropped off the network
-right after a second 1080p run), players are not switched over yet (mpv's
-`hwdec-codecs` list does not include vp9), Chromium/VA-API has not been tried
-with VP9, 10-bit (profile 2, P010 capture) is prepared but unbuilt in the image,
-and the decoder does not advertise odd widths beyond the VP9's own 64-pixel tile
-grid.
+1080p is bit-exact too (`PSNR average:inf`, 10/10 frames). Measured with mpv on
+the same clip, 10 s of real-time playback at 24 fps, whole-process CPU as a share
+of one core: software 116 %, `--hwdec=v4l2request-copy` 100 %,
+`--hwdec=drm` with `vo=gpu` 59 %, `--hwdec=drm` with `vo=dmabuf-wayland` 48 %.
+Use `--hwdec=drm`; the `--hwdec=v4l2request` spelling falls back to software for
+VP9, and `vp9` has to be added to `hwdec-codecs` before mpv will try it.
+
+Open on this path: the 40 % target is not met yet (48 %), Chromium/VA-API has
+not been tried with VP9, 10-bit (profile 2, P010 capture) is prepared but not in
+the image, and there is no soak yet for 1080p VP9 (the earlier "device dropped
+off the network" was a Wi-Fi re-association, not a hang).
 
 ### Throughput: zero-copy vs copy
 

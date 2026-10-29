@@ -150,26 +150,44 @@ Applied: `0410` (don't CPU-map source buffers), `0411` (the VP9 backend,
 `cedrus_vp9.c`, 1297 lines), `0421` (`select V4L2_VP9`). Downloaded but not
 applied yet: `0412`/`0413`/`0415`/`0417`/`0418` (10-bit and mode-bit naming).
 
-**M5 - verified at 720p.** 8-bit VP9 profile 0 on the device, hardware path
-against a software decode of the same clip:
+**M5 - verified, bit-exact.** 8-bit profile 0 on the device, VPU output against
+a software decode of the same clip, 10 frames dumped through
+`hwdownload,format=nv12`:
 
 ```
-ffmpeg -hwaccel v4l2request -hwaccel_output_format drm_prime -i vp9-720p.mkv \
-       -vf hwdownload,format=nv12 -f rawvideo hw.yuv
-[AVHWFramesContext] Using V4L2 media driver cedrus (7.2.0) for VP9F
-60 frames decoded; 0 decode errors
-ffmpeg ... -lavfi psnr hw.yuv sw.yuv
-PSNR y:inf u:inf v:inf average:inf        <- bit-identical to software
+720p   60/60 frames, 0 decode errors    PSNR average:inf
+1080p  10/10 frames, 0 decode errors    PSNR average:inf (y/u/v all inf)
 ```
 
-1080p: `60 frames decoded; 0 decode errors`, Cedrus engaged. Then the device
-stopped answering (ARP FAILED for 192.168.1.143) while a second 1080p run was in
-flight - power, thermal or a VPU-induced hang is not yet distinguished. Reuse
-the power/CMA sampler from the soak notes before calling 1080p good.
+`tools/check-video-decode.sh` now carries that as a gate (it decodes 10 frames
+twice and fails below 35 dB); on the device it reports
+`ok VP9 goes through the VPU (cedrus)`, `ok VP9 decodes without crashing`,
+`ok VP9 output matches software (average:inf)`.
 
-Remaining: mpv and Chromium (M6), 10-bit and odd widths (M7, needs `0412`/
-`0413`/`0417`/`0418`), and the upstream submission (M8) becomes "review
-Jernej's series rather than post a competing one".
+**M6 - mpv works, Chromium untested.** 1080p VP9 profile 0, 240 frames with
+`--untimed` (throughput and CPU from one `time -p` run per config) and real-time
+playback of 10 s at 24 fps:
+
+| path | fps | CPU, untimed | CPU, real-time |
+|---|---|---|---|
+| software (`--hwdec=no`) | 97.6 | 214 % | 116 % |
+| copy (`--hwdec=v4l2request-copy`) | 62.0 | 108 % | 100 % |
+| zero-copy (`--hwdec=drm`, `vo=gpu`) | 105.7 | 91 % | 59 % |
+| zero-copy + `vo=dmabuf-wayland` | - | - | 48 % |
+
+So VP9 lands at 48 % of one core for 1080p24 zero-copy against 116 % in
+software, a 2.4x saving; the plan's 40 % target is not met yet (the same
+`vo=dmabuf-wayland` config is what the image ships for H.264, see
+`docs/video-decode.md`). Note the spelling: `--hwdec=v4l2request` falls back to
+software for VP9, `--hwdec=drm` is the zero-copy name that works.
+
+Correction to the earlier note: the device did not hang. It dropped its Wi-Fi
+association for ~6 min (`wlan0: associated` in dmesg, uptime kept climbing) and
+came back by itself.
+
+Remaining: Chromium/VA-API with VP9, 10-bit and odd widths (M7, needs `0412`/
+`0413`/`0417`; recipe in `build/kernel/libreelec/README.md`), and M8 becomes
+"review Jernej's series rather than post a competing one".
 
 ## What the hand-rolled experiment established (superseded, kept for the record)
 
