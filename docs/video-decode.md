@@ -186,6 +186,17 @@ measurable CPU today. For actual VPU playback of YouTube, use the native client:
 `goblin-tv` browses and hands the URL to `goblin-watch`, which plays it through
 mpv with hardware decoding - that is the ~21 % row above.
 
+### Decode matrix across codecs
+
+A 90 s 1080p clip was transcoded to every codec the VPU decodes and measured
+through ffmpeg (decode only), mpv (both VOs) and both browsers. The table and
+the method are in `docs/bench-video-decode.md`; the short version is that with
+zero-copy `vo=dmabuf-wayland` **every** codec costs 6.8-8.2 ms/frame (16-20 % of
+one core at 24 fps), while `vo=gpu` costs 2.5x that, and that ffmpeg's hwaccel
+copy-back path (`-hwaccel v4l2request -f null`, the `*-copy` player variants)
+downloads every frame and ends up slower than software decode at these
+resolutions. Browsers are CPU-only (Chromium 82-129 % for the same files).
+
 ### Throughput: zero-copy vs copy
 
 Two paths reach the VPU, and since 2026-10-17 both work. **Zero-copy**
