@@ -121,7 +121,10 @@ LibreELEC's, and its header carries the align sweep.
 
 Two things about heights are worth knowing.
 
-- **A line of green/magenta at the bottom in Chromium.** The driver reports a
+- **A line of green/magenta at the bottom in Chromium.** Fixed 2026-10-29
+  (`0431-cedrus-vp9-clear-padding.patch`): the padding rows are cleared in
+  `cedrus_vp9_setup()`, ~23 KB per frame, so they are black instead of stale
+  colour noise. Background: the driver reports a
   16-aligned capture height (1088 for a 1080-line stream, 240 for 234), because
   the engine writes the reconstruct surface in 16-line blocks and the chroma
   plane has to sit where the hardware puts it. Chromium's VA-API path sizes its
