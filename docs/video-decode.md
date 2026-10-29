@@ -106,7 +106,17 @@ dumped as `p010le`). Chromium 155 decodes VP9 through the same driver - vainfo
 lists `VAProfileVP9Profile0/Profile2` and a fullscreen file renders the real
 picture (`libva-v4l2request: decoding vp9 via /dev/video0 [cedrus]`).
 
-The 40 % CPU target from the plan is beaten (11 %). Widths that are not a
+The 40 % CPU target from the plan is beaten (11 %).
+
+One VP9 case is still wrong: **profile 2 (10-bit) at a width that is not a
+multiple of 64** (854x480 P010) decodes to garbage - `PSNR average:9.6` against
+software, while 1280x720 P010 is `inf` and HEVC Main10 is `inf` at 854 as well.
+It is VP9-specific and lives in the P010 conversion path, not in the shared
+hidden-surface strides: changing `cedrus_dst_frame_fmt()` to give the hidden
+NV12 surface the 64-byte stride (the obvious first move) broke VP9 10-bit at
+*every* width and dropped HEVC Main10 720p from `inf` to 14 dB, so that was
+reverted. All 8-bit widths are fine, so this only bites VP9 profile 2 at odd
+widths. Widths that are not a
 multiple of 64 (416, 854, 1366) were broken at first - key frames decoded, every
 inter frame was garbage - because the VP9 backend kept the vendor's
 `SCALE1_STRIDE_ALIGN(1)`, the value for the 16-byte stride cedrus used before
