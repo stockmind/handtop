@@ -127,6 +127,48 @@ else
   echo "  skip  416-wide check (no libx264 to make the test file)"
 fi
 
+# VP9: cedrus gained a VP9 backend (H.265 engine slot) in this image, see
+# docs/video-decode.md. Decode a clip twice, once through the VPU and once in
+# software, and require the first 10 frames to be bit-identical: "decodes with
+# no errors" alone has already passed on frames that were visually wrong.
+echo
+echo "VP9 hardware decode (10 frames, compared against software):"
+VP9F=""
+for f in "$HOME"/test-media/vp9*.mkv "$HOME"/test-media/vp9*.webm "$HOME"/Downloads/*vp9*.mkv; do
+  [ -r "$f" ] || continue
+  [ "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$f" 2>/dev/null)" = vp9 ] || continue
+  VP9F="$f"; break
+done
+if [ -n "$VP9F" ]; then
+  WH=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$VP9F")
+  timeout 120 ffmpeg -hide_banner -nostdin -v verbose -hwaccel v4l2request \
+        -hwaccel_output_format drm_prime -i "$VP9F" -frames:v 10 \
+        -vf hwdownload,format=nv12 -f rawvideo "$T/vp9-hw.yuv" -y > "$T/vp9-hw.log" 2>&1
+  rc=$?
+  grep -qa 'Using V4L2 media driver cedrus' "$T/vp9-hw.log" \
+    && chk "VP9 goes through the VPU (cedrus)" 0 \
+    || chk "VP9 goes through the VPU (cedrus)" 1
+  [ $rc -eq 0 ] && chk "VP9 decodes without crashing (exit 0)" 0 \
+    || chk "VP9 decodes without crashing (exit $rc)" 1
+  timeout 120 ffmpeg -hide_banner -nostdin -v error -i "$VP9F" -frames:v 10 \
+        -pix_fmt nv12 -f rawvideo "$T/vp9-sw.yuv" -y >/dev/null 2>&1
+  psnr=$(ffmpeg -hide_banner -nostdin -f rawvideo -pix_fmt nv12 -s "$WH" -i "$T/vp9-hw.yuv" \
+           -f rawvideo -pix_fmt nv12 -s "$WH" -i "$T/vp9-sw.yuv" -lavfi psnr -f null - 2>&1 \
+         | grep -o 'average:[^ ]*' | head -1)
+  case "$psnr" in
+    average:inf|average:infinity*)
+      chk "VP9 output matches software ($psnr)" 0 ;;
+    average:*)
+      awk -v a="${psnr#average:}" 'BEGIN { exit !(a + 0 >= 35) }' \
+        && chk "VP9 output matches software ($psnr, >= 35 dB)" 0 \
+        || chk "VP9 output matches software ($psnr, below 35 dB)" 1 ;;
+    *)
+      chk "VP9 output matches software (no PSNR measured)" 1 ;;
+  esac
+else
+  echo "  skip  VP9 check (no test clip; put one in ~/test-media/vp9-*.mkv)"
+fi
+
 echo
 [ $fail -eq 0 ] && echo "RESULT: VPU path OK" || echo "RESULT: VPU path NOT working (see docs/video-decode.md)"
 exit $fail

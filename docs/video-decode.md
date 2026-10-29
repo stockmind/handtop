@@ -50,13 +50,35 @@ kernel's Cedrus has reach the VPU. The whitelist line is worth its keep on
 battery: MPEG-2 1080i drops from 88.8 % to 45.6 % CPU and VP8 720p from 92.1 % to
 48.1 %, at the same fps.
 
-VP9 and AV1 are deliberately not in the list. This kernel's Cedrus has no
-decoder for them, and mpv's attempt at them does not fail cleanly: it reports
-`Error while decoding frame (hardware decoding)!` for every frame before it
-gives up. Leaving them out of the whitelist means they are never attempted and
-decode in software right away — VP9 in FFmpeg's native decoder, AV1 in dav1d
-(this build enables it: with the hardware devices advertised, the native av1
-decoder picks no pixel format and renders black).
+VP9 is not in the list yet: the driver decodes it (see "VP9" below) but the
+player side is still being measured, so mpv keeps decoding VP9 in software.
+AV1 is not in the list because the silicon has no AV1 decoder, and mpv's
+attempt does not fail cleanly: it reports `Error while decoding frame (hardware
+decoding)!` for every frame before it gives up. Leaving them out of the
+whitelist means they are never attempted and decode in software right away —
+VP9 in FFmpeg's native decoder, AV1 in dav1d (this build enables it: with the
+hardware devices advertised, the native av1 decoder picks no pixel format and
+renders black).
+
+### VP9
+
+The H616/H700 video engine also decodes VP9, in the same slot as H.265. Mainline
+cedrus has no backend for it; this image carries Jernej Skrabec's out-of-tree
+series (provenance and applied patches: `build/kernel/libreelec/README.md`),
+plus the `v4l2-vp9` helper module it needs, which ROCKNIX does not ship.
+
+Verified on the device 2026-10-29 with 8-bit profile 0, 720p: the VPU decodes
+the clip and the frames come out **bit-identical to a software decode**
+(`PSNR average:inf`, 60/60 frames, `0 decode errors`); 1080p reports
+`0 decode errors` as well. `tools/check-video-decode.sh` has a VP9 section that
+decodes 10 frames twice (VPU and software) and fails below 35 dB.
+
+Open on this path: 1080p still needs a soak (the device dropped off the network
+right after a second 1080p run), players are not switched over yet (mpv's
+`hwdec-codecs` list does not include vp9), Chromium/VA-API has not been tried
+with VP9, 10-bit (profile 2, P010 capture) is prepared but unbuilt in the image,
+and the decoder does not advertise odd widths beyond the VP9's own 64-pixel tile
+grid.
 
 ### Throughput: zero-copy vs copy
 
@@ -352,7 +374,9 @@ libva-v4l2request: detected 1 Request API decoder
       VAProfileHEVCMain/Main10, VAProfileVP8Version0_3 : VAEntrypointVLD
 ```
 
-— exactly Cedrus' codecs (no VP9/AV1, as in the kernel).
+— the codecs the VA driver implements. VP9 is an entry the driver only
+advertises when the kernel decoder supports it; with this image's cedrus it can
+be added, but the player side is still untested (no AV1: not in the silicon).
 
 **Chromium engages it and the VPU decodes.** With `LIBVA_DRIVER_NAME=v4l2_request`
 and no VA-specific flags, Chromium 155 builds `VaapiVideoDecoder` and hands the
@@ -647,8 +671,10 @@ What the numbers say:
   In flight: a series switching the SRAM/reserved-memory setup to
   `devm_of_reserved_mem_device_init()` (v2 6/6, 2026-09-02) — if it lands it may
   change what the DT node has to describe, so re-check our overlay when bumping
-  the kernel. No VP9 work exists for cedrus (VP9 stays software; AV1 is not in
-  the silicon).
+  the kernel. A VP9 backend for cedrus does exist outside mainline (Jernej
+  Skrabec's series, taken from LibreELEC's Allwinner patch set, listed with
+  provenance in `build/kernel/libreelec/README.md`) and this image ships it;
+  AV1 is not in the silicon.
 - VLC: trixie ships 3.0.23 (3.0.24 in proposed-updates/sid); there is no VLC 4
   package, so VLC's Wayland-window limitation (and the XWayland requirement
   above) stands until a newer VLC is packaged.
@@ -715,7 +741,7 @@ yt-dlp goes stale when YouTube changes: update with
 
 | Piece | What | Where |
 |---|---|---|
-| Decoder hardware | Allwinner Cedar video engine (same as H6): MPEG-2, H.264, H.265 8/10-bit, VP8. No VP9 yet (separate upstream series), no AV1 (not in hardware). | `video-codec@1c0e000` |
+| Decoder hardware | Allwinner Cedar video engine (same as H6): MPEG-2, H.264, H.265 8/10-bit, VP8, and VP9 8-bit through its own backend (out-of-tree series, shares the H.265 engine slot). No AV1 (not in hardware). | `video-codec@1c0e000` |
 | Kernel driver | Cedrus, V4L2 **stateless** (request API) → `/dev/video0`, `/dev/media0` | `sunxi-cedrus.ko` in `/usr/lib/modules/7.2.0/extra/`, loaded automatically from the DT node; our patch gives the decoded picture a 64-byte aligned stride, which is what the GPU needs to import it (see "The blue video") |
 | Device tree | ROCKNIX DTB + overlay adding the video-engine node | `/boot/firmware/dtb.img` (original kept as `dtb-rocknix.img`) |
 | Memory | Decoder buffers come from CMA: `cma=256M` on the kernel command line (ROCKNIX default is 32 MB). Unused CMA stays available to normal programs. 1080p streaming uses ~140 MB. | `extlinux/extlinux.conf` |
