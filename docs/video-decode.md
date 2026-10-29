@@ -80,10 +80,16 @@ of one core: software 116 %, `--hwdec=v4l2request-copy` 100 %,
 Use `--hwdec=drm`; the `--hwdec=v4l2request` spelling falls back to software for
 VP9, and `vp9` has to be added to `hwdec-codecs` before mpv will try it.
 
-Open on this path: the 40 % target is not met yet (48 %), Chromium/VA-API has
-not been tried with VP9, 10-bit (profile 2, P010 capture) is prepared but not in
-the image, and there is no soak yet for 1080p VP9 (the earlier "device dropped
-off the network" was a Wi-Fi re-association, not a hang).
+10-bit (profile 2) is in as well: the capture queue now offers P010 and a
+`yuv420p10le` clip decodes bit-identically (`PSNR average:inf` over 10 frames
+dumped as `p010le`). Chromium 155 decodes VP9 through the same driver - vainfo
+lists `VAProfileVP9Profile0/Profile2` and a fullscreen file renders the real
+picture (`libva-v4l2request: decoding vp9 via /dev/video0 [cedrus]`).
+
+Two things are open. The 40 % CPU target is not met yet (48 %), and at widths
+that are not a multiple of 64 (854, 1366) the **copy** path is black or blocky
+while zero-copy is fine - the same corruption shows up for H.264 there, so it is
+the 64-byte stride behaviour, not the VP9 backend.
 
 ### Throughput: zero-copy vs copy
 
