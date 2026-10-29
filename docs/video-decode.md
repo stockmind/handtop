@@ -97,12 +97,16 @@ dumped as `p010le`). Chromium 155 decodes VP9 through the same driver - vainfo
 lists `VAProfileVP9Profile0/Profile2` and a fullscreen file renders the real
 picture (`libva-v4l2request: decoding vp9 via /dev/video0 [cedrus]`).
 
-The 40 % CPU target from the plan is beaten (11 %). One thing is open: at
-widths that are not a multiple of 64 (854, 1366) mpv's **copy** path
-(`--hwdec=v4l2request-copy`) renders rainbow garbage while zero-copy is correct,
-and ffmpeg's own `hwdownload` of the same frames is correct too, so the frames
-are fine and it is mpv's download path. H.264 shows the same corruption there,
-so it predates VP9.
+The 40 % CPU target from the plan is beaten (11 %). Widths that are not a
+multiple of 64 (416, 854, 1366) were broken at first - key frames decoded, every
+inter frame was garbage - because the VP9 backend kept the vendor's
+`SCALE1_STRIDE_ALIGN(1)`, the value for the 16-byte stride cedrus used before
+`0002-cedrus-64-byte-stride.patch` made it 64-byte aligned. The engine then
+read reference pictures back with a 16-byte aligned stride. Deriving the field
+from `bytesperline` (value 3 for a 64-byte stride) fixes it: 416, 854, 854+copy,
+1366, 1280, 1920, 3840 and 720p P010 are all `PSNR average:inf` against software
+now. The patch is `build/kernel/libreelec/0430-cedrus-vp9-stride-align.patch`,
+ours rather than LibreELEC's, and its header carries the align sweep.
 
 ### Throughput: zero-copy vs copy
 

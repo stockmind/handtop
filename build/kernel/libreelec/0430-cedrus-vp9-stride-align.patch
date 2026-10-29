@@ -1,0 +1,95 @@
+From: stockmind <slysimo@gmail.com>
+Subject: [PATCH] media: cedrus: tell the VP9 engine how the reference stride is aligned
+
+Applies on top of the LibreELEC VP9 series (0410/0411/0412/0413/0415/0417/
+0418/0421). Not part of that series: this one is ours.
+
+The VP9 backend programs the reference-scale registers with the vendor's
+VE_DEC_VP9_SCALE1_STRIDE_ALIGN(1), which is the value for the 16-byte capture
+stride cedrus used to program. 0002-cedrus-64-byte-stride.patch changed that
+stride to 64-byte alignment so panfrost can import the frames, but the field
+was left at 16. The engine then reads reference pictures back with a 16-byte
+aligned stride while the buffer is 64-byte aligned: every key frame decodes
+correctly and every inter frame is garbage, but only for widths whose 16- and
+64-byte alignments differ (854, 416, 1366 - 1280/1920/3840 happen to coincide,
+which is why the first round of testing missed it).
+
+Derive the field from the negotiated bytesperline instead of hardcoding it.
+Measured on the device, 5 inter frames against a software decode, 854x480:
+
+  align=0  PSNR 9.26   align=3  PSNR inf   (4 is inf too, 5..7 back to ~9)
+  align=1  PSNR 9.42   (the vendor default, what we had)
+  align=2  PSNR 9.42
+
+With align=3: 416x234, 854x480, 1366x768, 1280x720, 1920x1080, 3840x2160 and
+720p P010 are all PSNR average:inf against software.
+---
+diff -urN a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c b/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c
+--- a/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c	2026-10-29 18:44:54.513655892 +0100
++++ b/drivers/staging/media/sunxi/cedrus/cedrus_vp9.c	2026-10-29 18:44:54.520276975 +0100
+@@ -423,6 +423,28 @@
+  *   reg[ 4: 0] = step_q4 - 1
+  *   reg[20: 5] = (ref_size << 14) / cur_size  (Q14 scale factor)
+  */
++/*
++ * The reference surfaces are read back with the capture stride, so the
++ * hardware has to be told how that stride is aligned: the vendor blob used 1
++ * for the 16-byte stride cedrus used to program.  Our capture stride is
++ * 64-byte aligned (build/kernel/0002-cedrus-64-byte-stride.patch), and leaving
++ * the field at the vendor value makes every inter frame read its references
++ * with the wrong stride: luma and chroma are garbage at any width whose
++ * 16-byte and 64-byte alignments differ, while all-intra streams decode fine.
++ */
++static u32 cedrus_vp9_stride_align(struct cedrus_ctx *ctx)
++{
++	u32 width = ctx->dst_fmt.width;
++	u32 bpl = ctx->dst_fmt.bytesperline;
++
++	if (bpl >= ALIGN(width, 64))
++		return 3;	/* 64-byte aligned rows */
++	if (bpl >= ALIGN(width, 32))
++		return 2;	/* 32-byte aligned rows */
++
++	return 1;		/* 16-byte aligned rows */
++}
++
+ static void cedrus_vp9_ref_scale(u32 ref_w, u32 ref_h, u32 cur_w, u32 cur_h,
+ 				 u32 *reg0, u32 *reg1)
+ {
+@@ -744,7 +766,7 @@
+ 	struct vb2_buffer *src_buf = &run->src->vb2_buf;
+ 	dma_addr_t src_dma, src_end, luma, chroma;
+ 	u32 src_len, hdr_off, cur_w, cur_h;
+-	u32 hdr_syn, fc;
++	u32 hdr_syn, fc, stride_align;
+ 	bool intra_only, p010, resolution_change, use_temporal_mv;
+ 	int ret;
+ 
+@@ -899,13 +921,15 @@
+ 		     VE_DEC_VP9_BITS_ADDR_LAST);
+ 
+ 	/* Picture size and reference frame sizes / scale factors. */
++	stride_align = cedrus_vp9_stride_align(ctx);
++
+ 	cedrus_write(dev, VE_DEC_VP9_PIC_SIZE,
+ 		     VE_DEC_VP9_PIC_WIDTH(cur_w) |
+ 		     VE_DEC_VP9_PIC_HEIGHT(cur_h));
+ 
+ 	if (intra_only) {
+ 		cedrus_write(dev, VE_DEC_VP9_LAST_SCALE1,
+-			     VE_DEC_VP9_SCALE1_STRIDE_ALIGN(1));
++			     VE_DEC_VP9_SCALE1_STRIDE_ALIGN(stride_align));
+ 	} else {
+ 		struct vb2_buffer *last_buf, *gold_buf, *alt_buf;
+ 		struct cedrus_buffer *last_cb, *gold_cb, *alt_cb;
+@@ -951,7 +975,7 @@
+ 		cedrus_vp9_ref_scale(last_w, last_h, cur_w, cur_h, &s0, &s1);
+ 		cedrus_write(dev, VE_DEC_VP9_LAST_SCALE0, s0);
+ 		cedrus_write(dev, VE_DEC_VP9_LAST_SCALE1,
+-			     s1 | VE_DEC_VP9_SCALE1_STRIDE_ALIGN(1));
++			     s1 | VE_DEC_VP9_SCALE1_STRIDE_ALIGN(stride_align));
+ 
+ 		cedrus_vp9_ref_scale(gold_w, gold_h, cur_w, cur_h, &s0, &s1);
+ 		cedrus_write(dev, VE_DEC_VP9_GOLDEN_SCALE0, s0);
+-- 
+2.43.0

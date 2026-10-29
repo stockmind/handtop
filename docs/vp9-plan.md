@@ -204,10 +204,16 @@ VP9 8-bit 720p:  identical to software
 H.264 1080p:     122 frames, 0 decode errors
 ```
 
-Widths that are not a multiple of 64 (854, 1366) decode correctly zero-copy
-(`--hwdec=drm`: real picture on screen) but the *copy* path is black or blocky.
-H.264 shows the same corruption there, so it is the 64-byte stride behaviour,
-not the VP9 backend; the copy path's stride handling needs its own look.
+Widths that are not a multiple of 64 (416, 854, 1366) were the one real bug
+left, and it is fixed: the VP9 backend kept the vendor's
+`VE_DEC_VP9_SCALE1_STRIDE_ALIGN(1)` (the 16-byte stride value) after
+`0002-cedrus-64-byte-stride.patch` made the capture stride 64-byte aligned, so
+the engine read references back with the wrong stride - key frames decoded,
+inter frames were garbage. Sweeping that 3-bit field from the device showed 3
+is the 64-byte value (`inf` at 854x480; 1, 2, 5, 6, 7 stayed at ~9 dB, 0 and 4
+in between), and the patch derives it from `bytesperline`. All widths now match
+software bit for bit: 416x234, 854x480 (zero-copy and copy), 1280x720,
+1366x768, 1920x1080 and 3840x2160, plus 720p P010.
 
 What is left: a 1080p VP9 soak (the earlier "device died" was a Wi-Fi
 re-association, not a hang), the copy-path stride bug above, and M8 becomes

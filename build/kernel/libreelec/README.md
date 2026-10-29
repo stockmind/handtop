@@ -23,6 +23,7 @@ kernel we build against. GPL-2.0, same license as the driver.
 | 0410-media-cedrus-Don-t-CPU-map-source-buffers.patch | `DMA_ATTR_NO_KERNEL_MAPPING` on the output queue | yes |
 | 0411-media-cedrus-Add-VP9-decoding-support.patch | the whole VP9 backend (`cedrus_vp9.c`, 1297 lines) | yes |
 | 0421-media-cedrus-Select-V4L2_VP9-for-the-VP9-helpers.patch | `select V4L2_VP9` in Kconfig | yes |
+| 0430-cedrus-vp9-stride-align.patch | **ours**: derive `SCALE1_STRIDE_ALIGN` from the capture stride | yes |
 | 0412-media-cedrus-Add-P010-capture-format-and-shared-10-b.patch | P010 capture + shared 10-bit handling | yes |
 | 0413-media-cedrus-Add-VP9-P010-output-support.patch | VP9 P010 output | yes |
 | 0415-media-cedrus-Name-H616-VP9-mode-register-bits.patch | names the VP9 mode bits | yes |
@@ -61,8 +62,7 @@ VP9 10-bit 720p  60/60 frames, 0 decode errors, PSNR average:inf (p010le)
 H.264 1080p     122 frames, 0 decode errors
 ```
 
-Known limitation found while testing: at widths that are not a multiple of 64
-(854, 1366) the *copy* path renders black or blocky - `mpv --hwdec=drm`
-(zero-copy) is fine, and the same corruption exists for H.264 there, so it is
-the pre-existing stride behaviour of `0002-cedrus-64-byte-stride.patch`, not the
-VP9 code.
+Widths that are not a multiple of 64 (416, 854, 1366) were broken in the first
+round of testing - every inter frame was garbage while key frames decoded
+correctly. That was the reference-stride bug fixed by `0430` above; all widths
+now match software bit for bit.
