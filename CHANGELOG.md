@@ -2,6 +2,100 @@
 
 ## Unreleased
 
+- New: `readaloud`, an EPUB3 read-along player. It renders the book's own XHTML
+  in Chromium and drives the narration from the SMIL media overlays, filling
+  each word karaoke-style at the pace of the track and keeping the current
+  sentence in view. Per-book position and speed are remembered, and the
+  launcher is in the app menu. Text size is adjustable, the pad works in
+  gamepad mode (A play, B replay sentence, X/Y text size, shoulders and
+  left/right change chapter, up/down change speed), and pulling the headphones
+  out pauses the narration. The list shows a cover and per-book progress;
+  parses are cached and the book JSON is served gzipped (2 MB -> 146 KB), and a
+  spinner covers the first open. `S` switches to a Spritz view: one word at a
+  time, recognition point on the centre line, paced by the narration. The list
+  reads title, subtitle, author and series from the epub package (cached next
+  to the cover), and closing a book returns to the list instead of exiting.
+  Books without media overlays still open: the spine is used as the reading
+  order and Spritz runs on a words-per-minute timer (60-900 wpm) instead of the
+  narration. The library server is detached from the window, so closing a book
+  or the app never leaves the browser pointing at a dead port; `readaloud
+  --stop` shuts it down. Books that carry narration are marked with a badge on
+  the cover, and the words-per-minute reader marks the live word on the page
+  (with its recognition letter coloured) instead of forcing the Spritz view.
+  Playback speed and wpm survive chapter changes and are remembered across
+  books, not just within one. A chapter picker (real titles from the nav/NCX)
+  and a scrubber give coarse and fine seeking; the pad drives the list, the
+  transport and the picker. When a Storyteller server is configured in
+  `~/.config/readaloud/config.json` the home screen also lists its library,
+  marking what is downloaded here; it loads after the local list and silently
+  falls back to the cache, so a dead server never blocks navigation. The home
+  screen opens with a Continue section: the last three books you were in, most
+  recent first, the rest alphabetically below. Storyteller rows carry their
+  covers too, proxied and cached on first view, and a page-level error handler
+  prints failures in the list instead of showing an empty screen. The library
+  has three views, cycled with the header button, `v` or the pad: list, a cover
+  grid, and an iPod-style 3D cover flow where the focused cover faces front and
+  its neighbours rotate away. Storyteller rows group by series, can be
+  downloaded to the library with a live byte bar, and say so when the server is
+  unreachable. The bar shows battery. A `<book>.words.json` sidecar, if
+  one is ever produced, gives the karaoke exact per-word timings. While playing,
+  the transport and scrubber fade out after a few idle seconds so the page uses
+  the whole panel; moving, pressing a key or a pad button brings them back, and
+  the picker can turn the behaviour off.
+
+- Fix: the Spritz view crashed on every book (it handed plain strings to a
+  helper that expected DOM nodes). `tests/test_readaloud.py` now covers the
+  parsers, the HTTP surface, range requests and a headless player load, with a
+  `?check=1` hook that exercises the string/node word-timing path.
+
+- Perf: covers are cached as 96 px thumbnails, list images lazy-decode, and
+  Storyteller series are collapsed and built only when opened. On the RG35XX H
+  the library went from 672 MB resident to 431 MB, and the Storyteller section
+  no longer fetches 84 covers up front. Spritz also caches its word timings per
+  paragraph instead of rebuilding them every animation frame. `--open` also
+  closes any previous player window first: stacked instances were the easiest
+  way to eat the handheld's 1 GB.
+
+- Perf: the parsed book is cached on disk next to the covers, so a first open
+  is 0.16 s instead of 2.1 s (and 0.23 s instead of 3.0 s for a 29-chapter
+  book). Parses are capped at four in memory. Thumbnails are made once by a
+  one-shot worker with a single ffmpeg thread and reused forever; images carry
+  explicit width/height so scrolling never reflows. Row opacity, smooth
+  scrolling and `content-visibility` are gone: they cost compositing on this
+  GPU, and the reader scrolls instantly now. Series headers are obviously
+  clickable (pointer, chevron, "tap to open"), undownloaded Storyteller rows
+  show a download icon on hover/focus and swap it for a spinner plus a byte
+  count while the file streams. Thumbnails are validated on read, and covers are
+  served `no-cache` so a half-written one cannot stick for a day, and a book
+  whose cover was cached as missing is re-extracted instead of showing forever
+  blank. Covers no longer use `decoding="async"`: on this GPU Chromium decoded
+  them off-thread and never composited the bitmap, so a valid JPEG request still
+  painted nothing. Storyteller rows group by the server's real series relation
+  (name + position), not by collection, with near-duplicate names normalised, so
+  editions no longer split a series and volumes sort by their number.
+
+- Tests: the player and the library expose a `?check=ui` harness that drives the
+  real UI with clicks and a synthetic gamepad (picker, chapter jump, spritz
+  toggle, play, font, speed, shoulders, scrubber, view cycling, series expand),
+  reported as `UITESTS n/n` in the title and asserted by the browser tests. The
+  picker rows were not clickable at all; they are now.
+
+- Themes: twelve palettes (Midnight, Amoled, Night, Candle, Slate, Nord, Gruvbox,
+  Solarized, Rose Pine, Sepia, Daylight, Paper, plus explicit Black and Dark
+  white-on-dark options) driven by CSS variables, switched from a preview sheet
+  in the library header (`t` or the palette button) or by cycling from the
+  player's picker. Each theme also sets the book page background and ink, so
+  "Candle" is a warm dark page and "Sepia" a paper one, and the book's own
+  scrollbar follows. Scrollbars are thin and themed instead of the default grey:
+  the track is the page colour and the thumb a mix of accent and page, so no
+  light strip ever shows up next to a dark page.
+
+- Docs: `docs/performance.md` records how to measure scroll, memory and cold
+  open on this device, the numbers before/after, and every trap found so far
+  (row opacity, hidden rows, encoding in the request path, transforms that break
+  on Panfrost, cached broken images). `AGENTS.md` now makes those measurements
+  mandatory after any UI change.
+
 - Fix: mpv no longer drops the video track on software-decoded files. The
   `dmabuf-wayland` VO only accepts dmabuf frames and mpv does not fall back to
   the next VO when the filter chain fails, so every AV1 file (off the hwdec

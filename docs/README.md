@@ -9,6 +9,7 @@ How Handtop works on the RG35XX H. One document per app or background service; g
 | [flashing.md](flashing.md) | Flashing the SD card and first boot |
 | [building.md](building.md) | Building the image, testing and debugging |
 | [hardware-safety.md](hardware-safety.md) | **Rules for changes** to code that holds hardware, changes power states or starts / stops those processes; checklist |
+| [performance.md](performance.md) | **Rules for UI changes**: how to measure scroll, memory and cold open on this device, and what already bit us |
 
 ## Apps (Apps menu / power button)
 
@@ -18,6 +19,7 @@ How Handtop works on the RG35XX H. One document per app or background service; g
 | [apps/display.md](apps/display.md) | External display (mini HDMI) and the Display app: layouts, resolution, refresh rate |
 | [apps/files.md](apps/files.md) | Files: click-to-mount for the TF2 card and USB sticks, drive toasts |
 | [jellyfin.md](jellyfin.md) | Jellyfin client: browse the server, play, save episodes to the card |
+| [apps/readaloud.md](apps/readaloud.md) | Read aloud: EPUB3 media-overlay player, karaoke, Spritz, Storyteller downloads |
 | [apps/theme.md](apps/theme.md) | Theme app: dark / light |
 | [apps/power-menu.md](apps/power-menu.md) | Power button, power menu, sleep and auto-sleep, shutdown |
 | [apps/recenter-sticks.md](apps/recenter-sticks.md) | Re-center sticks: stick drift and the fix |
