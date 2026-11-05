@@ -44,11 +44,11 @@ browser() { # label file cmd...
 	pkill -f chromium 2>/dev/null; pkill -f firefox-esr 2>/dev/null; sleep 3
 	setsid "$@" "file://$PWD/$f" >/tmp/bx-$label.log 2>&1 &
 	sleep 25
-	cpu() { for p in $(pgrep -f "$3"); do awk '{print $14+$15}' /proc/$p/stat 2>/dev/null; done | paste -sd+ | bc; }
-	t0=$(cpu); sleep 12; t1=$(cpu)
+	cpu() { for p in $(pgrep -f "$1"); do awk '{print $14+$15}' /proc/$p/stat 2>/dev/null; done | paste -sd+ | bc; }
+	t0=$(cpu "$1"); sleep 12; t1=$(cpu "$1")
 	printf "  %-24s %3s%% of one core   vpu=%s\n" "$label" \
 		"$(( (t1-t0)*100/HZ/12 ))" "$(grep -ac 'via /dev/video0' /tmp/bx-$label.log)"
-	pkill -f "$3"
+	pkill -f "$1"
 }
 
 echo

@@ -13,9 +13,12 @@ run() {
 		--no-audio --untimed --really-quiet --msg-level=all=info \
 		--frames=$FRAMES "$F" > /tmp/vp9-$name.log 2>&1 ; } 2> /tmp/vp9-$name.time
 	local rc=$?
-	local real=$(awk '/^real/{print $2}' /tmp/vp9-$name.time)
-	local user=$(awk '/^user/{print $2}' /tmp/vp9-$name.time)
-	local sys=$(awk '/^sys/{print $2}' /tmp/vp9-$name.time)
+	local real
+	real=$(awk '/^real/{print $2}' /tmp/vp9-$name.time)
+	local user
+	user=$(awk '/^user/{print $2}' /tmp/vp9-$name.time)
+	local sys
+	sys=$(awk '/^sys/{print $2}' /tmp/vp9-$name.time)
 	local dec=sw
 	grep -q "Using hardware decoding (drm" /tmp/vp9-$name.log && dec=zero
 	grep -q "Using hardware decoding (v4l2request-copy" /tmp/vp9-$name.log && dec=copy

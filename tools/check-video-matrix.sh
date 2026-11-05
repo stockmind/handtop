@@ -6,11 +6,13 @@ SUDO depmod -a 7.2.0; SUDO modprobe -r sunxi_cedrus; SUDO modprobe sunxi_cedrus;
 cd "$HOME" || exit 1
 run() { # file pixfmt
 	local f=$1 pf=$2
-	local wh=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$f")
+	local wh
+	wh=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$f")
 	rm -f a.yuv b.yuv
 	timeout 60 ffmpeg -nostdin -hide_banner -loglevel error -hwaccel v4l2request -i "$f" -frames:v 5 -pix_fmt $pf -f rawvideo a.yuv -y 2>/dev/null
 	timeout 60 ffmpeg -nostdin -hide_banner -loglevel error -i "$f" -frames:v 5 -pix_fmt $pf -f rawvideo b.yuv -y 2>/dev/null
-	local p=$(ffmpeg -nostdin -hide_banner -f rawvideo -pix_fmt $pf -s $wh -i a.yuv -f rawvideo -pix_fmt $pf -s $wh -i b.yuv -lavfi psnr -f null - 2>&1 | grep -o 'average:[^ ]*' | head -1)
+	local p
+	p=$(ffmpeg -nostdin -hide_banner -f rawvideo -pix_fmt $pf -s $wh -i a.yuv -f rawvideo -pix_fmt $pf -s $wh -i b.yuv -lavfi psnr -f null - 2>&1 | grep -o 'average:[^ ]*' | head -1)
 	printf "  %-22s %-10s %-6s %s\n" "$(basename $f)" "$wh" "$pf" "${p:-no psnr}"
 }
 run test-media/hevc-1080.mp4 nv12

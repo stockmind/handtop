@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # Handtop dev tools (bundled in every image).
 # Guarded so plain bash/foot logins pay nothing when tools are absent.
 command -v fdfind >/dev/null && alias fd=fdfind
