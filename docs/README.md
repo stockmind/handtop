@@ -14,6 +14,7 @@ How Handtop works on the RG35XX H. One document per app or background service; g
 | [release-checklist.md](release-checklist.md) | Before tagging a release: CI, upstream drift, images, device tests |
 | [audits/](audits/README.md) | Codebase audits and how their findings are tracked |
 | [reliability-checklist.md](reliability-checklist.md) | **Scenarios to think through before every PR**: power cuts, interruptions, restart loops, first boot, Windows-edited files, other units, recovery |
+| [performance.md](performance.md) | **Rules for UI changes**: how to measure scroll, memory and cold open on this device, and what already bit us |
 
 ## Apps (Apps menu / power button)
 
@@ -23,6 +24,7 @@ How Handtop works on the RG35XX H. One document per app or background service; g
 | [apps/display.md](apps/display.md) | External display (mini HDMI) and the Display app: layouts, resolution, refresh rate |
 | [apps/files.md](apps/files.md) | Files: click-to-mount for the TF2 card and USB sticks, drive toasts |
 | [jellyfin.md](jellyfin.md) | Jellyfin client: browse the server, play, save episodes to the card |
+| [apps/readaloud.md](apps/readaloud.md) | Read aloud: EPUB3 media-overlay player with karaoke and Spritz, m4b audiobooks on a cassette, Storyteller downloads |
 | [apps/theme.md](apps/theme.md) | Theme app: dark / light |
 | [apps/power-menu.md](apps/power-menu.md) | Power button, power menu, sleep and auto-sleep, shutdown |
 | [apps/recenter-sticks.md](apps/recenter-sticks.md) | Re-center sticks: stick drift and the fix |

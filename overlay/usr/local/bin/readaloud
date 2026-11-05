@@ -1,0 +1,3937 @@
+#!/usr/bin/env python3
+"""Minimal EPUB3 read-aloud player for small screens.
+
+Serves a folder of .epub files, renders the book's own XHTML in an <iframe>,
+and drives one <audio> element from the book's SMIL media overlays, highlighting
+the text of the current <par>.
+
+    ./readaloud.py ~/Downloads          # library at http://127.0.0.1:8099/
+    ./readaloud.py --selftest book.epub
+
+Audio goes through Chromium's own ffmpeg, so no GStreamer plugin hunting.
+ponytail: SMIL walk is a linear scan per timeupdate (a book has ~1k pars);
+fine at this size, index it if a book ever stalls the loop.
+"""
+import argparse
+import gzip
+import hashlib
+import html
+import json
+import mimetypes
+import os
+import posixpath
+import re
+import select
+import struct
+import sys
+import threading
+import time
+import zipfile
+import xml.etree.ElementTree as ET
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, unquote, urlparse
+
+CACHE_DIR = os.path.expanduser('~/.cache/readaloud')
+
+TYPES = {
+    '.xhtml': 'application/xhtml+xml', '.html': 'text/html', '.opf': 'application/oebps-package+xml',
+    '.ncx': 'application/x-dtbncx+xml', '.css': 'text/css', '.js': 'text/javascript',
+    '.mp4': 'audio/mp4', '.m4a': 'audio/mp4', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg',
+    '.jpg': 'image/jpeg', '.png': 'image/png', '.svg': 'image/svg+xml', '.gif': 'image/gif',
+    '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf',
+}
+
+
+def mime(path):
+    ext = posixpath.splitext(path)[1].lower()
+    return TYPES.get(ext) or mimetypes.guess_type(path)[0] or 'application/octet-stream'
+
+
+def strip_ns(root):
+    for el in root.iter():
+        if '}' in el.tag:
+            el.tag = el.tag.split('}', 1)[1]
+
+
+def parse_clock(v):
+    if not v:
+        return 0.0
+    v = v.strip()
+    for suffix, mul in (('ms', 0.001), ('min', 60.0), ('s', 1.0), ('h', 3600.0)):
+        if v.endswith(suffix):
+            return float(v[:-len(suffix)]) * mul
+    if ':' in v:
+        parts = [float(x) for x in v.split(':')]
+        while len(parts) < 3:
+            parts.insert(0, 0.0)
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    return float(v)
+
+
+def resolve(href, frm):
+    """Resolve an href from a manifest/SMIL file to a zip path."""
+    p = posixpath.normpath(posixpath.join(posixpath.dirname(frm), unquote(href)))
+    return p.lstrip('/')
+
+
+def title_of(z, name, fallback):
+    try:
+        m = re.search(r'<title[^>]*>(.*?)</title>', z.read(name).decode('utf-8', 'replace'), re.S)
+        if m:
+            return html.unescape(re.sub(r'\s+', ' ', m.group(1))).strip() or fallback
+    except Exception:
+        pass
+    return fallback
+
+
+def parse_smil(z, path):
+    root = ET.fromstring(z.read(path))
+    strip_ns(root)
+    out = []
+    for par in root.iter('par'):
+        t, a = par.find('text'), par.find('audio')
+        if t is None or a is None or not t.get('src') or not a.get('src'):
+            continue
+        src, _, frag = t.get('src').partition('#')
+        out.append({
+            'file': resolve(src, path),
+            'frag': frag,
+            'audio': resolve(a.get('src'), path),
+            'begin': parse_clock(a.get('clipBegin')),
+            'end': parse_clock(a.get('clipEnd')),
+        })
+    return out
+
+
+def load_book(path):
+    z = zipfile.ZipFile(path)
+    try:
+        names = set(z.namelist())
+        container = ET.fromstring(z.read('META-INF/container.xml'))
+        strip_ns(container)
+        opf_path = container.find('.//rootfile').get('full-path')
+        opf = ET.fromstring(z.read(opf_path))
+        strip_ns(opf)
+        manifest = {
+            it.get('id'): {'href': it.get('href'), 'overlay': it.get('media-overlay'),
+                           'type': it.get('media-type') or ''}
+            for it in opf.iter('item')
+        }
+        toc = read_toc(z, opf, opf_path, names)
+        sections = []
+        for ref in opf.iter('itemref'):
+            it = manifest.get(ref.get('idref'))
+            if not it or not it.get('overlay'):
+                continue
+            ov = manifest.get(it['overlay'], {})
+            if not ov.get('href'):
+                continue
+            smil = resolve(ov['href'], opf_path)
+            if smil not in names:
+                continue
+            pars = [p for p in parse_smil(z, smil) if p['audio'] in names]
+            if not pars:
+                continue
+            href = resolve(it['href'], opf_path)
+            sections.append({
+                'href': href,
+                'title': title_of(z, href, 'Section %d' % (len(sections) + 1)),
+                'label': toc.get(href) or '',
+                'pars': pars,
+            })
+        if not sections:
+            # Plain epub: expose the spine so it can still be read, and paced by
+            # words per minute instead of narration.
+            for ref in opf.iter('itemref'):
+                it = manifest.get(ref.get('idref'))
+                if not it or not it.get('href'):
+                    continue
+                if not it['type'].endswith(('xhtml+xml', 'html')):
+                    continue
+                href = resolve(it['href'], opf_path)
+                if href not in names:
+                    continue
+                sections.append({
+                    'href': href,
+                    'title': title_of(z, href, 'Section %d' % (len(sections) + 1)),
+                    'label': toc.get(href) or '',
+                    'pars': [],
+                })
+        side = posixpath.splitext(path)[0] + '.words.json'
+        if os.path.exists(side):
+            try:
+                with open(side) as f:
+                    times = json.load(f)
+                for s in sections:
+                    for p in s['pars']:
+                        key = p['file'] + '#' + p['frag']
+                        if key in times:
+                            p['times'] = times[key]
+            except Exception:
+                pass
+        info = book_info(path)
+        return {'title': info['title'], 'author': info['author'],
+                'subtitle': info['subtitle'],
+                'narration': any(s['pars'] for s in sections),
+                'sections': sections}
+    finally:
+        z.close()
+
+
+JACK = {'inserted': None}
+_CACHE = {}
+_INFO = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def watch_jack(path='/dev/input/event1'):
+    """Track the headphone switch so the page can pause when headphones leave."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return
+    while True:
+        try:
+            ready, _, _ = select.select([fd], [], [], 30)
+        except OSError:
+            return
+        if not ready:
+            continue
+        try:
+            data = os.read(fd, 24 * 64)
+        except (BlockingIOError, OSError):
+            continue
+        for i in range(0, len(data) - 23, 24):
+            _, _, typ, code, val = struct.unpack_from('llHHi', data, i)
+            if typ == 5 and code == 2:          # EV_SW, SW_HEADPHONE_INSERT
+                JACK['inserted'] = (val == 1)
+
+
+def close_app():
+    """Close only the player window. The server keeps running so the app reopens
+    instantly and never lands on a dead port."""
+    time.sleep(0.2)
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit():
+            continue
+        try:
+            cl = open('/proc/%s/cmdline' % pid, 'rb').read().decode('utf8', 'replace')
+        except Exception:
+            continue
+        if 'chrom' in cl and '127.0.0.1' in cl and '--kiosk' in cl:
+            try:
+                os.kill(int(pid), 15)
+            except Exception:
+                pass
+
+
+_CACHE_ORDER = []
+
+
+def _remember(key, entry):
+    with _CACHE_LOCK:
+        for k in [k for k in _CACHE if k[0] == key[0]]:
+            _CACHE.pop(k, None)
+        _CACHE[key] = entry
+        if key in _CACHE_ORDER:
+            _CACHE_ORDER.remove(key)
+        _CACHE_ORDER.append(key)
+        while len(_CACHE_ORDER) > 4:            # 2 MB each: do not hoard books
+            old = _CACHE_ORDER.pop(0)
+            _CACHE.pop(old, None)
+
+
+def load_book_cached(path):
+    """Parsing a book costs ~1.9 s for a 13k-par novel, so the parse and both
+    encodings are cached in memory and on disk, keyed on mtime/size."""
+    st = os.stat(path)
+    key = (path, st.st_mtime_ns, st.st_size)
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    digest = hashlib.sha1(('b1|%s|%d|%d' % key).encode()).hexdigest()[:16]
+    disk = os.path.join(CACHE_DIR, digest + '.book.json.gz')
+    if os.path.exists(disk):
+        try:
+            with open(disk, 'rb') as f:
+                gz = f.read()
+            raw = gzip.decompress(gz)
+            entry = (json.loads(raw), raw, gz)
+            _remember(key, entry)
+            return entry
+        except Exception:
+            pass
+
+    data = load_book(path)
+    raw = json.dumps(data).encode()
+    gz = gzip.compress(raw, 6)
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = disk + '.tmp'
+        with open(tmp, 'wb') as f:
+            f.write(gz)
+        os.replace(tmp, disk)
+    except Exception:
+        pass
+    entry = (data, raw, gz)
+    _remember(key, entry)
+    return entry
+
+
+def read_package(z):
+    container = ET.fromstring(z.read('META-INF/container.xml'))
+    strip_ns(container)
+    opf_path = container.find('.//rootfile').get('full-path')
+    opf = ET.fromstring(z.read(opf_path))
+    strip_ns(opf)
+    return opf, opf_path
+
+
+def read_meta(opf, fallback):
+    md = opf.find('metadata')
+    if md is None:
+        md = opf
+
+    def text(tag):
+        el = md.find(tag)
+        return (el.text or '').strip() if el is not None else ''
+
+    title = text('title') or fallback
+    # Edition epubs list translators and the original author again; the first
+    # real name reads best on a 640 px row, so keep that and count the rest.
+    names, seen = [], set()
+    for c in md.findall('creator'):
+        name = (c.text or '').strip()
+        if not name or name.startswith('[') or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        names.append(name)
+    author = names[0] if names else ''
+    if len(names) > 1:
+        author += ' +%d' % (len(names) - 1)
+    series = ''
+    for m in md.findall('meta'):
+        if (m.get('property') or '') == 'belongs-to-collection' and not series:
+            series = (m.text or '').strip()
+    subtitle = ''
+    if ':' in title:                       # how most epubs carry a subtitle
+        head, tail = title.split(':', 1)
+        if tail.strip():
+            title, subtitle = head.strip(), tail.strip()
+    return {'title': title, 'author': author, 'subtitle': subtitle, 'series': series}
+
+
+def read_toc(z, opf, opf_path, names):
+    """href -> label from the EPUB3 nav document, falling back to the NCX."""
+    toc = {}
+    nav = None
+    for it in opf.iter('item'):
+        if 'nav' in (it.get('properties') or '').split():
+            nav = resolve(it.get('href'), opf_path)
+            break
+    if nav and nav in names:
+        try:
+            doc = ET.fromstring(z.read(nav))
+            strip_ns(doc)
+            for n in doc.iter('nav'):
+                kind = n.get('type') or ''
+                if kind and 'toc' not in kind:
+                    continue
+                for a in n.iter('a'):
+                    href = a.get('href') or ''
+                    label = ' '.join((a.text or '').split())
+                    if href and label:
+                        toc.setdefault(resolve(href.split('#')[0], nav), label)
+                if toc:
+                    break
+        except Exception:
+            pass
+    if toc:
+        return toc
+    ncx = None
+    for it in opf.iter('item'):
+        if (it.get('media-type') or '').endswith('ncx'):
+            ncx = resolve(it.get('href'), opf_path)
+            break
+    if ncx and ncx in names:
+        try:
+            doc = ET.fromstring(z.read(ncx))
+            strip_ns(doc)
+            for point in doc.iter('navPoint'):
+                label = point.find('navLabel/text')
+                content = point.find('content')
+                if label is None or content is None or not content.get('src'):
+                    continue
+                href = resolve(content.get('src').split('#')[0], ncx)
+                text = ' '.join((label.text or '').split())
+                if text:
+                    toc.setdefault(href, text)
+        except Exception:
+            pass
+    return toc
+
+
+def find_cover(z, opf, opf_path):
+    by_id, props_href = {}, None
+    for it in opf.iter('item'):
+        href = it.get('href') or ''
+        by_id[it.get('id')] = href
+        if 'cover-image' in (it.get('properties') or ''):
+            props_href = href
+    cover_id = None
+    for m in opf.iter('meta'):
+        if m.get('name') == 'cover':
+            cover_id = m.get('content')
+    target = props_href or by_id.get(cover_id) or next(
+        (h for i, h in by_id.items() if 'cover' in (i or '').lower()), None)
+    if not target:
+        return None, None
+    return z.read(resolve(target, opf_path)), mime(resolve(target, opf_path))
+
+
+def book_info(path):
+    """Metadata, cover path and flags. Cached in memory and on disk, keyed on
+    mtime+size so a replaced file invalidates itself."""
+    fallback = posixpath.splitext(os.path.basename(path))[0]
+    blank = {'title': fallback, 'author': '', 'subtitle': '', 'series': '',
+             'cover': False, 'readaloud': False, 'key': ''}
+    try:
+        st = os.stat(path)
+    except OSError:
+        return blank
+    key = hashlib.sha1(('v2|%s|%d|%d' % (path, st.st_mtime_ns, st.st_size)).encode()).hexdigest()[:16]
+    with _CACHE_LOCK:
+        hit = _INFO.get(key)
+    if hit is not None:
+        return hit
+
+    info = dict(blank, key=key)
+    cached = os.path.join(CACHE_DIR, key + '.json')
+    if os.path.exists(cached):
+        try:
+            with open(cached) as f:
+                info.update(json.load(f))
+        except Exception:
+            pass
+    else:
+        try:
+            with zipfile.ZipFile(path) as z:
+                opf, opf_path = read_package(z)
+                info.update(read_meta(opf, fallback))
+                info['readaloud'] = any(n.lower().endswith('.smil') for n in z.namelist())
+                data, ctype = find_cover(z, opf, opf_path)
+                if data:
+                    os.makedirs(CACHE_DIR, exist_ok=True)
+                    with open(os.path.join(CACHE_DIR, key + '.cover'), 'wb') as f:
+                        f.write(data)
+                    with open(os.path.join(CACHE_DIR, key + '.mime'), 'w') as f:
+                        f.write(ctype or 'image/jpeg')
+                    info['cover'] = True
+                    try:
+                        make_thumb(os.path.join(CACHE_DIR, key + '.cover'), key)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(cached, 'w') as f:
+                json.dump(info, f)
+        except Exception:
+            pass
+    with _CACHE_LOCK:
+        _INFO[key] = info
+    return info
+
+
+_THUMB_QUEUE = []
+_THUMB_LOCK = threading.Lock()
+_THUMB_RUNNING = {'on': False}
+
+
+def _thumb_worker():
+    import subprocess
+    while True:
+        with _THUMB_LOCK:
+            if not _THUMB_QUEUE:
+                _THUMB_RUNNING['on'] = False       # idle: stop the thread
+                return
+            src_img, out = _THUMB_QUEUE.pop(0)
+        if os.path.exists(out):
+            continue                                # already made (or another pass did)
+        tmp = out + '.tmp.jpg'
+        try:
+            subprocess.run(['ffmpeg', '-y', '-nostdin', '-threads', '1', '-v', 'error',
+                            '-i', src_img, '-vf', 'scale=96:-2', '-q:v', '6', tmp],
+                           timeout=60, capture_output=True)
+        except Exception:
+            pass
+        # rename only when complete: a request must never read a half-written file
+        if os.path.exists(tmp) and os.path.getsize(tmp) > 512:
+            os.replace(tmp, out)
+        else:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def make_thumb(img, key):
+    """Covers are drawn 40x58. The thumbnail is made once, stored next to the
+    cover and reused; encoding never happens in a request and never in a loop."""
+    thumb = os.path.join(CACHE_DIR, key + '.thumb.jpg')
+    try:
+        if os.path.getsize(thumb) > 512:
+            return thumb
+        os.unlink(thumb)                 # half-written or garbage: redo it
+    except OSError:
+        pass
+    with _THUMB_LOCK:
+        if (img, thumb) not in _THUMB_QUEUE and len(_THUMB_QUEUE) < 64:
+            _THUMB_QUEUE.append((img, thumb))
+        start = not _THUMB_RUNNING['on']
+        if start:
+            _THUMB_RUNNING['on'] = True
+    if start:
+        threading.Thread(target=_thumb_worker, daemon=True).start()
+    return img
+
+
+def warm_thumbs():
+    """Generate any missing thumbnails once, off the request path."""
+    try:
+        for name in os.listdir(CACHE_DIR):
+            if name.endswith('.cover'):
+                make_thumb(os.path.join(CACHE_DIR, name), name[:-len('.cover')])
+            elif name.startswith('st-') and name.endswith('.img'):
+                make_thumb(os.path.join(CACHE_DIR, name), name[:-len('.img')])
+    except Exception:
+        pass
+
+
+def cover_file(book):
+    info = media_info(book)
+    p = os.path.join(CACHE_DIR, info['key'] + '.cover') if info.get('key') else ''
+    if not info.get('cover') or not p or not os.path.exists(p):
+        # The metadata cache can hold cover:false from a failed extraction (or a
+        # cache dir that was cleaned). Redo it once instead of serving nothing.
+        if info.get('key'):
+            try:
+                os.unlink(os.path.join(CACHE_DIR, info['key'] +
+                                       ('.audio.json' if is_audio(book) else '.json')))
+            except OSError:
+                pass
+            with _CACHE_LOCK:
+                if is_audio(book):
+                    _AINFO.pop(info['key'], None)
+                else:
+                    _INFO.pop(info['key'], None)
+            info = media_info(book)
+            p = os.path.join(CACHE_DIR, info['key'] + '.cover')
+        if not info.get('cover') or not os.path.exists(p):
+            return None, None
+    return make_thumb(p, info['key']), 'image/jpeg'
+
+
+def is_readaloud(path):
+    return book_info(path)['readaloud']
+
+
+# ---- m4b / m4a: audiobooks with no epub ---------------------------------
+# The MP4 boxes we need are read with seeks only, so a 1 GB m4b costs no more
+# than its headers. Parsed metadata, the cover and a label-sized crop are
+# cached on disk next to the epub covers.
+AUDIO_EXTS = ('.m4b', '.m4a')
+_AINFO = {}
+_LABEL_LOCK = threading.Lock()
+
+
+def is_audio(path):
+    return os.path.splitext(path)[1].lower() in AUDIO_EXTS
+
+
+def _atoms(f, start, end):
+    """Walk one MP4 box list. Yields (type, payload_start, payload_end)."""
+    pos = start
+    while pos + 8 <= end:
+        f.seek(pos)
+        h = f.read(8)
+        if len(h) < 8:
+            return
+        size, typ = struct.unpack('>I4s', h)
+        hlen = 8
+        if size == 1:
+            more = f.read(8)
+            if len(more) < 8:
+                return
+            size = struct.unpack('>Q', more)[0]
+            hlen = 16
+        elif size == 0:
+            size = end - pos
+        if size < hlen or pos + size > end:
+            return
+        yield typ, pos + hlen, pos + size
+        pos += size
+
+
+def _child(f, start, end, typ):
+    for t, ps, pe in _atoms(f, start, end):
+        if t == typ:
+            return ps, pe
+    return None
+
+
+def _descend(f, start, end, path):
+    for typ in path:
+        n = _child(f, start, end, typ)
+        if not n:
+            return None
+        start, end = n
+        if typ == b'meta':
+            start += 4                  # full box: version and flags
+    return start, end
+
+
+_MP4_TAGS = {b'\xa9nam': 'title', b'\xa9alb': 'album', b'\xa9ART': 'artist',
+             b'aART': 'artist', b'\xa9wrt': 'author', b'\xa9grp': 'series',
+             b'\xa9day': 'year'}
+
+
+def _mp4_ilst(f, start, end):
+    """iTunes-style metadata items: {box type: (data type, payload)}."""
+    out = {}
+    for typ, ps, pe in _atoms(f, start, end):
+        data = _child(f, ps, pe, b'data')
+        if not data:
+            continue
+        ds, de = data
+        f.seek(ds)
+        head = f.read(8)
+        if len(head) < 8:
+            continue
+        out.setdefault(typ, (struct.unpack('>I', head[:4])[0], f.read(max(0, de - ds - 8))))
+    return out
+
+
+def _mp4_duration(f, moov):
+    m = _child(f, moov[0], moov[1], b'mvhd')
+    if not m:
+        return 0.0
+    f.seek(m[0])
+    b = f.read(32)
+    if len(b) < 20:
+        return 0.0
+    if b[0] == 1 and len(b) >= 32:
+        scale, dur = struct.unpack('>IQ', b[20:32])
+    else:
+        scale, dur = struct.unpack('>II', b[12:20])
+    return round(dur / scale, 2) if scale else 0.0
+
+
+def _mp4_chpl(f, moov):
+    """Nero chapter list, what ffmpeg and most converters write."""
+    boxes = [_child(f, moov[0], moov[1], b'chpl')]
+    udta = _child(f, moov[0], moov[1], b'udta')
+    if udta:
+        boxes.append(_child(f, udta[0], udta[1], b'chpl'))
+    for box in boxes:
+        if not box:
+            continue
+        f.seek(box[0])
+        data = f.read(box[1] - box[0])
+        if len(data) < 9:
+            continue
+        out, pos = [], 9
+        for _ in range(data[8]):
+            if pos + 9 > len(data):
+                break
+            start = struct.unpack('>Q', data[pos:pos + 8])[0] / 1e7
+            ln = data[pos + 8]
+            pos += 9
+            title = data[pos:pos + ln].decode('utf-8', 'replace').strip()
+            pos += ln
+            out.append({'title': title or 'Chapter %d' % (len(out) + 1),
+                        'start': round(start, 3)})
+        if out:
+            return out
+    return []
+
+
+def _mp4_chapter_track(f, moov):
+    """QuickTime chapter track: a text trak referenced by tref/chap."""
+    traks = [(ps, pe) for typ, ps, pe in _atoms(f, moov[0], moov[1]) if typ == b'trak']
+    refs = set()
+    for ps, pe in traks:
+        tref = _child(f, ps, pe, b'tref')
+        if not tref:
+            continue
+        chap = _child(f, tref[0], tref[1], b'chap')
+        if not chap:
+            continue
+        f.seek(chap[0])
+        data = f.read(chap[1] - chap[0])
+        for i in range(0, len(data) - 3, 4):
+            refs.add(struct.unpack('>I', data[i:i + 4])[0])
+    for ps, pe in traks:
+        tkhd = _child(f, ps, pe, b'tkhd')
+        if not tkhd:
+            continue
+        f.seek(tkhd[0])
+        h = f.read(24)
+        if len(h) < 16:
+            continue
+        tid = struct.unpack('>I', h[20:24] if h[0] == 1 and len(h) >= 24 else h[12:16])[0]
+        if tid not in refs:
+            continue
+        mdia = _child(f, ps, pe, b'mdia')
+        stbl = mdia and _descend(f, mdia[0], mdia[1], [b'minf', b'stbl'])
+        mdhd = mdia and _child(f, mdia[0], mdia[1], b'mdhd')
+        if not stbl or not mdhd:
+            continue
+        f.seek(mdhd[0])
+        mh = f.read(32)
+        if len(mh) < 20:
+            continue
+        scale = struct.unpack('>I', mh[20:24] if mh[0] == 1 and len(mh) >= 32 else mh[12:16])[0]
+        stts = _child(f, stbl[0], stbl[1], b'stts')
+        stsz = _child(f, stbl[0], stbl[1], b'stsz')
+        stsc = _child(f, stbl[0], stbl[1], b'stsc')
+        stco = _child(f, stbl[0], stbl[1], b'stco')
+        co64 = _child(f, stbl[0], stbl[1], b'co64')
+        if not (scale and stts and stsz and stsc and (stco or co64)):
+            continue
+        f.seek(stts[0])
+        st = f.read(stts[1] - stts[0])
+        f.seek(stsz[0])
+        sz = f.read(stsz[1] - stsz[0])
+        f.seek(stsc[0])
+        sc = f.read(stsc[1] - stsc[0])
+        f.seek((stco or co64)[0])
+        co = f.read((stco or co64)[1] - (stco or co64)[0])
+        if len(st) < 8 or len(sz) < 12 or len(sc) < 8 or len(co) < 8:
+            continue
+        deltas, t = [], 0.0
+        for i in range(struct.unpack('>I', st[4:8])[0]):
+            cnt, delta = struct.unpack('>II', st[8 + i * 8:16 + i * 8])
+            for _ in range(min(cnt, 100000)):
+                deltas.append(t)
+                t += delta / scale
+        fixed = struct.unpack('>I', sz[4:8])[0]
+        n = struct.unpack('>I', sz[8:12])[0]
+        sizes = [fixed] * n if fixed else [struct.unpack('>I', sz[12 + i * 4:16 + i * 4])[0]
+                                           for i in range(n)]
+        chunks = struct.unpack('>I', co[4:8])[0]
+        width = 8 if co64 and (stco is None) else 4
+        offsets = [struct.unpack('>Q' if width == 8 else '>I',
+                                 co[8 + i * width:8 + i * width + width])[0]
+                   for i in range(chunks)]
+        runs = []
+        for i in range(struct.unpack('>I', sc[4:8])[0]):
+            first, per = struct.unpack('>II', sc[8 + i * 12:16 + i * 12])
+            runs.append((first - 1, per))
+        per_chunk = []
+        for ci in range(chunks):
+            per = 1
+            for first, cnt in runs:
+                if first <= ci:
+                    per = cnt
+            per_chunk.append(per)
+        out, si = [], 0
+        for ci, off in enumerate(offsets):
+            for _ in range(per_chunk[ci]):
+                if si >= len(sizes) or si >= len(deltas):
+                    break
+                f.seek(off)
+                data = f.read(sizes[si])
+                if len(data) >= 2:
+                    ln = struct.unpack('>H', data[:2])[0]
+                    title = data[2:2 + ln].decode('utf-8', 'replace').strip()
+                    if title:
+                        out.append({'title': title, 'start': round(deltas[si], 3)})
+                off += sizes[si]
+                si += 1
+        if out:
+            return out
+    return []
+
+
+def audio_info(path):
+    """Metadata, chapters and cover for an m4b, cached like book_info."""
+    fallback = posixpath.splitext(os.path.basename(path))[0]
+    blank = {'title': fallback, 'author': '', 'subtitle': '', 'series': '',
+             'cover': False, 'readaloud': False, 'audio': True, 'duration': 0.0,
+             'chapters': [], 'key': ''}
+    try:
+        st = os.stat(path)
+    except OSError:
+        return blank
+    key = hashlib.sha1(('a1|%s|%d|%d' % (path, st.st_mtime_ns, st.st_size)).encode()).hexdigest()[:16]
+    with _CACHE_LOCK:
+        hit = _AINFO.get(key)
+    if hit is not None:
+        return hit
+
+    info = dict(blank, key=key)
+    cached = os.path.join(CACHE_DIR, key + '.audio.json')
+    if os.path.exists(cached):
+        try:
+            with open(cached) as f:
+                info.update(json.load(f))
+        except Exception:
+            pass
+    else:
+        try:
+            with open(path, 'rb') as f:
+                size = os.fstat(f.fileno()).st_size
+                moov = _child(f, 0, size, b'moov')
+                if moov:
+                    info['duration'] = _mp4_duration(f, moov)
+                    meta = (_descend(f, moov[0], moov[1], [b'udta', b'meta', b'ilst']) or
+                            _descend(f, moov[0], moov[1], [b'meta', b'ilst']))
+                    tags = _mp4_ilst(f, meta[0], meta[1]) if meta else {}
+                    get = lambda t: (tags.get(t) or (0, b''))[1].decode('utf-8', 'replace').strip()
+                    title = get(b'\xa9nam') or get(b'\xa9alb')
+                    author = get(b'\xa9ART') or get(b'aART') or get(b'\xa9wrt')
+                    if title:
+                        info['title'] = title
+                    info['author'] = author
+                    info['series'] = get(b'\xa9grp')
+                    covr = tags.get(b'covr')
+                    if covr and covr[1]:
+                        mime = {13: 'image/jpeg', 14: 'image/png', 27: 'image/bmp'}.get(covr[0], 'image/jpeg')
+                        os.makedirs(CACHE_DIR, exist_ok=True)
+                        with open(os.path.join(CACHE_DIR, key + '.cover'), 'wb') as cf:
+                            cf.write(covr[1])
+                        with open(os.path.join(CACHE_DIR, key + '.mime'), 'w') as mf:
+                            mf.write(mime)
+                        info['cover'] = True
+                    info['chapters'] = _mp4_chpl(f, moov) or _mp4_chapter_track(f, moov)
+        except Exception:
+            pass
+        if info['title'] and ':' in info['title']:
+            head, tail = info['title'].split(':', 1)
+            if tail.strip():
+                info['title'], info['subtitle'] = head.strip(), tail.strip()
+        if info['cover']:
+            try:
+                make_thumb(os.path.join(CACHE_DIR, key + '.cover'), key)
+            except Exception:
+                pass
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(cached, 'w') as f:
+                json.dump(info, f)
+        except Exception:
+            pass
+    with _CACHE_LOCK:
+        _AINFO[key] = info
+        while len(_AINFO) > 8:
+            _AINFO.pop(next(iter(_AINFO)))
+    return info
+
+
+def media_info(path):
+    return audio_info(path) if is_audio(path) else book_info(path)
+
+
+def label_file(book):
+    """One 576x262 crop for the tape label, made once on the play path."""
+    info = media_info(book)
+    key = info.get('key')
+    src = os.path.join(CACHE_DIR, key + '.cover') if key else ''
+    if not info.get('cover') or not src or not os.path.exists(src):
+        return None
+    out = os.path.join(CACHE_DIR, key + '.label.jpg')
+    if os.path.exists(out) and os.path.getsize(out) > 512:
+        return out
+    with _LABEL_LOCK:
+        if os.path.exists(out) and os.path.getsize(out) > 512:
+            return out
+        import subprocess
+        tmp = out + '.tmp.jpg'
+        try:
+            subprocess.run(['ffmpeg', '-y', '-nostdin', '-threads', '1', '-v', 'error',
+                            '-i', src, '-vf',
+                            'scale=576:262:force_original_aspect_ratio=increase,crop=576:262',
+                            '-q:v', '3', tmp], timeout=30, capture_output=True)
+        except Exception:
+            pass
+        if os.path.exists(tmp) and os.path.getsize(tmp) > 512:
+            os.replace(tmp, out)
+            return out
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return src
+
+
+LIBRARY_HTML = """<!doctype html><html><head><meta charset="utf-8"><title>Read aloud</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ :root{color-scheme:dark}
+ *{box-sizing:border-box}
+ html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+           font:15px/1.35 system-ui,-apple-system,sans-serif;overflow:hidden}
+ body{display:flex;flex-direction:column}
+ header{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);
+        border-bottom:1px solid var(--line);flex:0 0 auto}
+ h1{margin:0;font-size:14px;font-weight:600;letter-spacing:.02em;flex:1}
+ header button{width:34px;height:30px;border-radius:7px;border:1px solid #383838;
+               background:var(--card);color:var(--text);font-size:15px;line-height:1}
+ header button:active{background:var(--line)}
+ #list{flex:1;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;
+       scrollbar-color:var(--line) var(--bg)}
+ #list::-webkit-scrollbar{width:6px}
+ #list::-webkit-scrollbar-track{background:var(--bg)}
+ #list::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+ #list::-webkit-scrollbar-corner{background:var(--bg)}
+ #list::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+ a{display:flex;gap:11px;align-items:center;padding:9px 12px;color:inherit;
+   text-decoration:none;border-bottom:1px solid var(--line);position:relative;
+   -webkit-tap-highlight-color:transparent}
+ a:hover,a:focus{background:var(--card);outline:none}
+ a:focus-visible{box-shadow:inset 0 0 0 2px var(--accent)}
+ .cover{position:relative;flex:0 0 auto}
+ img{width:40px;height:58px;object-fit:cover;border-radius:3px;background:var(--card);display:block}
+ .badge{position:absolute;right:-4px;bottom:-4px;width:18px;height:18px;border-radius:50%;
+        background:var(--accent);color:var(--bg);display:flex;align-items:center;justify-content:center;
+        box-shadow:0 0 0 2px var(--bg)}
+ .info{flex:1;min-width:0}
+ .t{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .s{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .a{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
+ .m{font-size:11px;color:var(--dim);margin-top:3px;font-variant-numeric:tabular-nums}
+ .m.new{color:var(--dim);opacity:.75}
+ .section{padding:14px 12px 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+          color:var(--dim);background:var(--panel);border-top:1px solid var(--line)}
+ .series{padding:8px 12px;font-size:12px;color:var(--text);background:var(--card);
+         border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:8px;
+         cursor:pointer;user-select:none}
+ .series:hover{background:var(--panel)}
+ .series .c{color:#8a8a8a;font-size:13px}
+ .series:focus{outline:none;background:var(--panel);box-shadow:inset 3px 0 0 var(--accent)}
+ .series .c{color:#6b6b6b}
+ .group{display:none}
+ .group.open{display:block}
+ #batt{font-size:11px;color:var(--dim);padding:0 6px;font-variant-numeric:tabular-nums}
+ #batt.low{color:#ff8a65}
+ .note{padding:6px 12px 10px;font-size:11px;color:var(--dim);background:var(--panel)}
+ .st.dl .m{color:var(--accent2)}
+ .st .act{flex:0 0 auto;width:22px;display:flex;align-items:center;justify-content:center;
+          color:#8a8a8a;opacity:.40}
+ .st.remote:hover .act,.st.remote:focus .act,.st.dl .act{opacity:1;color:var(--accent2)}
+ .spinner{width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);
+          border-radius:50%;animation:spin .8s linear infinite}
+ @keyframes spin{to{transform:rotate(360deg)}}
+ .st .bar{background:linear-gradient(90deg,var(--accent),var(--accent2))}
+ .st.dl .cover{outline:2px solid rgba(255,179,0,.45)}
+ #list.grid .series{grid-column:1/-1}
+ #list.flow .series{display:none}
+ .st{display:flex;align-items:center;gap:11px;padding:9px 12px;border-bottom:1px solid #202020;
+     position:relative}
+ a.st{color:inherit;text-decoration:none}
+ a.st:hover,a.st:focus{background:#232323;outline:none}
+ .st.remote{background:var(--bg)}
+ .st.remote .t,.st.remote .m{color:var(--dim)}
+ /* ---- grid ---- */
+ #list.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));
+            gap:12px 10px;padding:12px 10px 20px;align-content:start}
+ #list.grid .section{grid-column:1/-1;padding:12px 2px 0;margin-top:4px}
+ #list.grid a,#list.grid .st{display:flex;flex-direction:column;align-items:stretch;gap:5px;
+        border:0;padding:0;background:none;position:relative;border-radius:7px;
+        }
+ #list.grid:hover a:focus,#list.grid a:focus{transform:translateY(-3px)}
+ #list.grid a:focus,#list.grid .st:focus{outline:none;
+        box-shadow:0 0 0 2px var(--accent),0 8px 18px rgba(0,0,0,.55)}
+ #list.grid .cover{width:100%;border-radius:7px;overflow:hidden;
+        box-shadow:0 3px 10px rgba(0,0,0,.5),inset 0 0 0 1px rgba(255,255,255,.06)}
+ #list.grid img{width:100%;height:auto;aspect-ratio:2/3;object-fit:cover;border-radius:7px}
+ #list.grid .info{width:100%;padding:0 1px}
+ #list.grid .t{font-size:12px;line-height:1.25;white-space:normal;max-height:2.5em;overflow:hidden;
+        display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+ #list.grid .s,#list.grid .a,#list.grid .m{display:none}
+ #list.grid .bar{position:static;width:0;height:3px;margin-top:4px;border-radius:2px}
+ #list.grid .badge{width:16px;height:16px;right:5px;bottom:5px;box-shadow:0 1px 4px rgba(0,0,0,.6)}
+
+ /* ---- cover flow (3D) ---- */
+ #list.flow{display:flex;flex-direction:row;gap:0;padding:26px calc(50% - 75px);overflow-x:auto;overflow-y:hidden;
+            align-items:center;perspective:700px;perspective-origin:50% 45%;
+            scrollbar-width:none;background:var(--bg)}
+ #list.flow::-webkit-scrollbar{display:none}
+ #list.flow .section{display:none}
+ #list.flow a,#list.flow .st{flex:0 0 auto;width:150px;margin:0 -18px;display:flex;
+        flex-direction:column;align-items:center;gap:6px;padding:0;border:0;background:none;
+        transform-style:preserve-3d;backface-visibility:hidden}
+ #list.flow .cover{width:150px}
+ #list.flow img{width:150px;height:auto;aspect-ratio:2/3;object-fit:cover;border-radius:4px;
+        box-shadow:0 10px 22px rgba(0,0,0,.65),inset 0 0 0 1px rgba(255,255,255,.07)}
+ #list.flow .info{width:150px;text-align:center;opacity:.9;transition:opacity .22s ease}
+ #list.flow .t{font-size:12px;white-space:normal;height:2.5em;overflow:hidden;
+        display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+ #list.flow .s,#list.flow .a,#list.flow .m,#list.flow .bar,#list.flow .badge{display:none}
+ #list.flow a:focus,#list.flow .st:focus{outline:none}
+ .bar{position:absolute;left:0;bottom:0;height:3px;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+ #themes{position:absolute;inset:0;background:var(--bg);display:none;flex-direction:column;z-index:9}
+ #themes.open{display:flex}
+ #themegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px;
+            padding:12px;overflow-y:auto;scrollbar-width:thin;
+            scrollbar-color:var(--line) var(--bg)}
+ #themegrid::-webkit-scrollbar{width:6px}
+ #themegrid::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+ #themegrid::-webkit-scrollbar-track{background:var(--bg)}
+ #themegrid::-webkit-scrollbar-corner{background:var(--bg)}
+ .tcard{border-radius:9px;overflow:hidden;cursor:pointer;border:1px solid var(--line);
+        height:108px;display:flex;flex-direction:column}
+ .tcard.sel{box-shadow:inset 0 0 0 2px var(--accent)}
+ .tprev{flex:1;display:flex;align-items:center;gap:8px;padding:9px;min-height:0}
+ .tprev .cv{width:26px;height:40px;border-radius:3px}
+ .tprev .txt{flex:1}
+ .tprev .tl{height:5px;border-radius:3px;margin-bottom:5px}
+ .tprev .ts{height:4px;border-radius:3px;width:70%;opacity:.6}
+ .tprev .pb{height:4px;border-radius:2px;margin-top:8px}
+ .tname{padding:6px 10px;font-size:12px;border-top:1px solid var(--line);flex:0 0 auto}
+ #empty{padding:26px 16px;color:var(--dim);font-size:13px;line-height:1.6}
+</style></head><body>
+<header><h1>Read aloud</h1>
+  <span id="batt" title="battery"></span>
+  <button id="themebtn" title="theme">&#9681;</button>
+  <button id="viewbtn" title="list / grid / covers">&#9776;</button>
+  <button id="quit" title="close the player">&#10005;</button></header>
+<div id="list"></div>
+<div id="themes">
+  <header><h1>Theme</h1><button id="themecancel" title="close">&#10005;</button></header>
+  <div id="themegrid"></div>
+</div>
+<script>
+window.onerror = (m, s, l, c) => {
+  const box = document.getElementById('list');
+  if (box) box.innerHTML = '<div id="empty">UI error: ' + m + ' &#64;' + l + ':' + c + '</div>';
+};
+document.getElementById('quit').onclick = () => fetch('/quit').catch(() => {});
+addEventListener('keydown', e => {
+  if (e.key === 't' || e.key === 'T') {
+    const el = document.getElementById('themes');
+    if (el.classList.contains('open')) closeThemes(); else openThemes();
+    return;
+  }
+  if (e.key === 'v' || e.key === 'V') { cycleView(); return; }
+  if (e.key === 'ArrowDown') { moveFocus(1); e.preventDefault(); }
+  else if (e.key === 'ArrowUp') { moveFocus(-1); e.preventDefault(); }
+  else if (e.key === 'ArrowRight') { focusRow(sel + 1); e.preventDefault(); }
+  else if (e.key === 'ArrowLeft') { focusRow(sel - 1); e.preventDefault(); }
+  else if (e.key === 'Enter') { const r = rows()[sel]; if (r) r.click(); e.preventDefault(); }
+});
+addEventListener('keydown', e => {
+  if (e.key === 'Escape' || e.key === 'q') {
+    if (document.getElementById('themes').classList.contains('open')) { closeThemes(); return; }
+    fetch('/quit').catch(() => {});
+  }
+});
+
+fetch('/api/books').then(r => r.json()).then(books => {
+  const list = document.getElementById('list');
+  if (!books.length) {
+    list.innerHTML = '<div id="empty">No .epub or .m4b in this folder.<br>' +
+      'Drop read-aloud books or audiobooks here and reload.</div>';
+    return;
+  }
+  const withPos = books.map(b => {
+    let p = null;
+    try { p = JSON.parse(localStorage.getItem('ra:' + b.name)); } catch (e) {}
+    return {b, p};
+  });
+  const cont = withPos
+    .filter(x => x.p && x.p.at && x.p.pct > 0 && x.p.pct < 0.995)
+    .sort((x, y) => y.p.at - x.p.at)
+    .slice(0, 3);
+  const contNames = new Set(cont.map(x => x.b.name));
+  const rest = withPos.filter(x => !contNames.has(x.b.name));
+  if (cont.length) list.appendChild(sectionHead('Continue'));
+
+  for (const {b, p} of cont.concat(rest)) {
+    const a = document.createElement('a');
+    a.href = '/play?book=' + encodeURIComponent(b.name);
+
+    const cover = document.createElement('div');
+    cover.className = 'cover';
+    const img = document.createElement('img');
+    if (b.cover) img.src = '/cover/' + encodeURIComponent(b.name);
+    img.alt = '';
+    img.width = 40;
+    img.height = 58;
+    cover.appendChild(img);
+    if (b.readaloud) {
+      const badge = document.createElement('div');
+      badge.className = 'badge';
+      badge.title = 'narration included';
+      badge.innerHTML = '<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor">' +
+        '<path d="M4 9h4l5-4v14l-5-4H4z"/></svg>';
+      cover.appendChild(badge);
+    } else if (b.audio) {
+      const badge = document.createElement('div');
+      badge.className = 'badge tape';
+      badge.title = 'audiobook';
+      badge.innerHTML = '<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor">' +
+        '<path d="M3 6h18v12H3zM7 9a2 2 0 100 4 2 2 0 000-4zm10 0a2 2 0 100 4 2 2 0 000-4zM6 16h12v1H6z"/></svg>';
+      cover.appendChild(badge);
+    }
+    a.appendChild(cover);
+
+    const info = document.createElement('div');
+    info.className = 'info';
+
+    const t = document.createElement('div');
+    t.className = 't';
+    t.textContent = b.title || b.name;
+    info.appendChild(t);
+
+    if (b.subtitle) {
+      const s = document.createElement('div');
+      s.className = 's';
+      s.textContent = b.subtitle;
+      info.appendChild(s);
+    }
+    const by = [b.author, b.series].filter(Boolean).join(' \u00b7 ');
+    if (by) {
+      const el = document.createElement('div');
+      el.className = 'a';
+      el.textContent = by;
+      info.appendChild(el);
+    }
+
+    const pct = (p && p.pct != null) ? Math.round(p.pct * 100) : null;
+    const m = document.createElement('div');
+    m.className = 'm' + (pct == null ? ' new' : '');
+    m.textContent = pct == null
+      ? (b.readaloud ? 'not started' : b.audio ? 'audiobook' : 'no narration')
+      : pct + '% \u00b7 chapter ' + ((p.sec || 0) + 1) + '/' + (p.total || '?');
+    info.appendChild(m);
+
+    if (pct != null) {
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      bar.style.width = pct + '%';
+      a.appendChild(bar);
+    }
+    a.appendChild(info);
+    list.appendChild(a);
+    if (p && contNames.has(b.name) && b.name === cont[cont.length - 1].b.name
+        && rest.length) {
+      list.appendChild(sectionHead('All books'));
+    }
+  }
+  focusRow(0);
+  applyTheme(currentThemeId());
+  if (new URLSearchParams(location.search).get('check') === 'ui') {
+    runUITests().catch(e => { document.title = 'UITESTS ERROR ' + e.message; });
+  }
+  if (new URLSearchParams(location.search).get('perf') === 'idle') {
+    let frames = 0; const t0 = performance.now();
+    const step = () => {
+      frames++;
+      if (performance.now() - t0 < 3000) requestAnimationFrame(step);
+      else console.log('IDLEFPS', Math.round(frames / 3));
+    };
+    requestAnimationFrame(step);
+  }
+  if (new URLSearchParams(location.search).get('perf') === 'scroll') {
+    let frames = 0, dir = 1;
+    const t0 = performance.now();
+    const step = () => {
+      const el = document.getElementById('list');
+      el.scrollTop += dir * 26;
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2) dir = -1;
+      if (el.scrollTop <= 0) dir = 1;
+      frames++;
+      if (performance.now() - t0 < 3000) requestAnimationFrame(step);
+      else console.log('SCROLLFPS', Math.round(frames / 3),
+                       'rows', document.querySelectorAll('#list > *').length);
+    };
+    requestAnimationFrame(step);
+  }
+});
+
+// ---- gamepad navigation ------------------------------------------------
+// ---- view modes: list / grid / covers ----------------------------------
+const VIEWS = ['list', 'grid', 'flow'];
+let view = 'list';
+try { view = localStorage.getItem('ra:view') || 'list'; } catch (e) {}
+if (!VIEWS.includes(view)) view = 'list';
+const forced = new URLSearchParams(location.search).get('view');
+if (VIEWS.includes(forced)) view = forced;
+const listEl = document.getElementById('list');
+const viewBtn = document.getElementById('viewbtn');
+
+function applyView() {
+  listEl.className = view === 'list' ? '' : view;
+  viewBtn.textContent = view === 'list' ? '\u2630' : view === 'grid' ? '\u25a6' : '\u25c8';
+  try { localStorage.setItem('ra:view', view); } catch (e) {}
+  if (view !== 'flow') {
+    rows().forEach(el => { el.style.transform = ''; el.style.opacity = ''; el.style.zIndex = ''; });
+  }
+  requestAnimationFrame(styleFlow);
+}
+
+function cycleView() {
+  view = VIEWS[(VIEWS.indexOf(view) + 1) % VIEWS.length];
+  applyView();
+  if (rows()[sel]) focusRow(sel);
+}
+viewBtn.onclick = cycleView;
+
+let sel = 0;
+const rows = () => [...document.querySelectorAll('#list a, #list .st, #list .series')]
+  .filter(el => el.offsetParent !== null);
+// Download a readaloud epub from Storyteller, with a live byte bar.
+function startDownload(row, book) {
+  if (row.dataset.dl) return;
+  row.dataset.dl = '1';
+  const meta = row.querySelector('.m');
+  let bar = row.querySelector('.bar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'bar';
+    row.appendChild(bar);          // same absolutely-positioned bar as local rows
+  }
+  row.classList.add('dl');
+  if (meta) meta.textContent = 'downloading\u2026';
+  const act = row.querySelector('.act');
+  if (act) act.innerHTML = '<div class="spinner"></div>';
+  const mb = n => (n / 1048576).toFixed(0);
+  fetch('/api/download', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({uuid: book.uuid, title: book.title}),
+  }).catch(() => {});
+  const timer = setInterval(() => {
+    fetch('/api/download/' + encodeURIComponent(book.uuid)).then(r => r.json()).then(s => {
+      const pct = s.total ? Math.round(100 * s.done / s.total) : 0;
+      bar.style.width = Math.min(100, pct) + '%';
+      if (s.state === 'running' && meta) {
+        meta.textContent = s.total
+          ? 'downloading ' + pct + '% \u00b7 ' + mb(s.done) + ' of ' + mb(s.total) + ' MB'
+          : 'downloading\u2026';
+      }
+      if (s.state === 'done') {
+        clearInterval(timer);
+        if (meta) meta.textContent = 'downloaded \u00b7 opening\u2026';
+        bar.style.width = '100%';
+        setTimeout(() => location.reload(), 900);
+      } else if (s.state === 'failed') {
+        clearInterval(timer);
+        row.dataset.dl = '';
+        row.classList.remove('dl');
+        if (meta) meta.textContent = 'download failed \u00b7 check the server';
+        bar.style.width = '0%';
+      }
+    }).catch(() => {});
+  }, 800);
+}
+
+
+// ---- UI self-tests (?check=ui): clicks and gamepad ----
+async function runUITests() {
+  const results = [];
+  const check = async (name, fn) => {
+    try { await fn(); results.push(name + ' PASS'); }
+    catch (e) { results.push(name + ' FAIL ' + ((e && e.message) || e)); }
+  };
+  const assert = (c, m) => { if (!c) throw new Error(m || 'assert'); };
+  const pad = {index: 0, buttons: Array.from({length: 18}, () => ({pressed: false}))};
+  navigator.getGamepads = () => [pad];
+  const tap = i => {
+    pad.buttons[i].pressed = true;
+    padTick();
+    pad.buttons[i].pressed = false;
+    padTick();
+  };
+
+  await check('rows are focusable', async () => {
+    const r = rows();
+    assert(r.length > 0, 'no rows');
+    assert(typeof r[0].focus === 'function', 'row not focusable');
+  });
+  await check('view button cycles', async () => {
+    const before = view;
+    document.getElementById('viewbtn').click();
+    assert(view !== before, 'view unchanged');
+    document.getElementById('viewbtn').click();
+  });
+  await check('keyboard v cycles view', async () => {
+    const before = view;
+    dispatchEvent(new KeyboardEvent('keydown', {key: 'v'}));
+    assert(view !== before, 'view unchanged');
+  });
+  await check('pad down moves focus', async () => {
+    if (rows().length < 2) return;          // single-book fixture
+    focusRow(0);
+    const before = sel;
+    tap(13);
+    assert(sel !== before, 'focus did not move');
+  });
+  await check('pad up moves focus back', async () => {
+    if (rows().length < 2) return;
+    focusRow(rows().length - 1);
+    const before = sel;
+    tap(12);
+    assert(sel !== before, 'focus did not move');
+  });
+  await check('series header expands on click', async () => {
+    const head = document.querySelector('#list .series');
+    if (!head) return;                       // no Storyteller configured
+    const box = head.nextElementSibling;
+    head.click();
+    assert(box.classList.contains('open'), 'group did not open');
+    head.click();
+    assert(!box.classList.contains('open'), 'group did not close');
+  });
+  await check('theme sheet applies a theme', async () => {
+    document.getElementById('themebtn').click();
+    const cards = document.querySelectorAll('#themegrid .tcard');
+    assert(cards.length >= 6, 'theme cards missing');
+    cards[3].click();
+    const applied = document.documentElement.style.getPropertyValue('--bg').trim();
+    assert(applied && applied.toLowerCase() !== '#141414', 'theme not applied');
+    assert(document.querySelector('#themegrid .tcard.sel'), 'no selection shown');
+    closeThemes();
+    applyTheme('midnight');
+  });
+  await check('series header opens with pad A', async () => {
+    const head = document.querySelector('#list .series');
+    if (!head) return;
+    head.focus();
+    tap(0);
+    assert(head.nextElementSibling.classList.contains('open'), 'pad A did not open');
+    head.click();
+  });
+
+  const pass = results.filter(r => r.includes(' PASS')).length;
+  document.title = 'UITESTS ' + pass + '/' + results.length + ' ' + results.join(' | ');
+}
+
+
+// ---- themes (shared by the library and the player) ----------------------
+const THEMES = [
+  {id: 'midnight', name: 'Midnight', bg: '#141414', panel: '#1d1d1d', card: '#191919',
+   text: '#e8e8e8', dim: '#8a8a8a', line: '#242424', accent: '#ffb300', accent2: '#ffd60a',
+   page: '#fbfaf7', ink: '#1d1a15'},
+  {id: 'amoled', name: 'Amoled', bg: '#000000', panel: '#0a0a0a', card: '#0f0f0f',
+   text: '#dcdcdc', dim: '#767676', line: '#1a1a1a', accent: '#ffb300', accent2: '#ffd60a',
+   page: '#000000', ink: '#c8c8c8'},
+  {id: 'night', name: 'Night', bg: '#121212', panel: '#1a1a1a', card: '#161616',
+   text: '#cfcfcf', dim: '#7a7a7a', line: '#222222', accent: '#9fb4ff', accent2: '#c3d0ff',
+   page: '#121212', ink: '#c8c8c8'},
+  {id: 'candle', name: 'Candle', bg: '#191510', panel: '#221c13', card: '#1e1810',
+   text: '#e6d3a3', dim: '#a4906a', line: '#2b2317', accent: '#d4a72c', accent2: '#f0c75e',
+   page: '#1b1710', ink: '#e6d3a3'},
+  {id: 'slate', name: 'Slate', bg: '#1b1f24', panel: '#23282f', card: '#1f242b',
+   text: '#dbe2ea', dim: '#8b98a5', line: '#2b323a', accent: '#7aa2f7', accent2: '#9ab8ff',
+   page: '#161a1f', ink: '#c9d4e0'},
+  {id: 'nord', name: 'Nord', bg: '#2e3440', panel: '#3b4252', card: '#343b48',
+   text: '#eceff4', dim: '#9aa5b1', line: '#434c5e', accent: '#88c0d0', accent2: '#8fbcbb',
+   page: '#2b3038', ink: '#d8dee9'},
+  {id: 'gruvbox', name: 'Gruvbox', bg: '#1d2021', panel: '#282828', card: '#232526',
+   text: '#ebdbb2', dim: '#a89984', line: '#3c3836', accent: '#fabd2f', accent2: '#d79921',
+   page: '#1b1b1b', ink: '#d5c4a1'},
+  {id: 'solar', name: 'Solarized', bg: '#002b36', panel: '#073642', card: '#04313c',
+   text: '#eee8d5', dim: '#93a1a1', line: '#0b4250', accent: '#b58900', accent2: '#cb4b16',
+   page: '#002b36', ink: '#93a1a1'},
+  {id: 'rose', name: 'Rose Pine', bg: '#191724', panel: '#1f1d2e', card: '#1c1a29',
+   text: '#e0def4', dim: '#908caa', line: '#26233a', accent: '#ebbcba', accent2: '#f6c177',
+   page: '#191724', ink: '#e0def4'},
+  {id: 'sepia', name: 'Sepia', bg: '#efe6d4', panel: '#f7efe0', card: '#e9dfcb',
+   text: '#3b3222', dim: '#6f6350', line: '#dccfae', accent: '#a35f00', accent2: '#c27200',
+   page: '#f6ecd8', ink: '#3b3222'},
+  {id: 'daylight', name: 'Daylight', bg: '#f5f2ec', panel: '#fffdf8', card: '#efeae1',
+   text: '#1f1c18', dim: '#6b6257', line: '#e0d8ca', accent: '#c2410c', accent2: '#ea580c',
+   page: '#fdfbf7', ink: '#1f1c18'},
+  {id: 'paper', name: 'Paper', bg: '#efe9dd', panel: '#fbf7ef', card: '#e7dfd1',
+   text: '#2a241c', dim: '#7a6f5f', line: '#d9cfbd', accent: '#9a6b00', accent2: '#b8860b',
+   page: '#fbf6ec', ink: '#2a241c'},
+  {id: 'black', name: 'Black', bg: '#000000', panel: '#0b0b0b', card: '#111111',
+   text: '#f5f5f5', dim: '#8c8c8c', line: '#1d1d1d', accent: '#ffd60a', accent2: '#ffe066',
+   page: '#000000', ink: '#f2f2f2'},
+  {id: 'dark', name: 'Dark', bg: '#1a1a1a', panel: '#232323', card: '#1f1f1f',
+   text: '#f0f0f0', dim: '#909090', line: '#2e2e2e', accent: '#7dd3fc', accent2: '#bae6fd',
+   page: '#1c1c1c', ink: '#f0f0f0'},
+];
+
+function themeById(id) {
+  return THEMES.find(t => t.id === id) || THEMES[0];
+}
+
+function currentThemeId() {
+  let id = 'midnight';
+  try { id = localStorage.getItem('ra:theme') || 'midnight'; } catch (e) {}
+  const forced = new URLSearchParams(location.search).get('theme');
+  if (forced && THEMES.some(t => t.id === forced)) id = forced;
+  return themeById(id).id;
+}
+
+function applyTheme(id) {
+  const t = themeById(id);
+  const r = document.documentElement.style;
+  r.setProperty('--bg', t.bg);
+  r.setProperty('--panel', t.panel);
+  r.setProperty('--card', t.card);
+  r.setProperty('--text', t.text);
+  r.setProperty('--dim', t.dim);
+  r.setProperty('--line', t.line);
+  r.setProperty('--accent', t.accent);
+  r.setProperty('--accent2', t.accent2);
+  r.setProperty('--page', t.page);
+  r.setProperty('--ink', t.ink);
+  r.setProperty('color-scheme', t.bg === '#f5f2ec' || t.bg === '#efe9dd' ? 'light' : 'dark');
+  try { localStorage.setItem('ra:theme', t.id); } catch (e) {}
+  const f = document.getElementById('f');
+  if (f && f.contentDocument) {
+    f.contentDocument.documentElement.style.setProperty('--ra-accent', t.accent);
+    f.contentDocument.documentElement.style.setProperty('--ra-accent2', t.accent2);
+    f.contentDocument.documentElement.style.setProperty('--ra-page', t.page);
+    f.contentDocument.documentElement.style.setProperty('--ra-ink', t.ink);
+  }
+  return t;
+}
+
+// Theme sheet: each card previews its own palette, tapping applies it live.
+function openThemes() {
+  const grid = document.getElementById('themegrid');
+  grid.textContent = '';
+  const active = currentThemeId();
+  for (const t of THEMES) {
+    const card = document.createElement('div');
+    card.className = 'tcard' + (t.id === active ? ' sel' : '');
+    const prev = document.createElement('div');
+    prev.className = 'tprev';
+    prev.style.background = t.bg;
+    const cv = document.createElement('div');
+    cv.className = 'cv';
+    cv.style.background = t.accent;
+    const txt = document.createElement('div');
+    txt.className = 'txt';
+    for (const [cls, color, w] of [['tl', t.text, '100%'], ['ts', t.dim, '70%']]) {
+      const el = document.createElement('div');
+      el.className = cls;
+      el.style.background = color;
+      if (w !== '100%') el.style.width = w;
+      txt.appendChild(el);
+    }
+    const pb = document.createElement('div');
+    pb.className = 'pb';
+    pb.style.background = t.accent;
+    pb.style.width = '60%';
+    txt.appendChild(pb);
+    prev.append(cv, txt);
+    const name = document.createElement('div');
+    name.className = 'tname';
+    name.style.background = t.card;
+    name.style.color = t.text;
+    name.textContent = t.name + (t.id === active ? '  \u2713' : '');
+    card.append(prev, name);
+    card.onclick = () => { applyTheme(t.id); openThemes(); };
+    grid.appendChild(card);
+  }
+  document.getElementById('themes').classList.add('open');
+}
+function closeThemes() { document.getElementById('themes').classList.remove('open'); }
+document.getElementById('themecancel').onclick = closeThemes;
+document.getElementById('themebtn').onclick = () => {
+  const el = document.getElementById('themes');
+  if (el.classList.contains('open')) closeThemes(); else openThemes();
+};
+
+function sectionHead(text) {
+  const d = document.createElement('div');
+  d.className = 'section';
+  d.textContent = text;
+  return d;
+}
+
+function focusRow(i) {
+  const r = rows();
+  if (!r.length) return;
+  sel = (i + r.length) % r.length;
+  r[sel].focus();
+  r[sel].scrollIntoView({block: 'nearest', inline: 'center'});
+  styleFlow();
+}
+function moveFocus(step) {
+  focusRow(sel + step * (view === 'grid' ? 3 : 1));
+}
+
+// iPod-style cover flow: neighbours rotate away, the focused cover faces you.
+function centerFlow() {
+  if (view !== 'flow') return;
+  const r = rows()[sel];
+  if (!r) return;
+  // Measure after the transform is applied so the *visible* cover is centred.
+  const rb = r.getBoundingClientRect(), cb = listEl.getBoundingClientRect();
+  listEl.scrollLeft += (rb.left + rb.width / 2) - (cb.left + cb.width / 2);
+}
+
+function styleFlow() {
+  if (view !== 'flow') return;
+  rows().forEach((el, i) => {
+    const d = i - sel, ad = Math.abs(d);
+    const rot = d === 0 ? 0 : (d < 0 ? 1 : -1) * Math.min(70, 40 + ad * 8);
+    const z = 0;   // no depth offset: GPUs here cull the cover raster at large -Z
+
+    const scale = d === 0 ? 1.04 : Math.max(0.55, 0.90 - ad * 0.07);
+    el.style.transform = 'translateZ(' + z + 'px) rotateY(' + rot + 'deg) scale(' + scale + ')';
+    el.style.opacity = ad > 4 ? 0.12 : (d === 0 ? 1 : 0.85);
+    el.style.zIndex = 200 - ad;
+  });
+  centerFlow();
+}
+
+function moveSel(i) {
+  const r = rows();
+  if (!r.length) return;
+  sel = Math.max(0, Math.min(r.length - 1, i));
+  r[sel].focus();
+  r[sel].scrollIntoView({block: 'nearest', inline: 'center'});
+  styleFlow();
+}
+applyView();
+document.getElementById('list').addEventListener('focusin', e => {
+  const i = rows().indexOf(e.target);
+  if (i >= 0) sel = i;
+});
+const held = {};
+function padTick() {
+  for (const gp of (navigator.getGamepads ? navigator.getGamepads() : [])) {
+    if (!gp) continue;
+    gp.buttons.forEach((b, i) => {
+      const k = gp.index + ':' + i;
+      if (b.pressed && !held[k]) {
+        if (i === 12) moveFocus(-1);
+        else if (i === 13) moveFocus(1);
+        else if (i === 14) focusRow(sel - 1);
+        else if (i === 15) focusRow(sel + 1);
+        else if (i === 3) cycleView();
+        else if (i === 2) cycleView();
+        else if (i === 0) {
+          const r = rows()[sel];
+          if (r) r.click();
+          if (r && r.classList.contains('series')) focusRow(sel + 1);
+        }
+        else if (i === 1 || i === 8) fetch('/quit').catch(() => {});
+      }
+      held[k] = b.pressed;
+    });
+  }
+}
+function pollPad() { padTick(); requestAnimationFrame(pollPad); }
+pollPad();
+
+// ---- storyteller --------------------------------------------------------
+// Rendered after the local list is already on screen, so a slow or dead server
+// can never delay or block navigation.
+fetch('/api/status').then(r => r.json()).then(s => {
+  const b = document.getElementById('batt');
+  if (s.level != null) {
+    b.textContent = (s.charging ? '\u26a1' : '') + s.level + '%';
+    b.classList.toggle('low', s.level <= 15 && !s.charging);
+  }
+}).catch(() => {});
+
+fetch('/api/storyteller').then(r => r.json()).then(st => {
+  if (!st.configured || !st.books || !st.books.length) return;
+  const list = document.getElementById('list');
+  const head = document.createElement('div');
+  head.className = 'section';
+  head.textContent = 'Storyteller' + (st.online ? '' : ' (offline copy)');
+  list.appendChild(head);
+  if (!st.online) {
+    const note = document.createElement('div');
+    note.className = 'note';
+    note.textContent = 'server unreachable \u2014 showing the cached list, downloads disabled';
+    list.appendChild(note);
+  }
+  const stRow = b => {
+    const a = document.createElement(b.local ? 'a' : 'div');
+    a.className = 'st' + (b.local ? '' : ' remote');
+    if (b.local) a.href = '/play?book=' + encodeURIComponent(b.local);
+    else if (st.online) {
+      a.tabIndex = 0;
+      a.setAttribute('role', 'button');
+      a.onclick = () => startDownload(a, b);
+      a.onkeydown = e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startDownload(a, b); }
+      };
+    }
+    const cover = document.createElement('div');
+    cover.className = 'cover';
+    const img = document.createElement('img');
+    if (b.uuid) img.src = '/cover/st/' + encodeURIComponent(b.uuid);
+    img.alt = '';
+    img.width = 40;
+    img.height = 58;
+    img.loading = 'lazy';
+    img.onerror = () => { img.style.visibility = 'hidden'; };
+    cover.appendChild(img);
+    a.appendChild(cover);
+    const info = document.createElement('div');
+    info.className = 'info';
+    const t = document.createElement('div');
+    t.className = 't';
+    t.textContent = b.title || '(untitled)';
+    const m = document.createElement('div');
+    m.className = 'm' + (b.local ? '' : ' new');
+    m.textContent = [b.collection, b.position != null ? '#' + b.position : '',
+                     b.aligned ? 'aligned' : 'not aligned',
+                     b.local ? 'downloaded' : 'not downloaded'].filter(Boolean).join(' \u00b7 ');
+    info.append(t, m);
+    a.appendChild(info);
+    const act = document.createElement('div');
+    act.className = 'act';
+    if (!b.local && st.online) {
+      act.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">' +
+        '<path d="M12 3v10.6l3.7-3.7 1.4 1.4L12 17.4 6.9 11.3l1.4-1.4L12 13.6V3zM5 19h14v2H5z"/></svg>';
+      act.title = 'download';
+    }
+    a.appendChild(act);
+    return a;
+  };
+
+  // Storyteller's own series rows are not normalised ("Witcher" vs
+  // "The Witcher", "X" vs "X Series"), so key on a cleaned name and keep the
+  // most common original for display.
+  const normSeries = s => (s || '').toLowerCase()
+    .replace(/^the\\s+/, '').replace(/\\s+series$/, '')
+    .replace(/[^a-z0-9]+/g, ' ').trim();
+  const groups = new Map();
+  for (const b of st.books) {
+    const key = normSeries(b.series) || 'standalone';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(b);
+  }
+  const byTitle = (x, y) => (x.title || '').localeCompare(y.title || '');
+  const bySeries = (x, y) => {
+    const px = (x.position == null) ? 1e6 : x.position;
+    const py = (y.position == null) ? 1e6 : y.position;
+    return px - py || byTitle(x, y);
+  };
+  for (const key of [...groups.keys()].sort((x, y) => x.localeCompare(y))) {
+    const items = groups.get(key).sort(bySeries);
+    const counts = {};
+    for (const b of items) counts[b.series || 'Standalone'] = (counts[b.series || 'Standalone'] || 0) + 1;
+    const name = Object.keys(counts).sort((x, y) => counts[y] - counts[x] || x.length - y.length)[0];
+    // Rows are built on first expand: 84 hidden rows still cost ~220 MB of RAM.
+    const head2 = document.createElement('div');
+    head2.className = 'series';
+    head2.tabIndex = 0;
+    head2.setAttribute('role', 'button');
+    head2.innerHTML = '<span></span><span class="c"></span>';
+    head2.firstChild.textContent = name;
+    head2.setAttribute('aria-expanded', 'false');
+    head2.lastChild.textContent = items.length + ' \u25b8 \u2014 tap to open';
+    const box = document.createElement('div');
+    box.className = 'group';
+    let built = false;
+    const toggle = () => {
+      const on = box.classList.toggle('open');
+      head2.lastChild.textContent = items.length +
+        (on ? ' \u25be' : ' \u25b8 \u2014 tap to open');
+      head2.setAttribute('aria-expanded', on ? 'true' : 'false');
+      if (on && !built) {
+        built = true;
+        for (const b of items) box.appendChild(stRow(b));
+      }
+    };
+    head2.onclick = toggle;
+    head2.onkeydown = e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    };
+    list.appendChild(head2);
+    list.appendChild(box);
+  }
+});
+</script></body></html>"""
+
+PLAYER_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>readaloud</title>
+<style>
+ html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;font:14px system-ui,sans-serif}
+ #f{position:absolute;top:0;left:0;width:100%;height:calc(100% - 58px);border:0;background:#fff}
+ #scrub{position:absolute;left:0;right:0;bottom:46px;height:12px;background:var(--panel);cursor:pointer;
+        touch-action:none;transition:transform .22s ease,opacity .22s ease}
+ #scrubfill{height:100%;width:0;background:var(--accent)}
+ #scrubgrab{position:absolute;top:50%;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;
+            background:var(--accent2);box-shadow:0 0 0 2px var(--panel);left:0;pointer-events:none}
+ #bar{position:absolute;left:0;right:0;bottom:0;height:46px;display:flex;align-items:center;gap:2px;
+      background:var(--panel);color:var(--text);padding:0 4px;box-sizing:border-box;
+      transition:transform .22s ease,opacity .22s ease}
+ body.zen #bar{transform:translateY(100%);opacity:0;pointer-events:none}
+ body.zen #scrub{transform:translateY(100%);opacity:0;pointer-events:none}
+ body.zen #f{height:100%}
+ body.zen #spritz{height:100%}
+ button{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:6px;font-size:16px;
+        min-width:40px;height:34px}
+ button:active{background:var(--line)}
+ #rate{min-width:52px;text-align:center;font-variant-numeric:tabular-nums}
+ #title{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding-left:6px;color:var(--dim);font-size:12px}
+ #load{position:absolute;top:0;left:0;width:100%;height:100%;display:flex;flex-direction:column;
+       align-items:center;justify-content:center;gap:14px;background:var(--bg);color:var(--dim);z-index:5;
+       font:14px system-ui,sans-serif}
+ .spin{width:38px;height:38px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;
+       animation:sp .8s linear infinite}
+ @keyframes sp{to{transform:rotate(360deg)}}
+ #spritz{position:absolute;top:0;left:0;width:100%;height:calc(100% - 58px);display:none;
+         align-items:center;justify-content:center;background:var(--bg);overflow:hidden}
+ #g1,#g2{position:absolute;left:50%;width:2px;margin-left:-1px;background:var(--accent);opacity:.45}
+ #g1{top:16%;height:calc(50% - 16% - 30px)}
+ #g2{top:calc(50% + 30px);bottom:16%}
+ #spz{position:relative;font:600 42px/1.15 Georgia,serif;color:var(--text);white-space:nowrap}
+ #spz .orp{color:var(--accent)}
+ #spzbtn.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+ #batt{font-size:11px;color:var(--dim);padding:0 4px;font-variant-numeric:tabular-nums}
+ #batt.low{color:#ff8a65}
+ #toc{position:absolute;top:0;left:0;width:100%;height:calc(100% - 58px);display:none;
+      flex-direction:column;background:var(--bg);color:var(--text);z-index:4}
+ #tocbody{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--line) var(--bg)}
+ #tocbody::-webkit-scrollbar{width:6px}
+ #tocbody::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+ #tocbody::-webkit-scrollbar-track{background:var(--bg)}
+ .tocrow{display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);align-items:baseline;
+         cursor:pointer;user-select:none}
+ .tocrow:hover{background:var(--card)}
+ .tocrow .n{color:var(--dim);font-size:12px;min-width:26px;text-align:right;font-variant-numeric:tabular-nums}
+ .tocrow .l{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .tocrow.cur{background:var(--card);box-shadow:inset 3px 0 0 var(--accent)}
+ .tocrow.sel{background:var(--panel);box-shadow:inset 0 0 0 2px var(--accent)}
+ .tocrow.tog .l{color:var(--accent2)}
+</style></head><body>
+<div id="load"><div class="spin"></div><div id="loadtxt">opening book&hellip;</div></div>
+<iframe id="f"></iframe>
+<div id="spritz"><div id="g1"></div><div id="g2"></div><div id="spz"></div></div>
+<div id="scrub"><div id="scrubfill"></div><div id="scrubgrab"></div></div>
+<div id="toc"><div id="tocbody"></div></div>
+<div id="bar">
+ <button id="tocbtn" title="chapters">&#9776;</button>
+ <button id="pp" title="play/pause">&#9654;</button>
+ <button id="slow" title="slower">&minus;</button>
+ <span id="rate">1.00x</span>
+ <button id="fast" title="faster">+</button>
+ <span id="title"></span>
+ <span id="batt"></span>
+ <button id="spzbtn" title="spritz mode">S</button>
+ <button id="quit" title="back to library">&times;</button>
+</div>
+<script>
+const BOOK = __BOOK__;
+const f = document.getElementById('f'), rateEl = document.getElementById('rate');
+const titleEl = document.getElementById('title'), pp = document.getElementById('pp');
+const audio = new Audio();
+audio.preload = 'auto';
+let data = null, sec = 0, par = 0, autoplay = false, audioSrc = null, resumeAt = null;
+let rate = 1;
+try { rate = Math.min(3, Math.max(0.4, +(localStorage.getItem('ra:rate') || 1) || 1)); } catch (e) {}
+rateEl.textContent = rate.toFixed(2) + 'x';
+
+// Assigning <audio>.src resets playbackRate to the default, so a chapter change
+// used to drop you back to 1.0x. Re-assert both after every load.
+function applyRate() {
+  audio.defaultPlaybackRate = rate;
+  audio.playbackRate = rate;
+}
+let fontPct = 135;
+try { fontPct = +(localStorage.getItem('ra:fs') || 135) || 135; } catch (e) {}
+
+function setFont(v) {
+  fontPct = Math.min(220, Math.max(90, Math.round(v / 10) * 10));
+  try { localStorage.setItem('ra:fs', fontPct); } catch (e) {}
+  const d = f.contentDocument;
+  if (d && d.documentElement) d.documentElement.style.setProperty('--ra-fs', fontPct + '%');
+}
+
+const enc = p => p.split('/').map(encodeURIComponent).join('/');
+const url = p => '/book/' + encodeURIComponent(BOOK) + '/' + enc(p);
+const cur = () => (data && data.sections[sec] ? data.sections[sec].pars[par] : null);
+const pars = () => (data && data.sections[sec] ? data.sections[sec].pars : []);
+
+function ensureStyle() {
+  const d = f.contentDocument;
+  if (!d || !d.head) return null;
+  if (!d.getElementById('ra-style')) {
+    const s = d.createElement('style');
+    s.id = 'ra-style';
+    s.textContent = `
+      html,body{background:var(--ra-page,#fff) !important;color:var(--ra-ink,#111) !important;
+                margin:0 !important;padding:0 !important;
+                max-width:none !important;width:auto !important;height:auto !important}
+      /* book stylesheets set their own colours; the theme has to win */
+      body, body *{color:var(--ra-ink,#111) !important}
+      a{color:var(--ra-ink,#111) !important}
+      ::-webkit-scrollbar{width:6px}
+      html{scrollbar-color:var(--ra-accent,#ffb300) var(--ra-page,#fff)}
+      ::-webkit-scrollbar-track{background:var(--ra-page,#fff)}
+      ::-webkit-scrollbar-thumb{background:color-mix(in srgb, var(--ra-accent,#ffb300) 55%,
+                                    var(--ra-page,#fff));border-radius:3px}
+      ::-webkit-scrollbar-corner{background:var(--ra-page,#fff)}
+      body{padding:10px 12px 44px !important;font-size:var(--ra-fs,135%) !important;
+           line-height:1.6 !important;text-align:left !important;max-width:none !important}
+      p{margin:0 0 .7em !important}
+      img,svg,video{max-width:100% !important;height:auto !important}
+      .ra-hl{border-radius:4px;
+             background:color-mix(in srgb, var(--ra-accent,#ffb300) 10%, transparent)}
+      .ra-word.ra-fill{background-repeat:no-repeat;background-position:0 100%,0 0;border-radius:3px;
+               background-image:linear-gradient(90deg,var(--ra-accent,#ffb300),var(--ra-accent2,#ffc400)),
+                                linear-gradient(90deg,
+                                  color-mix(in srgb, var(--ra-accent,#ffb300) 38%, transparent),
+                                  color-mix(in srgb, var(--ra-accent,#ffb300) 22%, transparent));
+               background-size:0% 3px,0% 100%;
+               animation:ra-sweep var(--dur,.3s) linear var(--delay,0s) forwards}
+      .ra-paused .ra-word{animation-play-state:paused}
+      .ra-word.ra-cur{background:color-mix(in srgb, var(--ra-accent,#ffb300) 40%, transparent);
+                      border-radius:3px}
+      .ra-word.ra-cur .orp{font-weight:700;
+                           color:color-mix(in srgb, var(--ra-accent,#ffb300) 55%, var(--ra-ink,#111)) !important}
+      .ra-word.ra-done{animation:none !important;background-size:100% 3px,100% 100% !important}
+      @keyframes ra-sweep{to{background-size:100% 3px,100% 100%}}`;
+    d.head.appendChild(s);
+  }
+  if (!d.__raKeys) {
+    d.addEventListener('keydown', onKey);
+    d.__raKeys = true;
+  }
+  setFont(fontPct);
+  return d;
+}
+
+function wrapWords(d, el) {
+  if (!el.dataset.raWrapped) {
+    const walker = d.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const t of nodes) {
+      if (!/\S/.test(t.nodeValue)) continue;
+      const frag = d.createDocumentFragment();
+      for (const part of t.nodeValue.split(/(\s+)/)) {
+        if (!part) continue;
+        if (/^\s+$/.test(part)) frag.appendChild(d.createTextNode(part));
+        else {
+          const s = d.createElement('span');
+          s.className = 'ra-word';
+          const pivot = Math.min(part.length - 1,
+                                 Math.max(0, Math.round(part.length * 0.3) - 1));
+          const o = d.createElement('span');
+          o.className = 'orp';
+          o.textContent = part[pivot];
+          s.append(d.createTextNode(part.slice(0, pivot)), o,
+                   d.createTextNode(part.slice(pivot + 1)));
+          frag.appendChild(s);
+        }
+      }
+      t.parentNode.replaceChild(frag, t);
+    }
+    el.dataset.raWrapped = '1';
+  }
+  return [...el.querySelectorAll('.ra-word')];
+}
+
+// Word pacing. The SMIL gives one duration per par (sentence), no word timings,
+// so the par is modelled as: syllables cost time, the gaps between words cost
+// time, punctuation costs more. Weights are ceil(len/3) as a cheap syllable
+// count; gaps are 0.05 s, 0.12 s after , ; : and 0.30 s after . ! ?. Everything
+// is scaled so the par's pars still add up to end - begin.
+// ponytail: a linear model, not forced alignment. It fits slow narration well
+// and reads slightly ahead on fast runs; real timings would come from whisper.
+function wordTimes(words, begin, end) {
+  const n = words.length;
+  if (!n) return [];
+  const D = Math.max(0.05, end - begin);
+  const even = () => {
+    const per = D / n;
+    return words.map((_, i) => ({start: begin + i * per, dur: per}));
+  };
+  const w = words.map(s => Math.max(1, Math.ceil(s.length / 3)));
+  const gap = words.map(s => /[.!?]$/.test(s) ? 0.30 : /[,;:]$/.test(s) ? 0.12 : 0.05);
+  const gaps = gap.slice(0, n - 1).reduce((a, b) => a + b, 0);
+  const units = w.reduce((a, b) => a + b, 0);
+  const a = (D - gaps) / units;                 // seconds per weight unit
+  if (!(a > 0.01)) return even();
+  const out = [];
+  let cur = begin;
+  for (let i = 0; i < n; i++) {
+    const d = Math.max(0.05, a * w[i]);
+    out.push({start: cur, dur: d});
+    cur += d + (i < n - 1 ? gap[i] : 0);
+  }
+  return out;
+}
+
+let lastFilled = [];
+// Exact per-word starts from a sidecar alignment file (seconds, absolute) when
+// one exists; otherwise the character/gap model.
+function parTimes(p, words) {
+  const text = words.map(w => (typeof w === 'string' ? w : w.textContent));
+  if (p.times && p.times.length === text.length) {
+    return p.times.map((t, i) => ({
+      start: t,
+      dur: Math.max(0.05, (i + 1 < p.times.length ? p.times[i + 1] : p.end) - t),
+    }));
+  }
+  return wordTimes(text, p.begin, p.end);
+}
+
+// Smoke hook for the test suite: parTimes must accept strings (Spritz) and
+// DOM nodes (karaoke). `?check=1` reports through document.title.
+if (new URLSearchParams(location.search).get('check') === '1') {
+  try {
+    const a = parTimes({begin: 0, end: 10}, ['a', 'bb', 'ccc']);
+    const b = parTimes({begin: 0, end: 10, times: [0, 4, 7]}, ['a', 'bb', 'ccc']);
+    const ok = a.length === 3 && b.length === 3 && b[1].start === 4
+      && a[1].start > a[0].start && a[2].dur > 0;
+    document.title = ok ? 'CHECK OK' : 'CHECK FAIL';
+  } catch (e) {
+    document.title = 'CHECK ERROR ' + e.message;
+  }
+}
+
+
+// ---- UI self-tests (?check=ui): clicks and gamepad, no human needed ----
+async function runUITests() {
+  const results = [];
+
+  const check = async (name, fn) => {
+    try { await fn(); results.push(name + ' PASS'); }
+    catch (e) { results.push(name + ' FAIL ' + ((e && e.message) || e)); }
+  };
+  const assert = (c, m) => { if (!c) throw new Error(m || 'assert'); };
+
+  const pad = {index: 0, buttons: Array.from({length: 18}, () => ({pressed: false}))};
+  navigator.getGamepads = () => [pad];
+  const tap = i => {
+    pad.buttons[i].pressed = true;
+    padTick();
+    pad.buttons[i].pressed = false;
+    padTick();
+  };
+
+  await check('toc button opens picker', async () => {
+    document.getElementById('tocbtn').click();
+    assert(tocOpen, 'picker did not open');
+  });
+  await check('spritz row reacts to click', async () => {
+    tocRows[0].click();
+    assert(spritz === true, 'spritz did not toggle');
+    setSpritz(false);
+  });
+  await check('chapter row click jumps', async () => {
+    openToc();
+    const before = sec;
+    const target = tocRows[tocRows.length - 1];
+    target.click();
+    assert(!tocOpen, 'picker stayed open');
+    assert(sec !== before || data.sections.length === 1, 'chapter unchanged');
+  });
+  await check('pad opens picker', async () => {
+    await tap(8);
+    assert(tocOpen, 'pad did not open picker');
+  });
+  await check('pad moves selection', async () => {
+    const before = tocSel;
+    await tap(13);
+    assert(tocSel > before, 'selection did not move');
+  });
+  await check('pad activates selection', async () => {
+    while (tocSel < tocRows.length - 1) tap(13);      // walk to a chapter row
+    tap(0);
+    assert(!tocOpen, 'picker did not close on pad A');
+  });
+  await check('pad A toggles playback', async () => {
+    const before = autoplay;
+    await tap(0);
+    assert(autoplay !== before, 'play state unchanged');
+    autoplay = false;
+    audio.pause();
+  });
+  await check('pad X grows the text', async () => {
+    const before = fontPct;
+    await tap(2);
+    assert(fontPct > before, 'font size unchanged');
+  });
+  await check('pad up raises speed', async () => {
+    const before = narrated ? rate : wpm;
+    await tap(12);
+    const after = narrated ? rate : wpm;
+    assert(after > before, 'speed unchanged');
+  });
+  await check('pad shoulder changes chapter', async () => {
+    const before = sec;
+    await tap(5);
+    assert(sec !== before || data.sections.length === 1, 'chapter unchanged');
+  });
+  await check('scrubber seeks', async () => {
+    seekFrac(0.5);
+    if (narrated && pars().length > 1) assert(par > 0, 'par not moved');
+    assert(Math.abs(scrubFrac() - 0.5) < 0.25, 'position not applied');
+  });
+  await check('picker cycles theme', async () => {
+    const before = currentThemeId();
+    cycleTheme();
+    assert(currentThemeId() !== before, 'theme unchanged');
+    applyTheme(before);
+  });
+  await check('speed buttons click', async () => {
+    const before = rate;
+    document.getElementById('fast').click();
+    assert(rate > before, 'rate unchanged');
+    document.getElementById('slow').click();
+    document.getElementById('slow').click();
+    assert(rate < before + 0.01, 'rate did not drop');
+  });
+
+  const pass = results.filter(r => r.includes(' PASS')).length;
+  document.title = 'UITESTS ' + pass + '/' + results.length + ' ' + results.join(' | ');
+}
+
+
+// ---- themes (same list as the library, kept in sync by id) --------------
+const THEMES = [
+  {id: 'midnight', name: 'Midnight', bg: '#141414', panel: '#1d1d1d', card: '#191919',
+   text: '#e8e8e8', dim: '#8a8a8a', line: '#242424', accent: '#ffb300', accent2: '#ffd60a',
+   page: '#fbfaf7', ink: '#1d1a15'},
+  {id: 'amoled', name: 'Amoled', bg: '#000000', panel: '#0a0a0a', card: '#0f0f0f',
+   text: '#dcdcdc', dim: '#767676', line: '#1a1a1a', accent: '#ffb300', accent2: '#ffd60a',
+   page: '#000000', ink: '#c8c8c8'},
+  {id: 'night', name: 'Night', bg: '#121212', panel: '#1a1a1a', card: '#161616',
+   text: '#cfcfcf', dim: '#7a7a7a', line: '#222222', accent: '#9fb4ff', accent2: '#c3d0ff',
+   page: '#121212', ink: '#c8c8c8'},
+  {id: 'candle', name: 'Candle', bg: '#191510', panel: '#221c13', card: '#1e1810',
+   text: '#e6d3a3', dim: '#a4906a', line: '#2b2317', accent: '#d4a72c', accent2: '#f0c75e',
+   page: '#1b1710', ink: '#e6d3a3'},
+  {id: 'slate', name: 'Slate', bg: '#1b1f24', panel: '#23282f', card: '#1f242b',
+   text: '#dbe2ea', dim: '#8b98a5', line: '#2b323a', accent: '#7aa2f7', accent2: '#9ab8ff',
+   page: '#161a1f', ink: '#c9d4e0'},
+  {id: 'nord', name: 'Nord', bg: '#2e3440', panel: '#3b4252', card: '#343b48',
+   text: '#eceff4', dim: '#9aa5b1', line: '#434c5e', accent: '#88c0d0', accent2: '#8fbcbb',
+   page: '#2b3038', ink: '#d8dee9'},
+  {id: 'gruvbox', name: 'Gruvbox', bg: '#1d2021', panel: '#282828', card: '#232526',
+   text: '#ebdbb2', dim: '#a89984', line: '#3c3836', accent: '#fabd2f', accent2: '#d79921',
+   page: '#1b1b1b', ink: '#d5c4a1'},
+  {id: 'solar', name: 'Solarized', bg: '#002b36', panel: '#073642', card: '#04313c',
+   text: '#eee8d5', dim: '#93a1a1', line: '#0b4250', accent: '#b58900', accent2: '#cb4b16',
+   page: '#002b36', ink: '#93a1a1'},
+  {id: 'rose', name: 'Rose Pine', bg: '#191724', panel: '#1f1d2e', card: '#1c1a29',
+   text: '#e0def4', dim: '#908caa', line: '#26233a', accent: '#ebbcba', accent2: '#f6c177',
+   page: '#191724', ink: '#e0def4'},
+  {id: 'sepia', name: 'Sepia', bg: '#efe6d4', panel: '#f7efe0', card: '#e9dfcb',
+   text: '#3b3222', dim: '#6f6350', line: '#dccfae', accent: '#a35f00', accent2: '#c27200',
+   page: '#f6ecd8', ink: '#3b3222'},
+  {id: 'daylight', name: 'Daylight', bg: '#f5f2ec', panel: '#fffdf8', card: '#efeae1',
+   text: '#1f1c18', dim: '#6b6257', line: '#e0d8ca', accent: '#c2410c', accent2: '#ea580c',
+   page: '#fdfbf7', ink: '#1f1c18'},
+  {id: 'paper', name: 'Paper', bg: '#efe9dd', panel: '#fbf7ef', card: '#e7dfd1',
+   text: '#2a241c', dim: '#7a6f5f', line: '#d9cfbd', accent: '#9a6b00', accent2: '#b8860b',
+   page: '#fbf6ec', ink: '#2a241c'},
+  {id: 'black', name: 'Black', bg: '#000000', panel: '#0b0b0b', card: '#111111',
+   text: '#f5f5f5', dim: '#8c8c8c', line: '#1d1d1d', accent: '#ffd60a', accent2: '#ffe066',
+   page: '#000000', ink: '#f2f2f2'},
+  {id: 'dark', name: 'Dark', bg: '#1a1a1a', panel: '#232323', card: '#1f1f1f',
+   text: '#f0f0f0', dim: '#909090', line: '#2e2e2e', accent: '#7dd3fc', accent2: '#bae6fd',
+   page: '#1c1c1c', ink: '#f0f0f0'},
+];
+
+const themeById = id => THEMES.find(t => t.id === id) || THEMES[0];
+function currentThemeId() {
+  let id = 'midnight';
+  try { id = localStorage.getItem('ra:theme') || 'midnight'; } catch (e) {}
+  const forced = new URLSearchParams(location.search).get('theme');
+  if (forced && THEMES.some(t => t.id === forced)) id = forced;
+  return themeById(id).id;
+}
+
+function applyTheme(id) {
+  const t = themeById(id);
+  const r = document.documentElement.style;
+  r.setProperty('--bg', t.bg);
+  r.setProperty('--panel', t.panel);
+  r.setProperty('--card', t.card);
+  r.setProperty('--text', t.text);
+  r.setProperty('--dim', t.dim);
+  r.setProperty('--line', t.line);
+  r.setProperty('--accent', t.accent);
+  r.setProperty('--accent2', t.accent2);
+  r.setProperty('--page', t.page);
+  r.setProperty('--ink', t.ink);
+  r.setProperty('color-scheme', (t.bg === '#f5f2ec' || t.bg === '#efe9dd') ? 'light' : 'dark');
+  try { localStorage.setItem('ra:theme', t.id); } catch (e) {}
+  const d = f.contentDocument;
+  if (d && d.documentElement) {
+    d.documentElement.style.setProperty('--ra-accent', t.accent);
+    d.documentElement.style.setProperty('--ra-accent2', t.accent2);
+    d.documentElement.style.setProperty('--ra-page', t.page);
+    d.documentElement.style.setProperty('--ra-ink', t.ink);
+  }
+  return t;
+}
+
+function cycleTheme() {
+  const cur = THEMES.findIndex(t => t.id === currentThemeId());
+  const next = THEMES[(cur + 1) % THEMES.length];
+  applyTheme(next.id);
+  renderToc();
+  return next.name;
+}
+
+function karaoke() {
+  const d = ensureStyle();
+  const p = cur();
+  if (!d || !p) return;
+  const el = d.getElementById(p.frag);
+  if (!el) return;
+  const words = wrapWords(d, el);
+  if (!words.length) return;
+  const times = parTimes(p, words);
+  const now = audio.currentTime;
+  // Only the live sentence keeps its fill; earlier ones would paint the page amber.
+  if (lastFilled !== words) {
+    lastFilled.forEach(w => {
+      w.classList.remove('ra-fill', 'ra-done');
+      w.style.animation = 'none';
+    });
+    lastFilled = words;
+  }
+  const todo = [];
+  words.forEach((w, i) => {
+    const t = times[i];
+    w.style.animation = 'none';
+    w.classList.add('ra-fill');
+    w.classList.toggle('ra-done', now >= t.start + t.dur);
+    if (now < t.start + t.dur) {
+      const off = Math.max(0, t.start - now) / rate;
+      const len = Math.max(0.06, (t.start + t.dur - Math.max(t.start, now)) / rate);
+      w.style.setProperty('--delay', off.toFixed(3) + 's');
+      w.style.setProperty('--dur', len.toFixed(3) + 's');
+      todo.push(w);
+    }
+  });
+  void el.offsetWidth;
+  todo.forEach(w => { w.style.animation = ''; });
+  d.documentElement.classList.toggle('ra-paused', audio.paused);
+}
+
+function hl() {
+  const d = ensureStyle();
+  if (!d) return;
+  d.querySelectorAll('.ra-hl').forEach(e => e.classList.remove('ra-hl'));
+  const p = cur();
+  if (!p || !p.frag) return;
+  const el = d.getElementById(p.frag);
+  if (!el) return;
+  el.classList.add('ra-hl');
+  karaoke();
+  const r = el.getBoundingClientRect(), h = f.contentWindow.innerHeight;
+  if (r.top < 40 || r.bottom > h - 40) el.scrollIntoView({block: 'center'});
+}
+
+// ---- scrubber -----------------------------------------------------------
+const scrub = document.getElementById('scrub');
+const scrubFill = document.getElementById('scrubfill');
+const scrubGrab = document.getElementById('scrubgrab');
+
+function scrubFrac() {
+  if (!data) return 0;
+  if (narrated) {
+    const ps = pars();
+    if (!ps.length) return 0;
+    const a = ps[0].begin, b = ps[ps.length - 1].end;
+    return b > a ? Math.min(1, Math.max(0, (audio.currentTime - a) / (b - a))) : 0;
+  }
+  const n = wpWords ? wpWords.length : 0;
+  return n ? Math.min(1, wpIdx / n) : 0;
+}
+
+function paintScrub(f) {
+  const pct = (Math.min(1, Math.max(0, f)) * 100).toFixed(2) + '%';
+  scrubFill.style.width = pct;
+  scrubGrab.style.left = pct;
+}
+
+function seekFrac(f) {
+  if (!data) return;
+  f = Math.min(0.999, Math.max(0, f));
+  if (narrated) {
+    const ps = pars();
+    if (!ps.length) return;
+    par = Math.min(ps.length - 1, Math.floor(f * ps.length));
+    seekPar();
+    const el = f.contentDocument && f.contentDocument.querySelector('.ra-hl');
+    if (el) el.scrollIntoView({block: 'center'});
+  } else {
+    if (!wpWords) wpWords = wrapSection().map(s => s.textContent);
+    if (!wpWords.length) return;
+    wpIdx = Math.min(wpWords.length - 1, Math.floor(f * wpWords.length));
+    if (wpmTimer) { stopWpm(); startWpm(); }
+    else { markWord(wpIdx); if (spritz) renderWord(wpWords[wpIdx]); }
+  }
+  paintScrub(f);
+  save();
+}
+
+let dragging = false;
+const fracAt = e => {
+  const r = scrub.getBoundingClientRect();
+  return r.width ? (e.clientX - r.left) / r.width : 0;
+};
+scrub.addEventListener('pointerdown', e => {
+  dragging = true;
+  try { scrub.setPointerCapture(e.pointerId); } catch (err) {}
+  paintScrub(fracAt(e));
+});
+scrub.addEventListener('pointermove', e => { if (dragging) paintScrub(fracAt(e)); });
+scrub.addEventListener('pointerup', e => {
+  if (!dragging) return;
+  dragging = false;
+  seekFrac(fracAt(e));
+});
+scrub.addEventListener('pointercancel', () => { dragging = false; });
+
+// ---- chapter picker -----------------------------------------------------
+let tocOpen = false, tocSel = 0, tocRows = [];
+
+function chapterName(i) {
+  const s = data.sections[i] || {};
+  return s.label || s.title || ('Section ' + (i + 1));
+}
+
+let tocActions = [];
+
+function renderToc() {
+  const body = document.getElementById('tocbody');
+  body.textContent = '';
+  tocRows = [];
+  tocActions = [];
+  const add = (text, num, cls, action) => {
+    const d = document.createElement('div');
+    d.className = 'tocrow ' + (cls || '');
+    const n = document.createElement('span');
+    n.className = 'n';
+    n.textContent = num;
+    const l = document.createElement('span');
+    l.className = 'l';
+    l.textContent = text;
+    d.append(n, l);
+    d.onclick = () => {
+      tocSel = tocRows.indexOf(d);
+      markToc();
+      tocActivate();
+    };
+    body.appendChild(d);
+    tocRows.push(d);
+    tocActions.push(action);
+  };
+  add('Spritz view: ' + (spritz ? 'on' : 'off'), '\u25cf', 'tog',
+      () => { setSpritz(!spritz); renderToc(); });
+  add('Theme: ' + themeById(currentThemeId()).name + '  \u25b8', '\u25d1', 'tog',
+      () => { cycleTheme(); });
+  add('Controls auto-hide: ' + (zen ? 'on' : 'off'), '\u25cc', 'tog',
+      () => { zen = !zen; try { localStorage.setItem('ra:zen', zen ? '1' : '0'); } catch (e) {}
+              renderToc(); showUI(); });
+  data.sections.forEach((s, i) => add(chapterName(i), i + 1, i === sec ? 'cur' : '',
+      () => { closeToc(); jumpTo(i, !audio.paused || !!wpmTimer); }));
+  tocSel = 0;
+  markToc();
+}
+
+function markToc() {
+  tocRows.forEach((r, i) => r.classList.toggle('sel', i === tocSel));
+  if (tocRows[tocSel]) tocRows[tocSel].scrollIntoView({block: 'nearest'});
+}
+
+function openToc() {
+  if (!data) return;
+  tocOpen = true;
+  showUI(0);
+  renderToc();
+  document.getElementById('toc').style.display = 'flex';
+}
+
+function closeToc() {
+  tocOpen = false;
+  document.getElementById('toc').style.display = 'none';
+  showUI();
+}
+
+function jumpTo(i, play) {
+  if (!data || i < 0 || i >= data.sections.length) return;
+  if (narrated) { goto(i, 0, play); return; }
+  stopWpm();
+  sec = i;
+  wpWords = null;
+  wpIdx = 0;
+  pendingWpm = !!play;
+  showSection();
+  save();
+}
+
+function tocActivate() {
+  const a = tocActions[tocSel];
+  if (a) a();
+}
+
+document.getElementById('tocbtn').onclick = () => (tocOpen ? closeToc() : openToc());
+
+// ---- zen: the chrome hides itself while you listen ----------------------
+let zen = true;
+try { zen = localStorage.getItem('ra:zen') !== '0'; } catch (e) {}
+let hideTimer = null;
+const isPlaying = () => (narrated ? !audio.paused : !!wpmTimer);
+function showUI(ms) {
+  document.body.classList.remove('zen');
+  clearTimeout(hideTimer);
+  if (zen && ms !== 0 && isPlaying()) {
+    hideTimer = setTimeout(() => { if (!tocOpen) document.body.classList.add('zen'); },
+                           ms || 3200);
+  }
+}
+document.addEventListener('pointermove', () => showUI());
+document.addEventListener('pointerdown', () => showUI());
+
+function loadOff() {
+  const l = document.getElementById('load');
+  if (l) l.style.display = 'none';
+}
+
+let spritz = false, spzKey = '';
+let narrated = true, wpm = 300, wpmTimer = null, wpIdx = 0, pendingWpm = false;
+try { wpm = Math.min(900, Math.max(60, +(localStorage.getItem('ra:wpm') || 300) || 300)); } catch (e) {}
+function setSpritz(on) {
+  spritz = on;
+  showUI();
+  spzKey = '';
+  document.getElementById('spritz').style.display = on ? 'flex' : 'none';
+  f.style.display = on ? 'none' : 'block';
+  document.getElementById('spzbtn').classList.toggle('on', on);
+  if (on && !narrated && wpWords) renderWord(wpWords[Math.max(0, wpIdx - 1)]);
+  else if (on) drawSpritz();
+}
+
+function renderWord(w) {
+  const pivot = Math.min(w.length - 1, Math.max(0, Math.round(w.length * 0.3) - 1));
+  const node = document.getElementById('spz');
+  node.textContent = '';
+  const orp = document.createElement('span');
+  orp.className = 'orp';
+  orp.textContent = w[pivot];
+  node.append(document.createTextNode(w.slice(0, pivot)), orp,
+              document.createTextNode(w.slice(pivot + 1)));
+  // Proportional glyphs make an index-based offset approximate, so measure the
+  // rendered ORP box and centre *that* on the guide line.
+  node.style.transform = 'none';
+  const wr = node.getBoundingClientRect();
+  const or = orp.getBoundingClientRect();
+  const dx = (or.left + or.width / 2) - (wr.left + wr.width / 2);
+  node.style.transform = 'translateX(' + (-dx).toFixed(1) + 'px)';
+}
+
+// Words-per-minute reader for books without narration: wrap the whole section
+// once so the live word can be marked on the page, not only in the Spritz view.
+let sectionSpans = null, curSpan = null, wpWords = null;
+
+function wrapSection() {
+  const d = f.contentDocument;
+  if (!d || !d.body) return [];
+  if (sectionSpans) return sectionSpans;
+  const spans = [];
+  const walker = d.createTreeWalker(d.body, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const t of nodes) {
+    if (!/\S/.test(t.nodeValue)) continue;
+    const parent = t.parentNode;
+    if (!parent || (parent.closest && parent.closest('script,style'))) continue;
+    const frag = d.createDocumentFragment();
+    for (const part of t.nodeValue.split(/(\s+)/)) {
+      if (!part) continue;
+      if (/^\s+$/.test(part)) { frag.appendChild(d.createTextNode(part)); continue; }
+      const s = d.createElement('span');
+      s.className = 'ra-word';
+      const pivot = Math.min(part.length - 1,
+                             Math.max(0, Math.round(part.length * 0.3) - 1));
+      const o = d.createElement('span');
+      o.className = 'orp';
+      o.textContent = part[pivot];
+      s.append(d.createTextNode(part.slice(0, pivot)), o,
+               d.createTextNode(part.slice(pivot + 1)));
+      frag.appendChild(s);
+      spans.push(s);
+    }
+    parent.replaceChild(frag, t);
+  }
+  sectionSpans = spans;
+  return spans;
+}
+
+function markWord(i) {
+  if (!sectionSpans || !sectionSpans.length) return;
+  const s = sectionSpans[Math.min(i, sectionSpans.length - 1)];
+  if (curSpan && curSpan !== s) curSpan.classList.remove('ra-cur');
+  s.classList.add('ra-cur');
+  curSpan = s;
+  const r = s.getBoundingClientRect(), h = f.contentWindow.innerHeight;
+  if (r.top < 40 || r.bottom > h - 40) s.scrollIntoView({block: 'center'});
+}
+
+function stopWpm() {
+  if (wpmTimer) { clearInterval(wpmTimer); wpmTimer = null; }
+  pp.innerHTML = '&#9654;';
+  showUI(0);
+}
+
+function startWpm() {
+  stopWpm();
+  if (!wpWords || !wpWords.length) wpWords = wrapSection().map(s => s.textContent);
+  if (!wpWords.length) {                 // cover or blank spread: move on
+    if (sec + 1 < data.sections.length) nextSection(true);
+    return;
+  }
+  const step = () => {
+    if (wpIdx >= wpWords.length) { wpWords = null; wpIdx = 0; nextSection(true); return; }
+    markWord(wpIdx);
+    if (spritz) renderWord(wpWords[wpIdx]);
+    wpIdx++;
+    if (!dragging) paintScrub(scrubFrac());
+    save();
+  };
+  step();
+  wpmTimer = setInterval(step, 60000 / wpm);
+  pp.innerHTML = '&#10074;&#10074;';
+  showUI();
+}
+
+// Spritz/RSVP: one word at a time, the recognition point pinned to the centre
+// line, paced by the narration so it stays a read-along and not a timer.
+let spzCache = null;
+
+function drawSpritz() {
+  if (!spritz || !narrated) return;
+  const p = cur();
+  const d = f.contentDocument;
+  if (!p || !d) return;
+  const ckey = sec + ':' + par;
+  if (!spzCache || spzCache.key !== ckey) {
+    const el = d.getElementById(p.frag);
+    if (!el) return;
+    const words = el.textContent.trim().split(/\s+/).filter(Boolean);
+    if (!words.length) return;
+    spzCache = {key: ckey, words, times: parTimes(p, words)};
+  }
+  const {words, times} = spzCache;
+  const t = audio.currentTime;
+  let i = 0;
+  while (i + 1 < times.length && times[i + 1].start <= t) i++;
+  const key = sec + ':' + par + ':' + i;
+  if (key === spzKey) return;
+  spzKey = key;
+  renderWord(words[i]);
+}
+
+function showSection() {
+  const name = (data.title || '') + (data.subtitle ? ': ' + data.subtitle : '');
+  titleEl.textContent = name + '  \u00b7  ' + (sec + 1) + '/' + data.sections.length;
+  const src = url(data.sections[sec].href);
+  if (f.dataset.src !== src) {
+    f.dataset.src = src;
+    f.onload = () => {
+      applyTheme(currentThemeId());
+      hl();
+      loadOff();
+      sectionSpans = null;
+      curSpan = null;
+      spzCache = null;
+      if (pendingWpm) { pendingWpm = false; wpWords = null; wpIdx = 0; startWpm(); }
+    };
+    f.src = src;
+  }
+}
+
+function seekPar() {
+  if (!narrated) { showSection(); return; }
+  const p = cur(), src = url(p.audio);
+  const start = (resumeAt != null && resumeAt >= p.begin && resumeAt < p.end) ? resumeAt : p.begin;
+  resumeAt = null;
+  showSection();
+  hl();
+  if (audioSrc !== src) {
+    audioSrc = src;
+    audio.src = src;
+    applyRate();
+    audio.onloadedmetadata = () => {
+      applyRate();
+      audio.currentTime = start;
+      if (autoplay) audio.play().catch(() => {});
+    };
+  } else {
+    audio.currentTime = start;
+  }
+}
+
+function goto(s, p, play) {
+  sec = Math.max(0, Math.min(data.sections.length - 1, s));
+  par = Math.max(0, Math.min(pars().length - 1, p || 0));
+  autoplay = !!play;
+  seekPar();
+  if (play) audio.play().catch(() => {});
+  save();
+}
+
+function nextSection(play) {
+  if (!narrated) {
+    if (sec + 1 >= data.sections.length) { stopWpm(); return; }
+    stopWpm();
+    sec++;
+    wpWords = null;
+    wpIdx = 0;
+    pendingWpm = play;
+    showSection();
+    save();
+    return;
+  }
+  if (sec + 1 < data.sections.length) goto(sec + 1, 0, play);
+}
+
+function toggle() {
+  if (!narrated) {
+    if (wpmTimer) { autoplay = false; stopWpm(); }
+    else { autoplay = true; startWpm(); }
+    return;
+  }
+  if (audio.paused) { autoplay = true; audio.play().catch(() => {}); }
+  else { autoplay = false; audio.pause(); }
+}
+
+function setRate(r) {
+  if (!narrated) {
+    wpm = Math.min(900, Math.max(60, Math.round((wpm + (r > rate ? 30 : -30)) / 10) * 10));
+    rateEl.textContent = wpm + ' wpm';
+    try { localStorage.setItem('ra:wpm', wpm); } catch (e) {}
+    if (wpmTimer) { stopWpm(); startWpm(); }
+    save();
+    return;
+  }
+  rate = Math.min(3, Math.max(0.4, Math.round(r * 100) / 100));
+  applyRate();
+  try { localStorage.setItem('ra:rate', rate); } catch (e) {}
+  rateEl.textContent = rate.toFixed(2) + 'x';
+  karaoke();     // animations are timed in wall-clock, so re-lay them out
+  save();
+}
+
+function save() {
+  try {
+    if (!data || !data.sections.length) return;
+    let pct;
+    if (narrated) {
+      pct = Math.min(1, (sec + (par + 1) / pars().length) / data.sections.length);
+    } else {
+      const n = wpWords ? wpWords.length : 0;
+      pct = Math.min(1, (sec + (n ? wpIdx / n : 0)) / data.sections.length);
+    }
+    localStorage.setItem('ra:' + BOOK, JSON.stringify({
+      sec, par, t: audio.currentTime, rate, wpm, word: wpIdx, pct,
+      total: data.sections.length, narration: narrated, at: Date.now(),
+    }));
+  } catch (e) {}
+}
+
+function advance() {
+  const ps = pars(), p = ps[par];
+  if (par + 1 < ps.length) {
+    par++;
+    if (ps[par].audio !== p.audio) seekPar();   // chapter switched audio file
+    else { hl(); save(); }
+  } else nextSection(autoplay);
+}
+
+audio.ontimeupdate = () => {
+  if (!dragging) paintScrub(scrubFrac());
+  const ps = pars(), t = audio.currentTime;
+  while (par + 1 < ps.length && ps[par + 1].audio === ps[par].audio
+         && ps[par + 1].begin <= t + 0.05) { par++; hl(); }
+  if (t >= ps[par].end - 0.05) advance();
+};
+audio.onplay = () => { applyRate(); pp.innerHTML = '&#10074;&#10074;'; karaoke(); showUI(); };
+audio.onpause = () => { pp.innerHTML = '&#9654;'; karaoke(); showUI(0); };
+audio.onerror = () => { titleEl.textContent = 'audio error: ' + audio.error.code; };
+
+pp.onclick = toggle;
+document.getElementById('slow').onclick = () => setRate(rate - 0.1);
+document.getElementById('fast').onclick = () => setRate(rate + 0.1);
+document.getElementById('spzbtn').onclick = () => setSpritz(!spritz);
+
+function pollStatus() {
+  fetch('/api/status').then(r => r.json()).then(s => {
+    const b = document.getElementById('batt');
+    if (s.level != null) {
+      b.textContent = (s.charging ? '\u26a1' : '') + s.level + '%';
+      b.classList.toggle('low', s.level <= 15 && !s.charging);
+    }
+  }).catch(() => {});
+}
+pollStatus();
+setInterval(pollStatus, 60000);
+
+function back() {
+  audio.pause();
+  save();
+  location.href = '/';
+}
+document.getElementById('quit').onclick = back;
+
+function onKey(e) {
+  showUI();
+  if (e.key === 'Escape') { if (tocOpen) { closeToc(); return; } back(); return; }
+  if (tocOpen) {
+    if (e.key === 'ArrowDown' || e.key === 'j') { tocSel = Math.min(tocRows.length - 1, tocSel + 1); markToc(); }
+    else if (e.key === 'ArrowUp' || e.key === 'k') { tocSel = Math.max(0, tocSel - 1); markToc(); }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tocActivate(); }
+    else if (e.key === 'c') closeToc();
+    return;
+  }
+  if (e.key === 'c') { openToc(); return; }
+  if (e.key === ' ') { e.preventDefault(); toggle(); }
+  else if (e.key === 'ArrowRight') nextSection(!audio.paused);
+  else if (e.key === 'ArrowLeft') goto(sec - 1, 0, !audio.paused);
+  else if (e.key === 'ArrowUp') setRate(rate + 0.1);
+  else if (e.key === 'ArrowDown') setRate(rate - 0.1);
+  else if (e.key === '-' || e.key === '_') setFont(fontPct - 10);
+  else if (e.key === '=' || e.key === '+') setFont(fontPct + 10);
+  else if (e.key === 's' || e.key === 'S') setSpritz(!spritz);
+}
+addEventListener('keydown', onKey);
+
+// Gamepad: the daemon hands the pad to the app in gamepad mode (Start), as a
+// standard-mapping Xbox pad. A play/pause, B replay sentence, X/Y font size,
+// shoulders and left/right skip section, up/down change speed.
+const padHeld = {};
+const PAD = {0: 'toggle', 1: 'replay', 2: 'fontup', 3: 'fontdown',
+             4: 'prev', 5: 'next', 6: 'scrubback', 7: 'scrubfwd', 8: 'toc',
+             12: 'speedup', 13: 'speeddown', 14: 'prev', 15: 'next'};
+
+function doAction(a) {
+  if (a === 'toggle') toggle();
+  else if (a === 'replay') { audio.currentTime = cur().begin; karaoke(); }
+  else if (a === 'prev') goto(sec - 1, 0, !audio.paused);
+  else if (a === 'next') nextSection(!audio.paused);
+  else if (a === 'speedup') setRate(rate + 0.1);
+  else if (a === 'speeddown') setRate(rate - 0.1);
+  else if (a === 'fontup') setFont(fontPct + 10);
+  else if (a === 'fontdown') setFont(fontPct - 10);
+  else if (a === 'spritz') setSpritz(!spritz);
+  else if (a === 'toc') { tocOpen ? closeToc() : openToc(); }
+  else if (a === 'scrubback') seekFrac(scrubFrac() - 0.05);
+  else if (a === 'scrubfwd') seekFrac(scrubFrac() + 0.05);
+}
+
+const MENU_PAD = {0: 'ok', 1: 'close', 12: 'up', 13: 'down'};
+
+function padTick() {
+  for (const gp of (navigator.getGamepads ? navigator.getGamepads() : [])) {
+    if (!gp) continue;
+    gp.buttons.forEach((b, i) => {
+      const key = gp.index + ':' + i;
+      const act = tocOpen ? MENU_PAD[i] : PAD[i];
+      if (act && b.pressed && !padHeld[key]) {
+        showUI();
+        if (act === 'up') { tocSel = Math.max(0, tocSel - 1); markToc(); }
+        else if (act === 'down') { tocSel = Math.min(tocRows.length - 1, tocSel + 1); markToc(); }
+        else if (act === 'ok') tocActivate();
+        else if (act === 'close') closeToc();
+        else doAction(act);
+      }
+      padHeld[key] = b.pressed;
+    });
+  }
+  drawSpritz();
+}
+function pollPad() { padTick(); requestAnimationFrame(pollPad); }
+pollPad();
+
+// Headphone jack: the codec reports insert/remove on /dev/input/event1 and the
+// server tracks it, so pulling the headphones in public pauses the narrator.
+let jackWas = null;
+setInterval(() => {
+  fetch('/api/jack').then(r => r.json()).then(s => {
+    if (jackWas === true && s.inserted === false && !audio.paused) toggle();
+    if (typeof s.inserted === 'boolean') jackWas = s.inserted;
+  }).catch(() => {});
+}, 2000);
+
+fetch('/api/book/' + encodeURIComponent(BOOK))
+.then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+.then(d => {
+  data = d;
+  narrated = !!d.narration;
+  document.title = d.title || 'read aloud';
+  if (!data.sections.length) {
+    document.getElementById('loadtxt').textContent = 'no readable content in this book';
+    return;
+  }
+  if (!narrated) rateEl.textContent = wpm + ' wpm';
+  let pos = null;
+  try { pos = JSON.parse(localStorage.getItem('ra:' + BOOK)); } catch (e) {}
+  if (pos && pos.rate) { rate = pos.rate; audio.playbackRate = rate; rateEl.textContent = rate.toFixed(2) + 'x'; }
+  if (pos) {
+    sec = Math.min(pos.sec || 0, data.sections.length - 1);
+    par = pos.par || 0;
+    resumeAt = (pos.t != null) ? pos.t : null;
+    if (!narrated) { wpIdx = pos.word || 0; if (pos.wpm) { wpm = pos.wpm; rateEl.textContent = wpm + ' wpm'; } }
+  }
+  applyTheme(currentThemeId());
+  seekPar();
+  paintScrub(scrubFrac());
+  save();
+  if (new URLSearchParams(location.search).get('check') === 'ui') {
+    runUITests().catch(e => { document.title = 'UITESTS ERROR ' + e.message; });
+  }
+  if (new URLSearchParams(location.search).get('check') === '1') {
+    try {
+      openToc();
+      tocRows[0].click();                 // must toggle Spritz, i.e. be clickable
+      const clicked = spritz === true;
+      closeToc();
+      setSpritz(false);
+      document.title = (clicked ? 'CHECK OK' : 'CHECK FAIL') + ' toc';
+    } catch (e) {
+      document.title = 'CHECK ERROR toc ' + e.message;
+    }
+  }
+  audio.addEventListener('timeupdate', save);
+  addEventListener('pagehide', save);
+}).catch(() => {
+  document.getElementById('loadtxt').textContent = 'could not open this book';
+});
+</script></body></html>"""
+
+
+TAPE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>tape</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E")}
+ *{box-sizing:border-box}
+ html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--text);
+           font:14px system-ui,-apple-system,sans-serif;user-select:none;
+           -webkit-tap-highlight-color:transparent}
+ body{background:
+   radial-gradient(110% 80% at 50% 4%,color-mix(in srgb,var(--bg) 74%,#fff 12%),var(--bg) 58%,#000 130%)}
+ body::after{content:'';position:fixed;inset:0;pointer-events:none;
+   box-shadow:inset 0 0 120px rgba(0,0,0,.72)}
+ #tape{position:absolute;left:50%;top:12px;width:624px;height:396px;margin-left:-312px;
+       transform:rotate(-.35deg);cursor:pointer}
+ .shell{position:absolute;inset:0;border-radius:30px;
+   background:linear-gradient(176deg,#f3e9d3 0%,#e6d9bd 26%,#d8caab 58%,#c3b28f 100%);
+   box-shadow:0 22px 42px rgba(0,0,0,.62),0 4px 9px rgba(0,0,0,.4),
+     inset 0 2px 1px rgba(255,255,255,.85),inset 0 -5px 12px rgba(84,62,34,.3),
+     inset 0 0 0 1px rgba(255,255,255,.4)}
+ .shell::before{content:'';position:absolute;inset:6px;border-radius:25px;pointer-events:none;
+   background:linear-gradient(120deg,rgba(255,255,255,.34),transparent 24% 74%,rgba(255,255,255,.14));
+   mix-blend-mode:screen;opacity:.5}
+ .label{position:absolute;left:24px;right:24px;top:18px;height:252px;border-radius:9px;
+   overflow:hidden;background:#e8dcc2;isolation:isolate;
+   box-shadow:inset 0 0 0 1px rgba(70,55,35,.35),inset 0 4px 14px rgba(0,0,0,.3),
+     0 1px 0 rgba(255,255,255,.55)}
+ .label img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+   filter:saturate(.82) contrast(1.04) sepia(.14) brightness(1.04)}
+ .tint,.grain,.gloss{position:absolute;inset:0;pointer-events:none}
+ .tint{background:linear-gradient(118deg,rgba(255,245,216,.5) 0%,rgba(255,245,216,.1) 32%,
+        rgba(96,68,32,.16) 76%,rgba(255,245,216,.3) 100%);mix-blend-mode:soft-light}
+ .grain{background-image:var(--grain);background-size:140px 140px;mix-blend-mode:overlay;opacity:.42}
+ .gloss{background:linear-gradient(100deg,rgba(255,255,255,.34) 0 15%,transparent 33% 68%,
+        rgba(255,255,255,.12) 86%);mix-blend-mode:screen;opacity:.5}
+ .label::after{content:'';position:absolute;inset:0;pointer-events:none;
+   box-shadow:inset 0 0 46px rgba(40,28,14,.52)}
+ .side,.dur{position:absolute;top:9px;padding:2px 7px 1px;border-radius:2px;
+   background:rgba(20,15,10,.62);color:#f2e4c4;font:700 9px/1.5 system-ui,sans-serif;
+   letter-spacing:.22em;text-transform:uppercase;z-index:2}
+ .side{left:10px}
+ .dur{right:10px;letter-spacing:.1em}
+ .win{position:absolute;top:76px;width:100px;height:100px;border-radius:50%;overflow:hidden;
+   background:radial-gradient(circle at 50% 45%,#241c14,#0b0806 76%);
+   box-shadow:0 0 0 3px rgba(240,231,210,.9),0 0 0 4px rgba(92,72,44,.55),
+     inset 0 7px 16px rgba(0,0,0,.92),0 2px 6px rgba(0,0,0,.42);z-index:2}
+ .win.a{left:130px}
+ .win.b{right:130px}
+ .reel{position:absolute;inset:0;animation:reelspin var(--spin,3.4s) linear infinite;
+   animation-play-state:paused;will-change:transform}
+ body.playing .reel{animation-play-state:running}
+ @keyframes reelspin{to{transform:rotate(360deg)}}
+ .pack{position:absolute;inset:0;border-radius:50%;transform:scale(1);
+   background:repeating-radial-gradient(circle at 50% 50%,#2b2118 0 2px,#35291d 2px 3px,#221a12 3px 4px);
+   box-shadow:inset 0 0 16px #000}
+ #ra .pack{transform:scale(var(--pa,1))}
+ #rb .pack{transform:scale(var(--pb,.7))}
+ .hub{position:absolute;left:50%;top:50%;width:46px;height:46px;margin:-23px 0 0 -23px;
+   border-radius:50%;background:repeating-conic-gradient(from 0deg,#f1e7d0 0 34deg,#b3a482 34deg 60deg);
+   box-shadow:inset 0 0 0 1px rgba(80,60,35,.55),0 1px 4px rgba(0,0,0,.65)}
+ .hub::after{content:'';position:absolute;inset:15px;border-radius:50%;
+   background:radial-gradient(circle at 40% 35%,#1b1510,#070504 70%);
+   box-shadow:inset 0 2px 4px #000}
+ .cap{position:absolute;left:0;right:0;bottom:0;height:78px;padding:8px 14px 8px;z-index:2;
+   display:flex;flex-direction:column;justify-content:flex-end;gap:1px;color:#f5e9cc;
+   background:linear-gradient(180deg,rgba(18,13,9,0),rgba(18,13,9,.58) 28%,rgba(13,9,6,.86))}
+ .ttl{font:600 17px/1.22 Georgia,'DejaVu Serif',serif;white-space:nowrap;overflow:hidden;
+   text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,.5)}
+ .aut{font:11px/1.3 system-ui,sans-serif;color:#dccba6;white-space:nowrap;overflow:hidden;
+   text-overflow:ellipsis}
+ .chp{font:10px/1.4 system-ui,sans-serif;letter-spacing:.15em;text-transform:uppercase;
+   color:#bfa87f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .deck{position:absolute;left:24px;right:24px;bottom:12px;height:104px}
+ .head{position:absolute;left:50%;top:14px;width:204px;height:64px;margin-left:-102px;
+   border-radius:6px;background:linear-gradient(180deg,#0d0a08,#1c1510);
+   box-shadow:inset 0 3px 10px #000,0 0 0 1px rgba(90,70,40,.45)}
+ .head::before{content:'';position:absolute;left:8%;right:8%;top:50%;height:5px;margin-top:-2px;
+   border-radius:2px;background:linear-gradient(180deg,#2b2118,#4c3b28 58%,#231a12);
+   box-shadow:0 1px 0 rgba(255,255,255,.12)}
+ .head::after{content:'';position:absolute;left:41%;right:41%;top:7px;bottom:7px;border-radius:3px;
+   background:linear-gradient(180deg,#c2bcac,#6f695e 55%,#3a3730);opacity:.5}
+ .pin{position:absolute;top:32px;width:26px;height:26px;border-radius:50%;
+   background:radial-gradient(circle at 45% 40%,#231c14,#000 72%);
+   box-shadow:inset 0 2px 5px #000,0 0 0 1px rgba(255,255,255,.3)}
+ .pin.p1{left:64px}
+ .pin.p2{right:64px}
+ .brand{position:absolute;left:0;bottom:2px;font:700 9px/1.5 system-ui,sans-serif;
+   letter-spacing:.18em;text-transform:uppercase;color:#8a7a5c}
+ .brand span{display:block;font-weight:400;letter-spacing:.1em;color:#a3936f;font-size:8px}
+ .counter{position:absolute;right:0;bottom:0;padding:4px 8px 3px;border-radius:4px;
+   background:#15110c;color:#f2d79b;font:600 13px/1.3 ui-monospace,'DejaVu Sans Mono',monospace;
+   letter-spacing:.12em;font-variant-numeric:tabular-nums;
+   box-shadow:inset 0 2px 7px #000,0 1px 0 rgba(255,255,255,.45)}
+ .screw{position:absolute;width:12px;height:12px;border-radius:50%;
+   background:radial-gradient(circle at 35% 30%,#fdf8ec,#ab9c7e 62%,#6e6250);
+   box-shadow:inset 0 -1px 2px rgba(0,0,0,.5),0 1px 1px rgba(0,0,0,.4)}
+ .screw::after{content:'';position:absolute;left:1px;right:1px;top:5px;height:1.5px;
+   background:#6d6150;transform:rotate(28deg)}
+ .s1{left:14px;top:14px}.s2{right:14px;top:14px}.s3{left:14px;bottom:14px}.s4{right:14px;bottom:14px}
+ #scrub{position:absolute;left:0;right:0;bottom:52px;height:10px;background:var(--panel);
+   cursor:pointer;touch-action:none;transition:transform .22s ease,opacity .22s ease}
+ #scrubfill{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+ #scrubgrab{position:absolute;top:50%;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;
+   background:var(--accent2);box-shadow:0 0 0 2px var(--panel);left:0;pointer-events:none}
+ #bar{position:absolute;left:0;right:0;bottom:0;height:52px;display:flex;align-items:center;gap:2px;
+   background:var(--panel);color:var(--text);padding:0 4px;box-sizing:border-box;
+   transition:transform .22s ease,opacity .22s ease;border-top:1px solid var(--line)}
+ body.zen #bar{transform:translateY(100%);opacity:0;pointer-events:none}
+ body.zen #scrub{transform:translateY(100%);opacity:0;pointer-events:none}
+ button{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:6px;
+   font-size:16px;min-width:40px;height:36px}
+ button:active{background:var(--line)}
+ #rate{min-width:52px;text-align:center;font-variant-numeric:tabular-nums}
+ #title{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding-left:6px;
+   color:var(--dim);font-size:12px}
+ #batt{font-size:11px;color:var(--dim);padding:0 4px;font-variant-numeric:tabular-nums}
+ #batt.low{color:#ff8a65}
+ #load{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+   justify-content:center;gap:14px;background:var(--bg);color:var(--dim);z-index:9}
+ .spin{width:38px;height:38px;border:3px solid var(--line);border-top-color:var(--accent);
+   border-radius:50%;animation:sp .8s linear infinite}
+ @keyframes sp{to{transform:rotate(360deg)}}
+ #toc{position:absolute;top:0;left:0;width:100%;height:calc(100% - 52px);display:none;
+   flex-direction:column;background:var(--bg);color:var(--text);z-index:8}
+ #tocbody{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--line) var(--bg)}
+ #tocbody::-webkit-scrollbar{width:6px}
+ #tocbody::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+ #tocbody::-webkit-scrollbar-track{background:var(--bg)}
+ .tocrow{display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);
+   align-items:baseline;cursor:pointer}
+ .tocrow:hover{background:var(--card)}
+ .tocrow .n{color:var(--dim);font-size:12px;min-width:26px;text-align:right;
+   font-variant-numeric:tabular-nums}
+ .tocrow .l{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .tocrow.cur{background:var(--card);box-shadow:inset 3px 0 0 var(--accent)}
+ .tocrow.sel{background:var(--panel);box-shadow:inset 0 0 0 2px var(--accent)}
+ .tocrow.tog .l{color:var(--accent2)}
+</style></head><body>
+<div id="load"><div class="spin"></div><div id="loadtxt">spooling tape&hellip;</div></div>
+<div id="tape">
+ <div class="shell">
+  <div class="label">
+   <img id="cov" alt="">
+   <div class="tint"></div><div class="grain"></div><div class="gloss"></div>
+   <div class="side" id="side">Side A</div>
+   <div class="dur" id="dur">--:--</div>
+   <div class="win a"><div class="reel" id="ra"><div class="pack"></div><div class="hub"></div></div></div>
+   <div class="win b"><div class="reel" id="rb"><div class="pack"></div><div class="hub"></div></div></div>
+   <div class="cap">
+    <div class="ttl" id="ttl">&nbsp;</div>
+    <div class="aut" id="aut"></div>
+    <div class="chp" id="chp"></div>
+   </div>
+  </div>
+  <div class="deck">
+   <div class="head"></div>
+   <div class="pin p1"></div><div class="pin p2"></div>
+   <div class="brand">compact cassette<span>type IV &middot; metal &middot; 60</span></div>
+   <div class="counter" id="counter">00:00</div>
+  </div>
+  <div class="screw s1"></div><div class="screw s2"></div>
+  <div class="screw s3"></div><div class="screw s4"></div>
+ </div>
+</div>
+<div id="toc"><div id="tocbody"></div></div>
+<div id="scrub"><div id="scrubfill"></div><div id="scrubgrab"></div></div>
+<div id="bar">
+ <button id="tocbtn" title="chapters">&#9776;</button>
+ <button id="prev" title="previous chapter">&#9198;</button>
+ <button id="pp" title="play/pause">&#9654;</button>
+ <button id="next" title="next chapter">&#9197;</button>
+ <button id="slow" title="slower">&minus;</button>
+ <span id="rate">1.00x</span>
+ <button id="fast" title="faster">+</button>
+ <span id="title"></span>
+ <span id="batt"></span>
+ <button id="quit" title="back to library">&times;</button>
+</div>
+<audio id="a" preload="metadata"></audio>
+<script>
+const BOOK = __BOOK__;
+const audio = document.getElementById('a'), tape = document.getElementById('tape');
+const pp = document.getElementById('pp'), rateEl = document.getElementById('rate');
+const titleEl = document.getElementById('title');
+let data = null, chapters = [], duration = 0, rate = 1, sec = -1;
+try { rate = Math.min(3, Math.max(0.4, +(localStorage.getItem('ra:rate') || 1) || 1)); } catch (e) {}
+
+const fmt = t => {
+  t = Math.max(0, Math.floor(t || 0));
+  const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60;
+  const mm = h ? String(m).padStart(2, '0') : String(m);
+  return (h ? h + ':' : '') + mm + ':' + String(s).padStart(2, '0');
+};
+const enc = p => p.split('/').map(encodeURIComponent).join('/');
+
+function applyRate() {
+  audio.defaultPlaybackRate = rate;
+  audio.playbackRate = rate;
+  // one revolution per ~3.4 s at 1x: the reels answer the speed setting
+  tape.style.setProperty('--spin', (3.4 / Math.max(0.25, rate)).toFixed(2) + 's');
+  rateEl.textContent = rate.toFixed(2) + 'x';
+}
+
+function paint() {
+  const t = audio.currentTime || 0;
+  const d = duration || audio.duration || 0;
+  const f = d ? Math.min(1, Math.max(0, t / d)) : 0;
+  document.getElementById('scrubfill').style.width = (f * 100).toFixed(2) + '%';
+  document.getElementById('scrubgrab').style.left = (f * 100).toFixed(2) + '%';
+  // supply reel empties, take-up reel fills
+  tape.style.setProperty('--pa', (0.62 + 0.38 * (1 - f)).toFixed(3));
+  tape.style.setProperty('--pb', (0.62 + 0.38 * f).toFixed(3));
+  document.getElementById('counter').textContent = fmt(t);
+  if (!chapters.length) return;
+  let i = 0;
+  while (i + 1 < chapters.length && chapters[i + 1].start <= t) i++;
+  if (i !== sec) { sec = i; showChapter(); save(); }
+}
+
+function showChapter() {
+  if (!chapters.length) return;
+  const c = chapters[sec] || chapters[0];
+  const total = chapters.length;
+  document.getElementById('chp').textContent =
+    (total > 1 ? 'Ch ' + (sec + 1) + '/' + total + ' \u00b7 ' : '') + c.title;
+  titleEl.textContent = (data && data.title ? data.title : '') +
+    (total > 1 ? '  \u00b7  ' + (sec + 1) + '/' + total : '');
+}
+
+function setPlaying(on) {
+  document.body.classList.toggle('playing', !!on);
+  pp.innerHTML = on ? '&#10074;&#10074;' : '&#9654;';
+}
+
+function toggle() {
+  if (audio.paused) {
+    setPlaying(true);                       // respond to the button at once
+    audio.play().catch(() => setPlaying(false));
+  } else {
+    audio.pause();
+    setPlaying(false);
+  }
+}
+
+function seek(t, play) {
+  if (!isFinite(t)) return;
+  audio.currentTime = Math.max(0, Math.min(duration || audio.duration || t, t));
+  paint();
+  if (play) audio.play().catch(() => {});
+}
+
+function gotoChapter(i, play) {
+  if (!chapters.length) return;
+  i = Math.max(0, Math.min(chapters.length - 1, i));
+  seek(chapters[i].start, play);
+}
+
+function stepChapter(d) {
+  if (!chapters.length) return;
+  let i = 0;
+  while (i + 1 < chapters.length && chapters[i + 1].start <= audio.currentTime + 0.4) i++;
+  gotoChapter(i + d, !audio.paused);
+}
+
+function setRate(r) {
+  rate = Math.min(3, Math.max(0.4, Math.round(r * 100) / 100));
+  applyRate();
+  try { localStorage.setItem('ra:rate', rate); } catch (e) {}
+  save();
+}
+
+function save() {
+  try {
+    if (!data) return;
+    const d = duration || audio.duration || 0;
+    localStorage.setItem('ra:' + BOOK, JSON.stringify({
+      sec: Math.max(0, sec), par: 0, t: audio.currentTime || 0, rate,
+      pct: d ? Math.min(1, (audio.currentTime || 0) / d) : 0,
+      total: chapters.length || 1, narration: true, audio: true, at: Date.now(),
+    }));
+  } catch (e) {}
+}
+
+// ---- scrubber -----------------------------------------------------------
+const scrub = document.getElementById('scrub');
+let dragging = false;
+const fracAt = e => {
+  const r = scrub.getBoundingClientRect();
+  return r.width ? Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) : 0;
+};
+const seekFrac = f => seek(f * (duration || audio.duration || 0));
+scrub.addEventListener('pointerdown', e => {
+  dragging = true;
+  try { scrub.setPointerCapture(e.pointerId); } catch (err) {}
+  seekFrac(fracAt(e));
+});
+scrub.addEventListener('pointermove', e => { if (dragging) seekFrac(fracAt(e)); });
+scrub.addEventListener('pointerup', () => { dragging = false; });
+scrub.addEventListener('pointercancel', () => { dragging = false; });
+
+// ---- zen: the transport hides itself while the tape rolls ---------------
+let zen = true;
+try { zen = localStorage.getItem('ra:zen') !== '0'; } catch (e) {}
+let hideTimer = null;
+function showUI(ms) {
+  document.body.classList.remove('zen');
+  clearTimeout(hideTimer);
+  if (zen && ms !== 0 && !audio.paused) {
+    hideTimer = setTimeout(() => { if (!tocOpen) document.body.classList.add('zen'); },
+                           ms || 3200);
+  }
+}
+document.addEventListener('pointermove', () => showUI());
+document.addEventListener('pointerdown', () => showUI());
+
+// ---- chapter picker -----------------------------------------------------
+let tocOpen = false, tocSel = 0, tocRows = [], tocActions = [];
+
+function chapterName(i) {
+  const c = chapters[i] || {};
+  return c.title || ('Chapter ' + (i + 1));
+}
+
+function renderToc() {
+  const body = document.getElementById('tocbody');
+  body.textContent = '';
+  tocRows = [];
+  tocActions = [];
+  const add = (text, num, cls, action) => {
+    const d = document.createElement('div');
+    d.className = 'tocrow ' + (cls || '');
+    const n = document.createElement('span');
+    n.className = 'n';
+    n.textContent = num;
+    const l = document.createElement('span');
+    l.className = 'l';
+    l.textContent = text;
+    d.append(n, l);
+    d.onclick = () => { tocSel = tocRows.indexOf(d); markToc(); tocActivate(); };
+    body.appendChild(d);
+    tocRows.push(d);
+    tocActions.push(action);
+  };
+  add('Theme: ' + themeById(currentThemeId()).name + '  \u25b8', '\u25d1', 'tog',
+      () => cycleTheme());
+  add('Controls auto-hide: ' + (zen ? 'on' : 'off'), '\u25cc', 'tog',
+      () => { zen = !zen; try { localStorage.setItem('ra:zen', zen ? '1' : '0'); } catch (e) {}
+              renderToc(); showUI(); });
+  chapters.forEach((c, i) => add(chapterName(i), fmt(c.start), i === sec ? 'cur' : '',
+      () => { closeToc(); gotoChapter(i, !audio.paused); }));
+  tocSel = 0;
+  markToc();
+}
+
+function markToc() {
+  tocRows.forEach((r, i) => r.classList.toggle('sel', i === tocSel));
+  if (tocRows[tocSel]) tocRows[tocSel].scrollIntoView({block: 'nearest'});
+}
+
+function openToc() {
+  if (!data) return;
+  tocOpen = true;
+  showUI(0);
+  renderToc();
+  document.getElementById('toc').style.display = 'flex';
+}
+
+function closeToc() {
+  tocOpen = false;
+  document.getElementById('toc').style.display = 'none';
+  showUI();
+}
+
+function tocActivate() { const a = tocActions[tocSel]; if (a) a(); }
+document.getElementById('tocbtn').onclick = () => (tocOpen ? closeToc() : openToc());
+
+pp.onclick = toggle;
+document.getElementById('prev').onclick = () => stepChapter(-1);
+document.getElementById('next').onclick = () => stepChapter(1);
+document.getElementById('slow').onclick = () => setRate(rate - 0.1);
+document.getElementById('fast').onclick = () => setRate(rate + 0.1);
+document.getElementById('quit').onclick = back;
+
+function back() {
+  audio.pause();
+  save();
+  location.href = '/';
+}
+
+audio.ontimeupdate = () => { if (!dragging) paint(); };
+audio.ondurationchange = () => { if (isFinite(audio.duration)) duration = audio.duration; paint(); };
+audio.onplay = () => { applyRate(); setPlaying(true); showUI(); };
+audio.onpause = () => { setPlaying(false); showUI(0); };
+audio.onended = () => { setPlaying(false); save(); };
+audio.onerror = () => {
+  setPlaying(false);
+  document.getElementById('chp').textContent = 'this file cannot be decoded here';
+  document.getElementById('load').style.display = 'none';
+};
+audio.addEventListener('timeupdate', save);
+addEventListener('pagehide', save);
+
+function onKey(e) {
+  showUI();
+  if (e.key === 'Escape') { if (tocOpen) { closeToc(); return; } back(); return; }
+  if (tocOpen) {
+    if (e.key === 'ArrowDown' || e.key === 'j') { tocSel = Math.min(tocRows.length - 1, tocSel + 1); markToc(); }
+    else if (e.key === 'ArrowUp' || e.key === 'k') { tocSel = Math.max(0, tocSel - 1); markToc(); }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tocActivate(); }
+    else if (e.key === 'c') closeToc();
+    return;
+  }
+  if (e.key === 'c') { openToc(); return; }
+  if (e.key === ' ') { e.preventDefault(); toggle(); }
+  else if (e.key === 'ArrowRight') stepChapter(1);
+  else if (e.key === 'ArrowLeft') stepChapter(-1);
+  else if (e.key === 'ArrowUp') setRate(rate + 0.1);
+  else if (e.key === 'ArrowDown') setRate(rate - 0.1);
+  else if (e.key === 't' || e.key === 'T') cycleTheme();
+}
+addEventListener('keydown', onKey);
+
+// Gamepad: same mapping as the reader, with B as "back 30 seconds".
+const padHeld = {};
+const PAD = {0: 'toggle', 1: 'back30', 2: 'theme', 3: 'zen', 4: 'prev', 5: 'next',
+             6: 'scrubback', 7: 'scrubfwd', 8: 'toc', 12: 'speedup', 13: 'speeddown',
+             14: 'prev', 15: 'next'};
+const MENU_PAD = {0: 'ok', 1: 'close', 12: 'up', 13: 'down'};
+
+function doAction(a) {
+  if (a === 'toggle') toggle();
+  else if (a === 'back30') seek(audio.currentTime - 30);
+  else if (a === 'prev') stepChapter(-1);
+  else if (a === 'next') stepChapter(1);
+  else if (a === 'speedup') setRate(rate + 0.1);
+  else if (a === 'speeddown') setRate(rate - 0.1);
+  else if (a === 'theme') cycleTheme();
+  else if (a === 'zen') { zen = !zen; try { localStorage.setItem('ra:zen', zen ? '1' : '0'); } catch (e) {} showUI(); }
+  else if (a === 'toc') { tocOpen ? closeToc() : openToc(); }
+  else if (a === 'scrubback') seekFrac(Math.max(0, audio.currentTime / (duration || 1) - 0.05));
+  else if (a === 'scrubfwd') seekFrac(Math.min(1, audio.currentTime / (duration || 1) + 0.05));
+}
+
+function padTick() {
+  for (const gp of (navigator.getGamepads ? navigator.getGamepads() : [])) {
+    if (!gp) continue;
+    gp.buttons.forEach((b, i) => {
+      const key = gp.index + ':' + i;
+      const act = tocOpen ? MENU_PAD[i] : PAD[i];
+      if (act && b.pressed && !padHeld[key]) {
+        showUI();
+        if (act === 'up') { tocSel = Math.max(0, tocSel - 1); markToc(); }
+        else if (act === 'down') { tocSel = Math.min(tocRows.length - 1, tocSel + 1); markToc(); }
+        else if (act === 'ok') tocActivate();
+        else if (act === 'close') closeToc();
+        else doAction(act);
+      }
+      padHeld[key] = b.pressed;
+    });
+  }
+}
+function pollPad() { padTick(); requestAnimationFrame(pollPad); }
+pollPad();
+tape.addEventListener('click', e => { if (!tocOpen) toggle(); });
+
+// ---- themes (same ids as the library and the reader) --------------------
+const THEMES = [
+  {id: 'midnight', name: 'Midnight', bg: '#141414', panel: '#1d1d1d', card: '#191919',
+   text: '#e8e8e8', dim: '#8a8a8a', line: '#242424', accent: '#ffb300', accent2: '#ffd60a'},
+  {id: 'amoled', name: 'Amoled', bg: '#000000', panel: '#0a0a0a', card: '#0f0f0f',
+   text: '#dcdcdc', dim: '#767676', line: '#1a1a1a', accent: '#ffb300', accent2: '#ffd60a'},
+  {id: 'night', name: 'Night', bg: '#121212', panel: '#1a1a1a', card: '#161616',
+   text: '#cfcfcf', dim: '#7a7a7a', line: '#222222', accent: '#9fb4ff', accent2: '#c3d0ff'},
+  {id: 'candle', name: 'Candle', bg: '#191510', panel: '#221c13', card: '#1e1810',
+   text: '#e6d3a3', dim: '#a4906a', line: '#2b2317', accent: '#d4a72c', accent2: '#f0c75e'},
+  {id: 'slate', name: 'Slate', bg: '#1b1f24', panel: '#23282f', card: '#1f242b',
+   text: '#dbe2ea', dim: '#8b98a5', line: '#2b323a', accent: '#7aa2f7', accent2: '#9ab8ff'},
+  {id: 'nord', name: 'Nord', bg: '#2e3440', panel: '#3b4252', card: '#343b48',
+   text: '#eceff4', dim: '#9aa5b1', line: '#434c5e', accent: '#88c0d0', accent2: '#8fbcbb'},
+  {id: 'gruvbox', name: 'Gruvbox', bg: '#1d2021', panel: '#282828', card: '#232526',
+   text: '#ebdbb2', dim: '#a89984', line: '#3c3836', accent: '#fabd2f', accent2: '#d79921'},
+  {id: 'solar', name: 'Solarized', bg: '#002b36', panel: '#073642', card: '#04313c',
+   text: '#eee8d5', dim: '#93a1a1', line: '#0b4250', accent: '#b58900', accent2: '#cb4b16'},
+  {id: 'rose', name: 'Rose Pine', bg: '#191724', panel: '#1f1d2e', card: '#1c1a29',
+   text: '#e0def4', dim: '#908caa', line: '#26233a', accent: '#ebbcba', accent2: '#f6c177'},
+  {id: 'sepia', name: 'Sepia', bg: '#efe6d4', panel: '#f7efe0', card: '#e9dfcb',
+   text: '#3b3222', dim: '#6f6350', line: '#dccfae', accent: '#a35f00', accent2: '#c27200'},
+  {id: 'daylight', name: 'Daylight', bg: '#f5f2ec', panel: '#fffdf8', card: '#efeae1',
+   text: '#1f1c18', dim: '#6b6257', line: '#e0d8ca', accent: '#c2410c', accent2: '#ea580c'},
+  {id: 'paper', name: 'Paper', bg: '#efe9dd', panel: '#fbf7ef', card: '#e7dfd1',
+   text: '#2a241c', dim: '#7a6f5f', line: '#d9cfbd', accent: '#9a6b00', accent2: '#b8860b'},
+  {id: 'black', name: 'Black', bg: '#000000', panel: '#0b0b0b', card: '#111111',
+   text: '#f5f5f5', dim: '#8c8c8c', line: '#1d1d1d', accent: '#ffd60a', accent2: '#ffe066'},
+  {id: 'dark', name: 'Dark', bg: '#1a1a1a', panel: '#232323', card: '#1f1f1f',
+   text: '#f0f0f0', dim: '#909090', line: '#2e2e2e', accent: '#7dd3fc', accent2: '#bae6fd'},
+];
+const themeById = id => THEMES.find(t => t.id === id) || THEMES[0];
+function currentThemeId() {
+  let id = 'midnight';
+  try { id = localStorage.getItem('ra:theme') || 'midnight'; } catch (e) {}
+  const forced = new URLSearchParams(location.search).get('theme');
+  if (forced && THEMES.some(t => t.id === forced)) id = forced;
+  return themeById(id).id;
+}
+function applyTheme(id) {
+  const t = themeById(id);
+  const r = document.documentElement.style;
+  for (const k of ['bg', 'panel', 'card', 'text', 'dim', 'line', 'accent', 'accent2'])
+    r.setProperty('--' + k, t[k]);
+  r.setProperty('color-scheme',
+    (t.bg === '#f5f2ec' || t.bg === '#efe9dd') ? 'light' : 'dark');
+  try { localStorage.setItem('ra:theme', t.id); } catch (e) {}
+  return t;
+}
+function cycleTheme() {
+  const cur = THEMES.findIndex(t => t.id === currentThemeId());
+  applyTheme(THEMES[(cur + 1) % THEMES.length].id);
+  if (tocOpen) renderToc();
+}
+
+// ---- battery, headphones, load ------------------------------------------
+function pollStatus() {
+  fetch('/api/status').then(r => r.json()).then(s => {
+    const b = document.getElementById('batt');
+    if (s.level != null) {
+      b.textContent = (s.charging ? '\u26a1' : '') + s.level + '%';
+      b.classList.toggle('low', s.level <= 15 && !s.charging);
+    }
+  }).catch(() => {});
+}
+pollStatus();
+setInterval(pollStatus, 60000);
+let jackWas = null;
+setInterval(() => {
+  fetch('/api/jack').then(r => r.json()).then(s => {
+    if (jackWas === true && s.inserted === false && !audio.paused) toggle();
+    if (typeof s.inserted === 'boolean') jackWas = s.inserted;
+  }).catch(() => {});
+}, 2000);
+
+applyTheme(currentThemeId());
+applyRate();
+
+fetch('/api/book/' + encodeURIComponent(BOOK))
+.then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+.then(d => {
+  data = d;
+  chapters = d.chapters || [];
+  duration = d.duration || 0;
+  document.getElementById('ttl').textContent = d.title || BOOK;
+  document.getElementById('aut').textContent = d.author || '';
+  document.getElementById('dur').textContent = fmt(duration);
+  if (d.cover) document.getElementById('cov').src = '/label/' + encodeURIComponent(BOOK);
+  titleEl.textContent = d.title || '';
+  document.title = d.title || 'tape';
+  let pos = null;
+  try { pos = JSON.parse(localStorage.getItem('ra:' + BOOK)); } catch (e) {}
+  if (pos && pos.rate) { rate = pos.rate; applyRate(); }
+  if (chapters.length) showChapter(); else {
+    chapters = [{title: 'whole tape', start: 0}];
+    showChapter();
+  }
+  audio.src = '/audio/' + encodeURIComponent(BOOK);
+  applyRate();
+  audio.onloadedmetadata = () => {
+    if (isFinite(audio.duration) && audio.duration > 0) duration = audio.duration;
+    document.getElementById('dur').textContent = fmt(duration);
+    if (pos && pos.t) audio.currentTime = Math.min(pos.t, Math.max(0, duration - 2));
+    paint();
+    save();
+    document.getElementById('load').style.display = 'none';
+  };
+  // hide the spinner even if metadata never arrives (broken file)
+  setTimeout(() => { document.getElementById('load').style.display = 'none'; paint(); }, 2500);
+  if (new URLSearchParams(location.search).get('check') === '1') {
+    const ok = document.querySelectorAll('.win').length === 2 &&
+      document.getElementById('ra') && document.getElementById('rb') &&
+      chapters.length > 0 && !!document.getElementById('ttl').textContent;
+    document.title = ok ? 'CHECK OK tape' : 'CHECK FAIL tape';
+  }
+  if (new URLSearchParams(location.search).get('check') === 'ui') {
+    runUITests().catch(e => { document.title = 'UITESTS ERROR ' + e.message; });
+  }
+  if (new URLSearchParams(location.search).get('perf') === 'idle') {
+    setPlaying(true);
+    let frames = 0; const t0 = performance.now();
+    const step = () => {
+      frames++;
+      if (performance.now() - t0 < 3000) requestAnimationFrame(step);
+      else console.log('TAPEFPS', Math.round(frames / 3));
+    };
+    requestAnimationFrame(step);
+  }
+}).catch(() => {
+  document.getElementById('loadtxt').textContent = 'could not open this tape';
+});
+
+// ---- UI self-tests (?check=ui) -----------------------------------------
+async function runUITests() {
+  const results = [];
+  const check = async (name, fn) => {
+    try { await fn(); results.push(name + ' PASS'); }
+    catch (e) { results.push(name + ' FAIL ' + ((e && e.message) || e)); }
+  };
+  const assert = (c, m) => { if (!c) throw new Error(m || 'assert'); };
+  const pad = {index: 0, buttons: Array.from({length: 18}, () => ({pressed: false}))};
+  navigator.getGamepads = () => [pad];
+  const tap = i => {
+    pad.buttons[i].pressed = true;
+    padTick();
+    pad.buttons[i].pressed = false;
+    padTick();
+  };
+
+  await check('tape has two reels', async () => {
+    assert(document.querySelectorAll('.win .reel').length === 2, 'reels missing');
+  });
+  await check('reels stay still while paused', async () => {
+    setPlaying(false);
+    const st = getComputedStyle(document.getElementById('ra')).animationPlayState;
+    assert(st === 'paused', 'state ' + st);
+  });
+  await check('reels turn while playing', async () => {
+    setPlaying(true);
+    const st = getComputedStyle(document.getElementById('ra')).animationPlayState;
+    assert(st === 'running', 'state ' + st);
+    setPlaying(false);
+  });
+  await check('rate changes the reel period', async () => {
+    const before = getComputedStyle(document.getElementById('ra')).animationDuration;
+    setRate(2);
+    const after = getComputedStyle(document.getElementById('ra')).animationDuration;
+    assert(before !== after, 'duration unchanged');
+    setRate(1);
+  });
+  await check('picker opens and lists chapters', async () => {
+    openToc();
+    assert(tocOpen, 'did not open');
+    assert(tocRows.length >= 2, 'no rows');
+    closeToc();
+  });
+  await check('pad opens the picker and moves', async () => {
+    tap(8);
+    assert(tocOpen, 'pad did not open');
+    const before = tocSel;
+    tap(13);
+    assert(tocSel !== before, 'selection did not move');
+    tap(1);
+    assert(!tocOpen, 'pad B did not close');
+  });
+  await check('theme cycles', async () => {
+    const before = currentThemeId();
+    cycleTheme();
+    assert(currentThemeId() !== before, 'theme unchanged');
+    applyTheme(before);
+  });
+  await check('speed buttons click', async () => {
+    const before = rate;
+    document.getElementById('fast').click();
+    assert(rate > before, 'rate unchanged');
+    setRate(before);
+  });
+  await check('scrubber seeks', async () => {
+    seekFrac(0.5);
+    const d = duration || audio.duration || 0;
+    if (d) assert(Math.abs(audio.currentTime - d / 2) < d * 0.2, 'not applied');
+  });
+  await check('pad A toggles playback state', async () => {
+    const before = document.body.classList.contains('playing');
+    tap(0);
+    assert(document.body.classList.contains('playing') !== before, 'state unchanged');
+    audio.pause();
+  });
+
+  const pass = results.filter(r => r.includes(' PASS')).length;
+  document.title = 'UITESTS ' + pass + '/' + results.length + ' ' + results.join(' | ');
+}
+</script></body></html>"""
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = 'readaloud/1.0'
+
+    def log_message(self, *a):
+        pass
+
+    def _books(self):
+        root = self.server.root
+        out = []
+        for n in sorted(os.listdir(root)):
+            low = n.lower()
+            if not (low.endswith('.epub') or low.endswith(AUDIO_EXTS)):
+                continue
+            i = media_info(os.path.join(root, n))
+            out.append({
+                'name': n, 'title': i['title'], 'author': i['author'],
+                'subtitle': i['subtitle'], 'series': i['series'],
+                'readaloud': i['readaloud'], 'cover': i['cover'],
+                'audio': bool(i.get('audio')),
+            })
+        out.sort(key=lambda b: (b['title'] or b['name']).lower())
+        return out
+
+    def _book_path(self, name):
+        p = os.path.join(self.server.root, os.path.basename(name))
+        return p if os.path.isfile(p) else None
+
+    def _send(self, code, body, ctype='text/html; charset=utf-8', extra=None):
+        self.send_response(code)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(body)))
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
+
+    def _send_gz(self, body, ctype, cache='no-cache'):
+        """Text responses are 2 MB of JSON on a slow CPU: gzip and let the
+        browser reuse them."""
+        extra = {'Cache-Control': cache}
+        if len(body) > 1024 and 'gzip' in self.headers.get('Accept-Encoding', ''):
+            body = gzip.compress(body, 6)
+            extra['Content-Encoding'] = 'gzip'
+        self._send(200, body, ctype, extra)
+
+    def do_HEAD(self):
+        self.do_GET()
+
+    def do_POST(self):
+        self.do_GET()
+
+    def do_GET(self):
+        url = urlparse(self.path)
+        path = unquote(url.path)
+
+        if path == '/':
+            if getattr(self.server, 't0', None) and not getattr(self.server, 't1', None):
+                self.server.t1 = time.time()
+                print("first paint request after %.1f s" % (self.server.t1 - self.server.t0), flush=True)
+            return self._send_gz(LIBRARY_HTML.encode(), 'text/html; charset=utf-8')
+
+        if path == '/api/books':
+            return self._send_gz(json.dumps(self._books()).encode(), 'application/json')
+
+        if path.startswith('/cover/st/'):
+            uuid = path[len('/cover/st/'):]
+            cfg = st_config()
+            if not cfg.get('url') or not re.fullmatch(r'[0-9a-fA-F-]{36}', uuid or ''):
+                return self._send(404, b'no cover')
+            try:
+                fname, ctype = st_cover(cfg, uuid)
+                with open(fname, 'rb') as f:
+                    return self._send(200, f.read(), ctype, {'Cache-Control': 'no-cache'})
+            except Exception:
+                return self._send(404, b'no cover')
+
+        if path.startswith('/cover/'):
+            p = self._book_path(path[len('/cover/'):])
+            if not p:
+                return self._send(404, b'no cover')
+            fname, ctype = cover_file(p)
+            if not fname:
+                return self._send(404, b'no cover')
+            with open(fname, 'rb') as f:
+                # revalidate: a half-written thumbnail must never stick for a day
+                return self._send(200, f.read(), ctype, {'Cache-Control': 'no-cache'})
+
+        if path.startswith('/label/'):
+            p = self._book_path(path[len('/label/'):])
+            if not p:
+                return self._send(404, b'no cover')
+            fname = label_file(p)
+            if not fname:
+                return self._send(404, b'no cover')
+            ctype = 'image/jpeg'
+            if fname.endswith('.cover'):
+                try:
+                    with open(os.path.join(CACHE_DIR, audio_info(p)['key'] + '.mime')) as f:
+                        ctype = f.read().strip() or ctype
+                except Exception:
+                    pass
+            with open(fname, 'rb') as f:
+                return self._send(200, f.read(), ctype, {'Cache-Control': 'no-cache'})
+
+        if path.startswith('/audio/'):
+            p = self._book_path(path[len('/audio/'):])
+            if not p or not is_audio(p):
+                return self._send(404, b'no audio')
+            return self._serve_audio(p)
+
+        if path == '/api/storyteller':
+            cfg = st_config()
+            if not cfg.get('url'):
+                return self._send(200, json.dumps({'configured': False, 'books': []}).encode(),
+                                  'application/json')
+            cache = os.path.join(CACHE_DIR, 'storyteller.json')
+            books, online = [], False
+            try:
+                books = storyteller_list(cfg)
+                online = True
+                os.makedirs(CACHE_DIR, exist_ok=True)
+                with open(cache, 'w') as f:
+                    json.dump({'at': time.time(), 'books': books}, f)
+            except Exception:
+                try:
+                    with open(cache) as f:
+                        books = json.load(f).get('books') or []
+                except Exception:
+                    books = []
+            local = {}
+            for n in os.listdir(self.server.root):
+                if not n.lower().endswith('.epub'):
+                    continue
+                i = book_info(os.path.join(self.server.root, n))
+                full = i['title'] + (': ' + i['subtitle'] if i['subtitle'] else '')
+                for k in (i['title'], full, full.replace(': ', ' ')):
+                    local[_norm(k)] = n
+            for b in books:
+                b['local'] = local.get(_norm(b['title']))
+            return self._send_gz(json.dumps({'configured': True, 'online': online,
+                                             'books': books}).encode(), 'application/json')
+
+        if path == '/api/status':
+            return self._send(200, json.dumps(battery_state()).encode(), 'application/json')
+
+        if path == '/api/download':
+            body = b''
+            n = int(self.headers.get('Content-Length') or 0)
+            if n:
+                body = self.rfile.read(n)
+            try:
+                req = json.loads(body or b'{}')
+            except Exception:
+                req = {}
+            cfg = st_config()
+            uuid, title = req.get('uuid'), req.get('title')
+            if not cfg.get('url') or not uuid:
+                return self._send(400, b'{"error":"not configured"}', 'application/json')
+            with DL_LOCK:
+                cur = DOWNLOADS.get(uuid)
+            if not cur or cur.get('state') in ('failed', 'done'):
+                threading.Thread(target=download_book,
+                                 args=(cfg, uuid, title, self.server.root), daemon=True).start()
+            return self._send(200, b'{"started":true}', 'application/json')
+
+        if path.startswith('/api/download/'):
+            uuid = path[len('/api/download/'):]
+            with DL_LOCK:
+                info = dict(DOWNLOADS.get(uuid) or {'state': 'unknown'})
+            return self._send(200, json.dumps(info).encode(), 'application/json')
+
+        if path == '/api/jack':
+            return self._send(200, json.dumps(JACK).encode(), 'application/json')
+
+        if path == '/quit':
+            self._send(200, b'bye')
+            threading.Thread(target=close_app, daemon=True).start()
+            return
+
+        if path == '/play':
+            book = parse_qs(url.query).get('book', [''])[0]
+            if not self._book_path(book):
+                return self._send(404, b'no such book')
+            page = (TAPE_HTML if is_audio(book) else PLAYER_HTML)
+            page = page.replace('__BOOK__', json.dumps(book)).encode()
+            return self._send(200, page)
+
+        if path.startswith('/api/book/'):
+            p = self._book_path(path[len('/api/book/'):])
+            if not p:
+                return self._send(404, b'{}', 'application/json')
+            if is_audio(p):
+                i = audio_info(p)
+                data = {'audio': True, 'title': i['title'], 'subtitle': i['subtitle'],
+                        'author': i['author'], 'duration': i['duration'],
+                        'chapters': i['chapters'], 'cover': i['cover'],
+                        'section_count': len(i['chapters'])}
+                return self._send_gz(json.dumps(data).encode(), 'application/json',
+                                     cache='max-age=300')
+            try:
+                _, raw, gz = load_book_cached(p)
+            except Exception as e:
+                return self._send(500, json.dumps({'error': str(e)}).encode(), 'application/json')
+            if 'gzip' in self.headers.get('Accept-Encoding', ''):
+                return self._send(200, gz, 'application/json',
+                                  {'Content-Encoding': 'gzip', 'Cache-Control': 'max-age=300'})
+            return self._send(200, raw, 'application/json', {'Cache-Control': 'max-age=300'})
+
+        if path.startswith('/book/'):
+            rest = path[len('/book/'):]
+            name, _, entry = rest.partition('/')
+            p = self._book_path(name)
+            if not p or not entry:
+                return self._send(404, b'not found')
+            return self._serve_entry(p, entry)
+
+        self._send(404, b'not found')
+
+    def _serve_audio(self, book):
+        """Stream the m4b itself. Chromium seeks with Range requests, so this
+        must not read the file into memory; 64 KB chunks keep it at one buffer."""
+        try:
+            size = os.path.getsize(book)
+        except OSError:
+            return self._send(404, b'no audio')
+        if size <= 0:
+            return self._send(404, b'no audio')
+        ctype = 'audio/mp4' if book.lower().endswith(AUDIO_EXTS) else 'application/octet-stream'
+        start, end, code = 0, size - 1, 200
+        m = re.match(r'bytes=(\d*)-(\d*)$', (self.headers.get('Range') or '').strip())
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = int(m.group(2)) if m.group(2) else size - 1
+            else:
+                start = max(0, size - int(m.group(2) or 0))
+            end = min(end, size - 1)
+            if start > end or start >= size:
+                return self._send(416, b'', extra={'Content-Range': 'bytes */%d' % size})
+            code = 206
+        length = end - start + 1
+        self.send_response(code)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(length))
+        self.send_header('Accept-Ranges', 'bytes')
+        self.send_header('Cache-Control', 'no-cache')
+        if code == 206:
+            self.send_header('Content-Range', 'bytes %d-%d/%d' % (start, end, size))
+        self.end_headers()
+        if self.command == 'HEAD':
+            return
+        with open(book, 'rb') as f:
+            f.seek(start)
+            left = length
+            while left > 0:
+                chunk = f.read(min(65536, left))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+                left -= len(chunk)
+
+    def _serve_entry(self, book, entry):
+        try:
+            with zipfile.ZipFile(book) as z:
+                info = z.getinfo(entry)
+        except KeyError:
+            return self._send(404, b'no entry')
+        except Exception:
+            return self._send(404, b'bad zip')
+        ctype = mime(entry)
+        size = info.file_size
+        rng = self.headers.get('Range', '')
+        m = re.match(r'bytes=(\d*)-(\d*)$', rng.strip())
+        with zipfile.ZipFile(book) as z:
+            if m and (m.group(1) or m.group(2)):
+                start = int(m.group(1)) if m.group(1) else 0
+                end = int(m.group(2)) if m.group(2) else size - 1
+                end = min(end, size - 1)
+                if start > end:
+                    return self._send(416, b'', extra={'Content-Range': 'bytes */%d' % size})
+                body = z.read(entry)[start:end + 1]
+                return self._send(206, body, ctype, {
+                    'Content-Range': 'bytes %d-%d/%d' % (start, end, size),
+                    'Accept-Ranges': 'bytes',
+                })
+            body = z.read(entry)
+        self._send(200, body, ctype, {'Accept-Ranges': 'bytes'})
+
+
+def selftest(path):
+    data = load_book(path)
+    secs = data['sections']
+    assert secs, 'no sections with media overlays'
+    total = 0
+    for s in secs:
+        assert s['pars'], 'section without pars: ' + s['href']
+        prev, prev_audio = -1.0, None
+        for p in s['pars']:
+            assert p['audio'].endswith(('.mp4', '.m4a', '.mp3', '.ogg')), p['audio']
+            assert p['end'] >= p['begin'], 'end before begin in ' + s['href']
+            if p['audio'] != prev_audio:
+                prev_audio, prev = p['audio'], -1.0     # each audio file has its own clock
+            assert p['begin'] >= prev - 1e-6, 'pars out of order in ' + s['href']
+            prev = p['begin']
+            total += 1
+    print('%s: %d sections, %d pars, first=%r' % (
+        os.path.basename(path), len(secs), total, secs[0]['title']))
+    print('ok')
+
+
+def st_config():
+    try:
+        with open(os.path.expanduser('~/.config/readaloud/config.json')) as f:
+            cfg = json.load(f) or {}
+        return cfg.get('storyteller') or {}
+    except Exception:
+        return {}
+
+
+def _norm(s):
+    return re.sub(r'[^a-z0-9]+', '', (s or '').lower())
+
+
+_ST_TOKEN = {'tok': None, 'at': 0.0}
+
+
+def st_token(cfg):
+    import urllib.parse
+    import urllib.request
+    now = time.time()
+    if _ST_TOKEN['tok'] and now - _ST_TOKEN['at'] < 600:
+        return _ST_TOKEN['tok']
+    base = (cfg.get('url') or '').rstrip('/')
+    body = urllib.parse.urlencode({'username': cfg.get('username', ''),
+                                   'password': cfg.get('password', '')}).encode()
+    with urllib.request.urlopen(urllib.request.Request(base + '/api/token', data=body),
+                                timeout=1.5) as r:
+        token = (json.load(r) or {}).get('access_token')
+    _ST_TOKEN.update(tok=token, at=now)
+    return token
+
+
+def st_cover(cfg, uuid):
+    """Cache Storyteller covers locally; the handheld asks once per book."""
+    import urllib.request
+    img = os.path.join(CACHE_DIR, 'st-' + uuid + '.img')
+    if os.path.exists(img):
+        return img, 'image/jpeg'
+    base = (cfg.get('url') or '').rstrip('/')
+    req = urllib.request.Request(base + '/api/v2/books/%s/cover' % uuid,
+                                 headers={'Authorization': 'Bearer ' + (st_token(cfg) or '')})
+    with urllib.request.urlopen(req, timeout=4.0) as r:
+        data = r.read()
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(img, 'wb') as f:
+        f.write(data)
+    make_thumb(img, 'st-' + uuid)          # queued, not blocking this request
+    return img, 'image/jpeg'
+
+
+def storyteller_list(cfg):
+    """Storyteller library. Short timeouts: the local list must never wait on it."""
+    import urllib.request
+    base = (cfg.get('url') or '').rstrip('/')
+    if not base:
+        return []
+    req = urllib.request.Request(base + '/api/v2/books?limit=200',
+                                 headers={'Authorization': 'Bearer ' + (st_token(cfg) or '')})
+    with urllib.request.urlopen(req, timeout=2.0) as r:
+        raw = json.load(r)
+    items = raw if isinstance(raw, list) else (raw.get('books') or [])
+    out = []
+    for b in items:
+        ra = b.get('readaloud') or {}
+        se = b.get('series') or []
+        series = (se[0].get('name') or '').strip() if se else ''
+        position = se[0].get('position') if se else None
+        colls = [c.get('name') or '' for c in (b.get('collections') or [])]
+        collection = colls[0].split('\u00b7')[-1].strip() if colls else ''
+        if not series and colls:                 # no series relation: use edition
+            series = colls[0].split('\u00b7')[0].strip()
+        out.append({
+            'uuid': b.get('uuid'),
+            'title': (b.get('title') or '').strip(),
+            'series': series,
+            'position': position,
+            'collection': collection,
+            'aligned': ra.get('status') == 'ALIGNED' or bool(b.get('alignedAt')),
+        })
+    return out
+
+
+DOWNLOADS = {}
+DL_LOCK = threading.Lock()
+
+
+def battery_state():
+    import glob
+    for d in glob.glob('/sys/class/power_supply/*'):
+        if os.path.basename(d) == 'battery':
+            try:
+                cap = int(open(os.path.join(d, 'capacity')).read().strip())
+                st = open(os.path.join(d, 'status')).read().strip()
+                return {'level': cap, 'charging': st.lower().startswith('charg')}
+            except Exception:
+                pass
+    return {'level': None, 'charging': False}
+
+
+def download_book(cfg, uuid, title, root):
+    """Stream the readaloud epub from Storyteller to the library, tracking bytes."""
+    import urllib.parse
+    import urllib.request
+    key = uuid
+    name = re.sub(r'[\\/:*?"<>|]+', ' ', title or 'book').strip() or 'book'
+    dest = os.path.join(root, name + ' (readaloud).epub')
+    part = dest + '.part'
+    with DL_LOCK:
+        DOWNLOADS[key] = {'state': 'running', 'done': 0, 'total': 0, 'name': os.path.basename(dest)}
+    try:
+        base = (cfg.get('url') or '').rstrip('/')
+        req = urllib.request.Request(base + '/api/v2/books/%s/files' % uuid,
+                                     headers={'Authorization': 'Bearer ' + (st_token(cfg) or '')})
+        with urllib.request.urlopen(req, timeout=180) as r:
+            total = int(r.headers.get('Content-Length') or 0)
+            done = 0
+            with open(part, 'wb') as f:
+                while True:
+                    chunk = r.read(262144)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    with DL_LOCK:
+                        DOWNLOADS[key].update(done=done, total=total)
+        os.replace(part, dest)
+        with DL_LOCK:
+            DOWNLOADS[key]['state'] = 'done'
+            DOWNLOADS[key]['file'] = os.path.basename(dest)
+    except Exception as e:
+        try:
+            os.unlink(part)
+        except Exception:
+            pass
+        with DL_LOCK:
+            DOWNLOADS[key]['state'] = 'failed'
+            DOWNLOADS[key]['error'] = str(e)
+
+
+def chromium_args(port):
+    return [
+        'chromium', '--kiosk', '--disable-smooth-scrolling',
+        '--app=http://127.0.0.1:%d/' % port,
+        '--user-data-dir=' + os.path.expanduser('~/.cache/readaloud-chromium'),
+        '--autoplay-policy=no-user-gesture-required', '--no-first-run',
+        '--disable-background-networking', '--disable-component-update',
+        '--disable-default-apps', '--disable-sync', '--no-service-autorun',
+        '--disable-features=Translate,MediaRouter,CalculateNativeWinOcclusion',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-background-timer-throttling',
+        '--disable-extensions', '--password-store=basic',
+    ]
+
+
+def port_up(port):
+    import socket
+    with socket.socket() as s:
+        s.settimeout(0.3)
+        return s.connect_ex(('127.0.0.1', port)) == 0
+
+
+def server_pids(marker='--serve'):
+    """Server processes started detached by --open (never this process)."""
+    out = []
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        try:
+            cl = open('/proc/%s/cmdline' % pid, 'rb').read().decode('utf8', 'replace')
+        except Exception:
+            continue
+        argv = cl.split('\0')
+        if argv and argv[0].endswith('python3') and marker in argv and 'readaloud' in cl:
+            out.append(int(pid))
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('dir', nargs='?', default=os.path.expanduser('~/Downloads'))
+    ap.add_argument('--port', type=int, default=8099)
+    ap.add_argument('--open', action='store_true', help='launch the player window')
+    ap.add_argument('--serve', action='store_true', help='run the server in the foreground')
+    ap.add_argument('--stop', action='store_true', help='stop a detached server')
+    ap.add_argument('--selftest', metavar='EPUB')
+    a = ap.parse_args()
+    if a.selftest:
+        return selftest(a.selftest)
+    if a.stop:
+        for pid in server_pids():
+            try:
+                os.kill(pid, 15)
+            except Exception:
+                pass
+        return
+    root = os.path.abspath(os.path.expanduser(a.dir))
+    if not os.path.isdir(root):
+        sys.exit('not a directory: ' + root)
+
+    if a.open:
+        import subprocess
+        # Never stack windows: duplicates are what quietly ate the 1 GB.
+        close_app()
+        time.sleep(0.4)
+        if not port_up(a.port):
+            # The server outlives the window: closing a book (or the app) must
+            # never leave the browser pointing at a dead port.
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            log = open(os.path.join(CACHE_DIR, 'server.log'), 'a')
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), root,
+                              '--port', str(a.port), '--serve'],
+                             start_new_session=True, stdout=log, stderr=log)
+            for _ in range(50):
+                if port_up(a.port):
+                    break
+                time.sleep(0.1)
+        subprocess.Popen(chromium_args(a.port)).wait()
+        return
+
+    srv = ThreadingHTTPServer(('127.0.0.1', a.port), Handler)
+    srv.root = root
+    print("library: %s -> http://127.0.0.1:%d/" % (root, a.port), flush=True)
+    threading.Thread(target=watch_jack, daemon=True).start()
+    threading.Thread(target=warm_thumbs, daemon=True).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == '__main__':
+    main()

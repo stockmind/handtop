@@ -13,6 +13,25 @@ Code here runs on a handheld with a fragile kernel driver stack. A careless chan
 - Never write to the power chip, regulators or charging limits (`axp*`, `regulator`, `input_current_limit`, `/dev/mem`, `i2cset`).
 - Never run the input daemon, or anything that opens `/dev/input` or `/dev/uinput`, inside the build chroot or on the build host.
 
+## Performance: measure, do not guess
+
+The device has 1 GB of RAM and a GPU that punishes compositing. UI work is judged
+on numbers, not impressions, and the numbers have surprised us before (a list
+that "felt laggy" was running at 2 fps).
+
+Every change that touches the launcher, the library, the player, the cover or
+cache paths, or the browser flags ends with, on the device:
+
+1. `?perf=idle` and `?perf=scroll` numbers quoted in the changelog or the commit
+   message, next to the previous run;
+2. `free -m` with the library open, compared with the previous run;
+3. `pgrep -xc ffmpeg` prints 0 once thumbnails exist (no encoder left running);
+4. `python3 -m unittest discover -s tests` green.
+
+A drop in scroll frame rate, or roughly 10 % more resident memory for the same
+view, blocks the change until it is explained. Details, the harness and the
+list of things that already bit us: [docs/performance.md](docs/performance.md).
+
 ## Trade-offs: ask before you implement
 
 When a fix or a design choice works against intended behaviour or makes the experience worse, **stop before implementing it**: describe the trade-off to the user or maintainer and let them decide. This covers, for example:

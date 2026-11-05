@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Read aloud
+Comment=EPUB3 read-along player (media overlays, karaoke highlight)
+Exec=readaloud --open
+Icon=media-playback-start
+Terminal=false
+Categories=AudioVideo;Audio;
+StartupNotify=true

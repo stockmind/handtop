@@ -10,6 +10,162 @@
   (no SD swap file), the on-board `goblin-watch`, the kernel-message log, the
   weekly yt-dlp timer, the zsh login shell and read aloud.
 
+- New: `readaloud`, an EPUB3 read-along player. It renders the book's own XHTML
+  in Chromium and drives the narration from the SMIL media overlays, filling
+  each word karaoke-style at the pace of the track and keeping the current
+  sentence in view. Per-book position and speed are remembered, and the
+  launcher is in the app menu. Text size is adjustable, the pad works in
+  gamepad mode (A play, B replay sentence, X/Y text size, shoulders and
+  left/right change chapter, up/down change speed), and pulling the headphones
+  out pauses the narration. The list shows a cover and per-book progress;
+  parses are cached and the book JSON is served gzipped (2 MB -> 146 KB), and a
+  spinner covers the first open. `S` switches to a Spritz view: one word at a
+  time, recognition point on the centre line, paced by the narration. The list
+  reads title, subtitle, author and series from the epub package (cached next
+  to the cover), and closing a book returns to the list instead of exiting.
+  Books without media overlays still open: the spine is used as the reading
+  order and Spritz runs on a words-per-minute timer (60-900 wpm) instead of the
+  narration. The library server is detached from the window, so closing a book
+  or the app never leaves the browser pointing at a dead port; `readaloud
+  --stop` shuts it down. Books that carry narration are marked with a badge on
+  the cover, and the words-per-minute reader marks the live word on the page
+  (with its recognition letter coloured) instead of forcing the Spritz view.
+  Playback speed and wpm survive chapter changes and are remembered across
+  books, not just within one. A chapter picker (real titles from the nav/NCX)
+  and a scrubber give coarse and fine seeking; the pad drives the list, the
+  transport and the picker. When a Storyteller server is configured in
+  `~/.config/readaloud/config.json` the home screen also lists its library,
+  marking what is downloaded here; it loads after the local list and silently
+  falls back to the cache, so a dead server never blocks navigation. The home
+  screen opens with a Continue section: the last three books you were in, most
+  recent first, the rest alphabetically below. Storyteller rows carry their
+  covers too, proxied and cached on first view, and a page-level error handler
+  prints failures in the list instead of showing an empty screen. The library
+  has three views, cycled with the header button, `v` or the pad: list, a cover
+  grid, and an iPod-style 3D cover flow where the focused cover faces front and
+  its neighbours rotate away. Storyteller rows group by series, can be
+  downloaded to the library with a live byte bar, and say so when the server is
+  unreachable. The bar shows battery. A `<book>.words.json` sidecar, if
+  one is ever produced, gives the karaoke exact per-word timings. While playing,
+  the transport and scrubber fade out after a few idle seconds so the page uses
+  the whole panel; moving, pressing a key or a pad button brings them back, and
+  the picker can turn the behaviour off.
+
+- Fix: the Spritz view crashed on every book (it handed plain strings to a
+  helper that expected DOM nodes). `tests/test_readaloud.py` now covers the
+  parsers, the HTTP surface, range requests and a headless player load, with a
+  `?check=1` hook that exercises the string/node word-timing path.
+
+- New: read aloud plays `.m4b`/`.m4a` audiobooks when there is no epub, drawing
+  an old compact cassette that fills the panel instead of the book view. The
+  cover is printed on the tape label (pre-cropped, warm paper tint, grain and
+  gloss), the two reels turn at the playback speed and freeze on pause, the
+  tape pack shrinks and fills with progress, and the counter shows elapsed
+  time. Metadata, cover and chapters come from the MP4 boxes (Nero `chpl` or
+  the QuickTime chapter track) with a cached parse, the file is streamed with
+  byte ranges, and the pad, scrubber, chapter picker, themes and remembered
+  position work as in the reader.
+
+- Perf: covers are cached as 96 px thumbnails, list images lazy-decode, and
+  Storyteller series are collapsed and built only when opened. On the RG35XX H
+  the library went from 672 MB resident to 431 MB, and the Storyteller section
+  no longer fetches 84 covers up front. Spritz also caches its word timings per
+  paragraph instead of rebuilding them every animation frame. `--open` also
+  closes any previous player window first: stacked instances were the easiest
+  way to eat the handheld's 1 GB.
+
+- Perf: the parsed book is cached on disk next to the covers, so a first open
+  is 0.16 s instead of 2.1 s (and 0.23 s instead of 3.0 s for a 29-chapter
+  book). Parses are capped at four in memory. Thumbnails are made once by a
+  one-shot worker with a single ffmpeg thread and reused forever; images carry
+  explicit width/height so scrolling never reflows. Row opacity, smooth
+  scrolling and `content-visibility` are gone: they cost compositing on this
+  GPU, and the reader scrolls instantly now. Series headers are obviously
+  clickable (pointer, chevron, "tap to open"), undownloaded Storyteller rows
+  show a download icon on hover/focus and swap it for a spinner plus a byte
+  count while the file streams. Thumbnails are validated on read, and covers are
+  served `no-cache` so a half-written one cannot stick for a day, and a book
+  whose cover was cached as missing is re-extracted instead of showing forever
+  blank. Covers no longer use `decoding="async"`: on this GPU Chromium decoded
+  them off-thread and never composited the bitmap, so a valid JPEG request still
+  painted nothing. Storyteller rows group by the server's real series relation
+  (name + position), not by collection, with near-duplicate names normalised, so
+  editions no longer split a series and volumes sort by their number.
+
+- Tests: the player and the library expose a `?check=ui` harness that drives the
+  real UI with clicks and a synthetic gamepad (picker, chapter jump, spritz
+  toggle, play, font, speed, shoulders, scrubber, view cycling, series expand),
+  reported as `UITESTS n/n` in the title and asserted by the browser tests. The
+  picker rows were not clickable at all; they are now.
+
+- Themes: twelve palettes (Midnight, Amoled, Night, Candle, Slate, Nord, Gruvbox,
+  Solarized, Rose Pine, Sepia, Daylight, Paper, plus explicit Black and Dark
+  white-on-dark options) driven by CSS variables, switched from a preview sheet
+  in the library header (`t` or the palette button) or by cycling from the
+  player's picker. Each theme also sets the book page background and ink, so
+  "Candle" is a warm dark page and "Sepia" a paper one, and the book's own
+  scrollbar follows. Scrollbars are thin and themed instead of the default grey:
+  the track is the page colour and the thumb a mix of accent and page, so no
+  light strip ever shows up next to a dark page.
+
+- Docs: `docs/performance.md` records how to measure scroll, memory and cold
+  open on this device, the numbers before/after, and every trap found so far
+  (row opacity, hidden rows, encoding in the request path, transforms that break
+  on Panfrost, cached broken images). `AGENTS.md` now makes those measurements
+  mandatory after any UI change.
+
+- Fix: mpv no longer drops the video track on software-decoded files. The
+  `dmabuf-wayland` VO only accepts dmabuf frames and mpv does not fall back to
+  the next VO when the filter chain fails, so every AV1 file (off the hwdec
+  whitelist) played audio with no picture; `scripts/vo-by-codec.lua` now picks
+  the VO from the file's video codec.
+
+- Fix: Cedrus padding clears now respect planar and semiplanar layouts and odd
+  heights; the VP9 decode gate compares 10-bit frames as P010.
+
+- New: VP9 decodes on the VPU, and so does H.265 Main10. The video engine on
+  this SoC has a VP9 decoder in the H.265 slot that mainline cedrus never
+  driver'd; the image now carries Jernej Skrabec's out-of-tree series (from
+  LibreELEC's Allwinner patch set, authors and per-patch purpose in
+  `build/kernel/libreelec/README.md`) plus the `v4l2-vp9` helper module it
+  needs, which ROCKNIX does not ship. Output is bit-identical to a software
+  decode at 720p, 854x480, 1366x768, 1080p and 4K, 8- and 10-bit
+  (`PSNR average:inf`). One fix on top is ours: the VP9 backend kept the
+  vendor's `SCALE1_STRIDE_ALIGN(1)` (16-byte stride) after `0002` made the
+  capture stride 64-byte aligned, so key frames decoded and every inter frame
+  read its references with the wrong stride - invisible at 1280/1920/3840,
+  broken at 416/854/1366. `0430-cedrus-vp9-stride-align.patch` derives the
+  field from `bytesperline`; the patch header has the align sweep and
+  `docs/video-decode.md` the details. 10-bit also needed `0414` (H.265 P010
+  output): without it HEVC Main10 decoded to garbage, which is why it is in
+  the set. Measured with mpv on 1080p24: 11 % of one core zero-copy against
+  107 % in software, 9 % at 720p, 13 % at 4K, and a 5-minute soak showed flat
+  memory/CMA and no decoder errors. `mpv.conf` now lists `vp9` in
+  `hwdec-codecs` and prefers `vo=dmabuf-wayland` (subtitles and OSD verified
+  there), and `tools/check-video-decode.sh` gates VP9 against a software
+  decode, including a width that is not a multiple of 64, and 8- and 10-bit
+  both. Two caveats, both in `docs/video-decode.md`: Chromium's VA path shows up
+  to 15 rows of padding at the bottom of clips whose height is not a multiple of
+  16 (the driver reports a 16-aligned height on purpose; making it report the
+  coded height hangs the engine), and 10-bit at such heights (234, 360) is close
+  but not bit-exact (32.8/59.9 dB) while 480/576/720/1080 are `inf`. YouTube:
+  the browser still decodes on the CPU (~280 % of one core for AV1, ~240 % with
+  VP9 forced) because Chromium's MSE path does not hand frames to VA-API in this
+  build; a two-file extension in the image
+  (`/usr/lib/handtop/yt-prefer-vp9`, off by default) makes YouTube serve VP9
+  instead of AV1, which is still software - it costs about the same, so it is
+  left disabled. The VPU path for YouTube is the native client: `goblin-tv` ->
+  `goblin-watch` -> mpv plays it zero-copy at ~21 % of one core. Details and
+  everything tried in `docs/video-decode.md`.
+
+
+- Fix: `04c` uses upstream's checks again (`grep -w … >/dev/null`, not `grep -qw`):
+  with `pipefail`, `-q` stops reading ffmpeg's long list at the first match, grep
+  dies of SIGPIPE and the build fails on a check that actually passed. The
+  ffmpeg build itself is upstream's verbatim (Kwiboo `fad85d9` + the drm patch),
+  so an upstream bump lands without a conflict — the fork's video work sits in
+  `04e` (VA-API), beside ffmpeg rather than inside it.
+
 - Change: the client is called `jellyfin` everywhere, not just in the drawer:
   `/usr/local/bin/jellyfin`, `/etc/default/jellyfin` (was `goblin-dash`),
   `~/.local/state/jellyfin`, `JELLYFIN_*` tunables, `docs/jellyfin.md`,
