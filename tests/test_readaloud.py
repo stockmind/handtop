@@ -9,10 +9,12 @@ machine that has it, e.g. the handheld).
 """
 import importlib.machinery
 import importlib.util
+import base64
 import json
 import pathlib
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -65,6 +67,40 @@ SMIL = """<smil xmlns="http://www.w3.org/ns/SMIL" version="3.0"><body>
  <par><text src="../OEBPS/ch1.xhtml#s1"/><audio src="../Audio/a.mp4" clipBegin="0s" clipEnd="2.5s"/></par>
  <par><text src="../OEBPS/ch1.xhtml#s2"/><audio src="../Audio/a.mp4" clipBegin="2.5s" clipEnd="4s"/></par>
 </seq></body></smil>"""
+
+
+PNG_1PX = base64.b64decode(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==')
+
+
+def _box(typ, payload):
+    return struct.pack('>I', 8 + len(payload)) + typ + payload
+
+
+def make_m4b(folder, name='Test Tape.m4b', chapters=True):
+    """A minimal MP4 with iTunes tags, cover and a Nero chapter list."""
+    def item(typ, kind, payload):
+        return _box(typ, _box(b'data', struct.pack('>I', kind) + b'\x00' * 4 + payload))
+
+    items = b''.join([
+        item(b'\xa9nam', 1, b'Test Tape'),
+        item(b'\xa9ART', 1, b'Tape Author'),
+        item(b'\xa9alb', 1, b'Test Tapes'),
+        item(b'covr', 14, PNG_1PX),
+    ])
+    meta = _box(b'meta', b'\x00' * 4 + _box(b'ilst', items))
+    mvhd = _box(b'mvhd', b'\x00' * 12 + struct.pack('>II', 1000, 65000) + b'\x00' * 72)
+    chpl = b''
+    if chapters:
+        payload = b'\x01\x00\x00\x00' + b'\x00' * 4 + bytes([2])
+        for start, title in ((0, b'One'), (30000000, b'Two')):
+            payload += struct.pack('>Q', start) + bytes([len(title)]) + title
+        chpl = _box(b'chpl', payload)
+    moov = _box(b'moov', mvhd + _box(b'udta', meta) + chpl)
+    path = pathlib.Path(folder) / name
+    path.write_bytes(_box(b'ftyp', b'M4A \x00\x00\x00\x00M4A isomiso2') +
+                     moov + _box(b'mdat', b'\x00' * 4096))
+    return path
 
 
 def make_epub(folder, narrated=True, name='Test Book.epub'):
@@ -143,6 +179,30 @@ class ParseTests(unittest.TestCase):
         data = ra.load_book(book)
         self.assertEqual(data['sections'][0]['label'], '')
 
+    def test_m4b_metadata_and_chapters(self):
+        tape = make_m4b(self.tmp)
+        info = ra.audio_info(str(tape))
+        self.assertTrue(info['audio'])
+        self.assertEqual(info['title'], 'Test Tape')
+        self.assertEqual(info['author'], 'Tape Author')
+        self.assertAlmostEqual(info['duration'], 65.0)
+        self.assertEqual([c['title'] for c in info['chapters']], ['One', 'Two'])
+        self.assertAlmostEqual(info['chapters'][1]['start'], 3.0)
+        self.assertTrue(info['cover'])
+        self.assertTrue(pathlib.Path(ra.CACHE_DIR, info['key'] + '.cover').exists())
+
+    def test_m4b_without_chapters_is_still_listed(self):
+        tape = make_m4b(self.tmp, name='No Chapters.m4b', chapters=False)
+        info = ra.audio_info(str(tape))
+        self.assertEqual(info['title'], 'Test Tape')
+        self.assertEqual(info['chapters'], [])
+
+    def test_label_is_cropped_to_the_tape(self):
+        tape = make_m4b(self.tmp)
+        label = ra.label_file(str(tape))
+        self.assertTrue(label and pathlib.Path(label).stat().st_size > 512)
+        self.assertTrue(label.endswith('.label.jpg'))
+
 
 class ServerTests(unittest.TestCase):
     def setUp(self):
@@ -220,8 +280,78 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(e.code, 404)
 
 
-CHROMIUM = shutil.which('chromium') or shutil.which('chromium-browser')
+class AudioServerTests(unittest.TestCase):
+    """m4b files in the library, their metadata, cover and byte ranges."""
 
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.cache = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.cache)
+        ra.CACHE_DIR = self.cache
+        ra._CACHE.clear()
+        ra._INFO.clear()
+        ra._AINFO.clear()
+        patcher = mock.patch.object(ra, 'st_config', lambda: {})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.tape = make_m4b(self.tmp)
+        self.srv = ra.ThreadingHTTPServer(('127.0.0.1', 0), ra.Handler)
+        self.srv.root = self.tmp
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.addCleanup(self.srv.server_close)
+        self.addCleanup(self.srv.shutdown)
+
+    def get(self, path, headers=None):
+        req = urllib.request.Request('http://127.0.0.1:%d%s' % (self.port, path),
+                                     headers=headers or {})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.read(), dict(r.headers)
+
+    def test_library_lists_the_tape(self):
+        _, body, _ = self.get('/api/books')
+        books = json.loads(body)
+        self.assertEqual(len(books), 1)
+        self.assertTrue(books[0]['audio'])
+        self.assertEqual(books[0]['title'], 'Test Tape')
+
+    def test_book_json_has_chapters(self):
+        _, body, _ = self.get('/api/book/Test%20Tape.m4b')
+        data = json.loads(body)
+        self.assertTrue(data['audio'])
+        self.assertEqual([c['title'] for c in data['chapters']], ['One', 'Two'])
+
+    def test_audio_stream_and_range(self):
+        status, body, hdrs = self.get('/audio/Test%20Tape.m4b')
+        self.assertEqual(status, 200)
+        self.assertEqual(hdrs['Accept-Ranges'], 'bytes')
+        self.assertTrue(len(body) > 4000)
+        status, body, hdrs = self.get('/audio/Test%20Tape.m4b', {'Range': 'bytes=20-39'})
+        self.assertEqual(status, 206)
+        self.assertEqual(len(body), 20)
+        self.assertTrue(hdrs['Content-Range'].startswith('bytes 20-39/'))
+
+    def test_label_and_cover_are_served(self):
+        status, body, hdrs = self.get('/cover/Test%20Tape.m4b')
+        self.assertEqual(status, 200)
+        self.assertTrue(hdrs['Content-Type'].startswith('image/'))
+        status, body, hdrs = self.get('/label/Test%20Tape.m4b')
+        self.assertEqual(status, 200)
+        self.assertEqual(hdrs['Content-Type'], 'image/jpeg')
+
+    def test_tape_page_is_served(self):
+        _, body, _ = self.get('/play?book=Test%20Tape.m4b')
+        self.assertIn(b'compact cassette', body)
+        self.assertIn(b'/audio/', body)
+        self.assertNotIn(b'__BOOK__', body)
+        # an epub still gets the reader page
+        make_epub(self.tmp)
+        _, body, _ = self.get('/play?book=Test%20Book.epub')
+        self.assertIn(b'id="spritz"', body)
+
+
+CHROMIUM = shutil.which('chromium') or shutil.which('chromium-browser')
 
 @unittest.skipUnless(CHROMIUM, 'chromium not installed')
 class BrowserTests(unittest.TestCase):
@@ -235,7 +365,9 @@ class BrowserTests(unittest.TestCase):
         ra.CACHE_DIR = self.cache
         ra._CACHE.clear()
         ra._INFO.clear()
+        ra._AINFO.clear()
         make_epub(self.tmp)
+        make_m4b(self.tmp)
         self.srv = ra.ThreadingHTTPServer(('127.0.0.1', 0), ra.Handler)
         self.srv.root = self.tmp
         self.port = self.srv.server_address[1]
@@ -281,6 +413,18 @@ class BrowserTests(unittest.TestCase):
         passed, total, rest = self.ui_results(log)
         self.assertEqual(passed, total, rest)
         self.assertGreaterEqual(total, 5)
+
+    def test_tape_loads_without_js_errors(self):
+        log = self.load('play?book=Test%20Tape.m4b&check=1')
+        self.assertNotIn('Uncaught', log)
+        self.assertIn('<title>CHECK OK tape</title>', log)
+
+    def test_tape_ui_clicks_and_pad(self):
+        log = self.load('play?book=Test%20Tape.m4b&check=ui')
+        self.assertNotIn('Uncaught', log)
+        passed, total, rest = self.ui_results(log)
+        self.assertEqual(passed, total, rest)
+        self.assertGreaterEqual(total, 8)
 
 
 if __name__ == '__main__':

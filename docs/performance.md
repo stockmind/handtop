@@ -11,6 +11,8 @@ The player and the library expose a harness behind `?perf=`:
 * `/?perf=idle` - counts animation frames for 3 s, prints `IDLEFPS n`
 * `/?perf=scroll` - scrolls the list up and down for 3 s, prints `SCROLLFPS n`
 * `/play?book=<name>&check=1` - the JS smoke check (`CHECK OK` in the title)
+* `/play?book=<tape>.m4b&perf=idle` - the cassette with the reels spinning,
+  prints `TAPEFPS n` (it forces `playing` so the animation is in the sample)
 
 Run it on the device, with logging on, and read the console lines:
 
@@ -74,6 +76,23 @@ delayed", not like "the page scrolls slowly".
   half-written thumbnail stick for a day. Serve covers `no-cache`.
 * **Duplicate windows.** Two kiosk instances of the same profile is the easiest
   way to eat the 1 GB. `--open` now closes the previous window first.
+
+## The tape view
+
+The m4b cassette is static artwork plus two spinning reels:
+
+* the shell, label, text and deck are painted once; the cover is pre-cropped to
+  576x262 by `ffmpeg` on the play path and cached, so nothing scales or decodes
+  on a frame;
+* the reels are two small elements animated with a CSS `rotate` whose duration
+  follows the playback rate. Pausing sets `animation-play-state: paused`, so a
+  paused tape costs no frames at all;
+* the tape-pack sizes, the counter and the scrubber update on `timeupdate`
+  (~4 Hz), not in a rAF loop;
+* the paper effect is four static layers (tint, grain, gloss, vignette) with
+  `mix-blend-mode`; they are composited once, not per frame. Do not add a
+  continuously running filter or WebGL here: the Mali-G31 punishes it and the
+  cassette already fills the panel.
 
 ## Rule: check performance after every change
 

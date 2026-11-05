@@ -512,19 +512,23 @@ def warm_thumbs():
 
 
 def cover_file(book):
-    info = book_info(book)
+    info = media_info(book)
     p = os.path.join(CACHE_DIR, info['key'] + '.cover') if info.get('key') else ''
     if not info.get('cover') or not p or not os.path.exists(p):
         # The metadata cache can hold cover:false from a failed extraction (or a
         # cache dir that was cleaned). Redo it once instead of serving nothing.
         if info.get('key'):
             try:
-                os.unlink(os.path.join(CACHE_DIR, info['key'] + '.json'))
+                os.unlink(os.path.join(CACHE_DIR, info['key'] +
+                                       ('.audio.json' if is_audio(book) else '.json')))
             except OSError:
                 pass
             with _CACHE_LOCK:
-                _INFO.pop(info['key'], None)
-            info = book_info(book)
+                if is_audio(book):
+                    _AINFO.pop(info['key'], None)
+                else:
+                    _INFO.pop(info['key'], None)
+            info = media_info(book)
             p = os.path.join(CACHE_DIR, info['key'] + '.cover')
         if not info.get('cover') or not os.path.exists(p):
             return None, None
@@ -533,6 +537,335 @@ def cover_file(book):
 
 def is_readaloud(path):
     return book_info(path)['readaloud']
+
+
+# ---- m4b / m4a: audiobooks with no epub ---------------------------------
+# The MP4 boxes we need are read with seeks only, so a 1 GB m4b costs no more
+# than its headers. Parsed metadata, the cover and a label-sized crop are
+# cached on disk next to the epub covers.
+AUDIO_EXTS = ('.m4b', '.m4a')
+_AINFO = {}
+_LABEL_LOCK = threading.Lock()
+
+
+def is_audio(path):
+    return os.path.splitext(path)[1].lower() in AUDIO_EXTS
+
+
+def _atoms(f, start, end):
+    """Walk one MP4 box list. Yields (type, payload_start, payload_end)."""
+    pos = start
+    while pos + 8 <= end:
+        f.seek(pos)
+        h = f.read(8)
+        if len(h) < 8:
+            return
+        size, typ = struct.unpack('>I4s', h)
+        hlen = 8
+        if size == 1:
+            more = f.read(8)
+            if len(more) < 8:
+                return
+            size = struct.unpack('>Q', more)[0]
+            hlen = 16
+        elif size == 0:
+            size = end - pos
+        if size < hlen or pos + size > end:
+            return
+        yield typ, pos + hlen, pos + size
+        pos += size
+
+
+def _child(f, start, end, typ):
+    for t, ps, pe in _atoms(f, start, end):
+        if t == typ:
+            return ps, pe
+    return None
+
+
+def _descend(f, start, end, path):
+    for typ in path:
+        n = _child(f, start, end, typ)
+        if not n:
+            return None
+        start, end = n
+        if typ == b'meta':
+            start += 4                  # full box: version and flags
+    return start, end
+
+
+_MP4_TAGS = {b'\xa9nam': 'title', b'\xa9alb': 'album', b'\xa9ART': 'artist',
+             b'aART': 'artist', b'\xa9wrt': 'author', b'\xa9grp': 'series',
+             b'\xa9day': 'year'}
+
+
+def _mp4_ilst(f, start, end):
+    """iTunes-style metadata items: {box type: (data type, payload)}."""
+    out = {}
+    for typ, ps, pe in _atoms(f, start, end):
+        data = _child(f, ps, pe, b'data')
+        if not data:
+            continue
+        ds, de = data
+        f.seek(ds)
+        head = f.read(8)
+        if len(head) < 8:
+            continue
+        out.setdefault(typ, (struct.unpack('>I', head[:4])[0], f.read(max(0, de - ds - 8))))
+    return out
+
+
+def _mp4_duration(f, moov):
+    m = _child(f, moov[0], moov[1], b'mvhd')
+    if not m:
+        return 0.0
+    f.seek(m[0])
+    b = f.read(32)
+    if len(b) < 20:
+        return 0.0
+    if b[0] == 1 and len(b) >= 32:
+        scale, dur = struct.unpack('>IQ', b[20:32])
+    else:
+        scale, dur = struct.unpack('>II', b[12:20])
+    return round(dur / scale, 2) if scale else 0.0
+
+
+def _mp4_chpl(f, moov):
+    """Nero chapter list, what ffmpeg and most converters write."""
+    boxes = [_child(f, moov[0], moov[1], b'chpl')]
+    udta = _child(f, moov[0], moov[1], b'udta')
+    if udta:
+        boxes.append(_child(f, udta[0], udta[1], b'chpl'))
+    for box in boxes:
+        if not box:
+            continue
+        f.seek(box[0])
+        data = f.read(box[1] - box[0])
+        if len(data) < 9:
+            continue
+        out, pos = [], 9
+        for _ in range(data[8]):
+            if pos + 9 > len(data):
+                break
+            start = struct.unpack('>Q', data[pos:pos + 8])[0] / 1e7
+            ln = data[pos + 8]
+            pos += 9
+            title = data[pos:pos + ln].decode('utf-8', 'replace').strip()
+            pos += ln
+            out.append({'title': title or 'Chapter %d' % (len(out) + 1),
+                        'start': round(start, 3)})
+        if out:
+            return out
+    return []
+
+
+def _mp4_chapter_track(f, moov):
+    """QuickTime chapter track: a text trak referenced by tref/chap."""
+    traks = [(ps, pe) for typ, ps, pe in _atoms(f, moov[0], moov[1]) if typ == b'trak']
+    refs = set()
+    for ps, pe in traks:
+        tref = _child(f, ps, pe, b'tref')
+        if not tref:
+            continue
+        chap = _child(f, tref[0], tref[1], b'chap')
+        if not chap:
+            continue
+        f.seek(chap[0])
+        data = f.read(chap[1] - chap[0])
+        for i in range(0, len(data) - 3, 4):
+            refs.add(struct.unpack('>I', data[i:i + 4])[0])
+    for ps, pe in traks:
+        tkhd = _child(f, ps, pe, b'tkhd')
+        if not tkhd:
+            continue
+        f.seek(tkhd[0])
+        h = f.read(24)
+        if len(h) < 16:
+            continue
+        tid = struct.unpack('>I', h[20:24] if h[0] == 1 and len(h) >= 24 else h[12:16])[0]
+        if tid not in refs:
+            continue
+        mdia = _child(f, ps, pe, b'mdia')
+        stbl = mdia and _descend(f, mdia[0], mdia[1], [b'minf', b'stbl'])
+        mdhd = mdia and _child(f, mdia[0], mdia[1], b'mdhd')
+        if not stbl or not mdhd:
+            continue
+        f.seek(mdhd[0])
+        mh = f.read(32)
+        if len(mh) < 20:
+            continue
+        scale = struct.unpack('>I', mh[20:24] if mh[0] == 1 and len(mh) >= 32 else mh[12:16])[0]
+        stts = _child(f, stbl[0], stbl[1], b'stts')
+        stsz = _child(f, stbl[0], stbl[1], b'stsz')
+        stsc = _child(f, stbl[0], stbl[1], b'stsc')
+        stco = _child(f, stbl[0], stbl[1], b'stco')
+        co64 = _child(f, stbl[0], stbl[1], b'co64')
+        if not (scale and stts and stsz and stsc and (stco or co64)):
+            continue
+        f.seek(stts[0])
+        st = f.read(stts[1] - stts[0])
+        f.seek(stsz[0])
+        sz = f.read(stsz[1] - stsz[0])
+        f.seek(stsc[0])
+        sc = f.read(stsc[1] - stsc[0])
+        f.seek((stco or co64)[0])
+        co = f.read((stco or co64)[1] - (stco or co64)[0])
+        if len(st) < 8 or len(sz) < 12 or len(sc) < 8 or len(co) < 8:
+            continue
+        deltas, t = [], 0.0
+        for i in range(struct.unpack('>I', st[4:8])[0]):
+            cnt, delta = struct.unpack('>II', st[8 + i * 8:16 + i * 8])
+            for _ in range(min(cnt, 100000)):
+                deltas.append(t)
+                t += delta / scale
+        fixed = struct.unpack('>I', sz[4:8])[0]
+        n = struct.unpack('>I', sz[8:12])[0]
+        sizes = [fixed] * n if fixed else [struct.unpack('>I', sz[12 + i * 4:16 + i * 4])[0]
+                                           for i in range(n)]
+        chunks = struct.unpack('>I', co[4:8])[0]
+        width = 8 if co64 and (stco is None) else 4
+        offsets = [struct.unpack('>Q' if width == 8 else '>I',
+                                 co[8 + i * width:8 + i * width + width])[0]
+                   for i in range(chunks)]
+        runs = []
+        for i in range(struct.unpack('>I', sc[4:8])[0]):
+            first, per = struct.unpack('>II', sc[8 + i * 12:16 + i * 12])
+            runs.append((first - 1, per))
+        per_chunk = []
+        for ci in range(chunks):
+            per = 1
+            for first, cnt in runs:
+                if first <= ci:
+                    per = cnt
+            per_chunk.append(per)
+        out, si = [], 0
+        for ci, off in enumerate(offsets):
+            for _ in range(per_chunk[ci]):
+                if si >= len(sizes) or si >= len(deltas):
+                    break
+                f.seek(off)
+                data = f.read(sizes[si])
+                if len(data) >= 2:
+                    ln = struct.unpack('>H', data[:2])[0]
+                    title = data[2:2 + ln].decode('utf-8', 'replace').strip()
+                    if title:
+                        out.append({'title': title, 'start': round(deltas[si], 3)})
+                off += sizes[si]
+                si += 1
+        if out:
+            return out
+    return []
+
+
+def audio_info(path):
+    """Metadata, chapters and cover for an m4b, cached like book_info."""
+    fallback = posixpath.splitext(os.path.basename(path))[0]
+    blank = {'title': fallback, 'author': '', 'subtitle': '', 'series': '',
+             'cover': False, 'readaloud': False, 'audio': True, 'duration': 0.0,
+             'chapters': [], 'key': ''}
+    try:
+        st = os.stat(path)
+    except OSError:
+        return blank
+    key = hashlib.sha1(('a1|%s|%d|%d' % (path, st.st_mtime_ns, st.st_size)).encode()).hexdigest()[:16]
+    with _CACHE_LOCK:
+        hit = _AINFO.get(key)
+    if hit is not None:
+        return hit
+
+    info = dict(blank, key=key)
+    cached = os.path.join(CACHE_DIR, key + '.audio.json')
+    if os.path.exists(cached):
+        try:
+            with open(cached) as f:
+                info.update(json.load(f))
+        except Exception:
+            pass
+    else:
+        try:
+            with open(path, 'rb') as f:
+                size = os.fstat(f.fileno()).st_size
+                moov = _child(f, 0, size, b'moov')
+                if moov:
+                    info['duration'] = _mp4_duration(f, moov)
+                    meta = (_descend(f, moov[0], moov[1], [b'udta', b'meta', b'ilst']) or
+                            _descend(f, moov[0], moov[1], [b'meta', b'ilst']))
+                    tags = _mp4_ilst(f, meta[0], meta[1]) if meta else {}
+                    get = lambda t: (tags.get(t) or (0, b''))[1].decode('utf-8', 'replace').strip()
+                    title = get(b'\xa9nam') or get(b'\xa9alb')
+                    author = get(b'\xa9ART') or get(b'aART') or get(b'\xa9wrt')
+                    if title:
+                        info['title'] = title
+                    info['author'] = author
+                    info['series'] = get(b'\xa9grp')
+                    covr = tags.get(b'covr')
+                    if covr and covr[1]:
+                        mime = {13: 'image/jpeg', 14: 'image/png', 27: 'image/bmp'}.get(covr[0], 'image/jpeg')
+                        os.makedirs(CACHE_DIR, exist_ok=True)
+                        with open(os.path.join(CACHE_DIR, key + '.cover'), 'wb') as cf:
+                            cf.write(covr[1])
+                        with open(os.path.join(CACHE_DIR, key + '.mime'), 'w') as mf:
+                            mf.write(mime)
+                        info['cover'] = True
+                    info['chapters'] = _mp4_chpl(f, moov) or _mp4_chapter_track(f, moov)
+        except Exception:
+            pass
+        if info['title'] and ':' in info['title']:
+            head, tail = info['title'].split(':', 1)
+            if tail.strip():
+                info['title'], info['subtitle'] = head.strip(), tail.strip()
+        if info['cover']:
+            try:
+                make_thumb(os.path.join(CACHE_DIR, key + '.cover'), key)
+            except Exception:
+                pass
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(cached, 'w') as f:
+                json.dump(info, f)
+        except Exception:
+            pass
+    with _CACHE_LOCK:
+        _AINFO[key] = info
+        while len(_AINFO) > 8:
+            _AINFO.pop(next(iter(_AINFO)))
+    return info
+
+
+def media_info(path):
+    return audio_info(path) if is_audio(path) else book_info(path)
+
+
+def label_file(book):
+    """One 576x262 crop for the tape label, made once on the play path."""
+    info = media_info(book)
+    key = info.get('key')
+    src = os.path.join(CACHE_DIR, key + '.cover') if key else ''
+    if not info.get('cover') or not src or not os.path.exists(src):
+        return None
+    out = os.path.join(CACHE_DIR, key + '.label.jpg')
+    if os.path.exists(out) and os.path.getsize(out) > 512:
+        return out
+    with _LABEL_LOCK:
+        if os.path.exists(out) and os.path.getsize(out) > 512:
+            return out
+        import subprocess
+        tmp = out + '.tmp.jpg'
+        try:
+            subprocess.run(['ffmpeg', '-y', '-nostdin', '-threads', '1', '-v', 'error',
+                            '-i', src, '-vf',
+                            'scale=576:262:force_original_aspect_ratio=increase,crop=576:262',
+                            '-q:v', '3', tmp], timeout=30, capture_output=True)
+        except Exception:
+            pass
+        if os.path.exists(tmp) and os.path.getsize(tmp) > 512:
+            os.replace(tmp, out)
+            return out
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return src
 
 
 LIBRARY_HTML = """<!doctype html><html><head><meta charset="utf-8"><title>Read aloud</title>
@@ -701,8 +1034,8 @@ addEventListener('keydown', e => {
 fetch('/api/books').then(r => r.json()).then(books => {
   const list = document.getElementById('list');
   if (!books.length) {
-    list.innerHTML = '<div id="empty">No .epub in this folder.<br>' +
-      'Drop read-aloud books here and reload.</div>';
+    list.innerHTML = '<div id="empty">No .epub or .m4b in this folder.<br>' +
+      'Drop read-aloud books or audiobooks here and reload.</div>';
     return;
   }
   const withPos = books.map(b => {
@@ -737,6 +1070,13 @@ fetch('/api/books').then(r => r.json()).then(books => {
       badge.innerHTML = '<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor">' +
         '<path d="M4 9h4l5-4v14l-5-4H4z"/></svg>';
       cover.appendChild(badge);
+    } else if (b.audio) {
+      const badge = document.createElement('div');
+      badge.className = 'badge tape';
+      badge.title = 'audiobook';
+      badge.innerHTML = '<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor">' +
+        '<path d="M3 6h18v12H3zM7 9a2 2 0 100 4 2 2 0 000-4zm10 0a2 2 0 100 4 2 2 0 000-4zM6 16h12v1H6z"/></svg>';
+      cover.appendChild(badge);
     }
     a.appendChild(cover);
 
@@ -766,7 +1106,7 @@ fetch('/api/books').then(r => r.json()).then(books => {
     const m = document.createElement('div');
     m.className = 'm' + (pct == null ? ' new' : '');
     m.textContent = pct == null
-      ? (b.readaloud ? 'not started' : 'no narration')
+      ? (b.readaloud ? 'not started' : b.audio ? 'audiobook' : 'no narration')
       : pct + '% \u00b7 chapter ' + ((p.sec || 0) + 1) + '/' + (p.total || '?');
     info.appendChild(m);
 
@@ -2369,6 +2709,685 @@ fetch('/api/book/' + encodeURIComponent(BOOK))
 </script></body></html>"""
 
 
+TAPE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>tape</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E")}
+ *{box-sizing:border-box}
+ html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--text);
+           font:14px system-ui,-apple-system,sans-serif;user-select:none;
+           -webkit-tap-highlight-color:transparent}
+ body{background:
+   radial-gradient(110% 80% at 50% 4%,color-mix(in srgb,var(--bg) 74%,#fff 12%),var(--bg) 58%,#000 130%)}
+ body::after{content:'';position:fixed;inset:0;pointer-events:none;
+   box-shadow:inset 0 0 120px rgba(0,0,0,.72)}
+ #tape{position:absolute;left:50%;top:12px;width:624px;height:396px;margin-left:-312px;
+       transform:rotate(-.35deg);cursor:pointer}
+ .shell{position:absolute;inset:0;border-radius:30px;
+   background:linear-gradient(176deg,#f3e9d3 0%,#e6d9bd 26%,#d8caab 58%,#c3b28f 100%);
+   box-shadow:0 22px 42px rgba(0,0,0,.62),0 4px 9px rgba(0,0,0,.4),
+     inset 0 2px 1px rgba(255,255,255,.85),inset 0 -5px 12px rgba(84,62,34,.3),
+     inset 0 0 0 1px rgba(255,255,255,.4)}
+ .shell::before{content:'';position:absolute;inset:6px;border-radius:25px;pointer-events:none;
+   background:linear-gradient(120deg,rgba(255,255,255,.34),transparent 24% 74%,rgba(255,255,255,.14));
+   mix-blend-mode:screen;opacity:.5}
+ .label{position:absolute;left:24px;right:24px;top:18px;height:252px;border-radius:9px;
+   overflow:hidden;background:#e8dcc2;isolation:isolate;
+   box-shadow:inset 0 0 0 1px rgba(70,55,35,.35),inset 0 4px 14px rgba(0,0,0,.3),
+     0 1px 0 rgba(255,255,255,.55)}
+ .label img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+   filter:saturate(.82) contrast(1.04) sepia(.14) brightness(1.04)}
+ .tint,.grain,.gloss{position:absolute;inset:0;pointer-events:none}
+ .tint{background:linear-gradient(118deg,rgba(255,245,216,.5) 0%,rgba(255,245,216,.1) 32%,
+        rgba(96,68,32,.16) 76%,rgba(255,245,216,.3) 100%);mix-blend-mode:soft-light}
+ .grain{background-image:var(--grain);background-size:140px 140px;mix-blend-mode:overlay;opacity:.42}
+ .gloss{background:linear-gradient(100deg,rgba(255,255,255,.34) 0 15%,transparent 33% 68%,
+        rgba(255,255,255,.12) 86%);mix-blend-mode:screen;opacity:.5}
+ .label::after{content:'';position:absolute;inset:0;pointer-events:none;
+   box-shadow:inset 0 0 46px rgba(40,28,14,.52)}
+ .side,.dur{position:absolute;top:9px;padding:2px 7px 1px;border-radius:2px;
+   background:rgba(20,15,10,.62);color:#f2e4c4;font:700 9px/1.5 system-ui,sans-serif;
+   letter-spacing:.22em;text-transform:uppercase;z-index:2}
+ .side{left:10px}
+ .dur{right:10px;letter-spacing:.1em}
+ .win{position:absolute;top:76px;width:100px;height:100px;border-radius:50%;overflow:hidden;
+   background:radial-gradient(circle at 50% 45%,#241c14,#0b0806 76%);
+   box-shadow:0 0 0 3px rgba(240,231,210,.9),0 0 0 4px rgba(92,72,44,.55),
+     inset 0 7px 16px rgba(0,0,0,.92),0 2px 6px rgba(0,0,0,.42);z-index:2}
+ .win.a{left:130px}
+ .win.b{right:130px}
+ .reel{position:absolute;inset:0;animation:reelspin var(--spin,3.4s) linear infinite;
+   animation-play-state:paused;will-change:transform}
+ body.playing .reel{animation-play-state:running}
+ @keyframes reelspin{to{transform:rotate(360deg)}}
+ .pack{position:absolute;inset:0;border-radius:50%;transform:scale(1);
+   background:repeating-radial-gradient(circle at 50% 50%,#2b2118 0 2px,#35291d 2px 3px,#221a12 3px 4px);
+   box-shadow:inset 0 0 16px #000}
+ #ra .pack{transform:scale(var(--pa,1))}
+ #rb .pack{transform:scale(var(--pb,.7))}
+ .hub{position:absolute;left:50%;top:50%;width:46px;height:46px;margin:-23px 0 0 -23px;
+   border-radius:50%;background:repeating-conic-gradient(from 0deg,#f1e7d0 0 34deg,#b3a482 34deg 60deg);
+   box-shadow:inset 0 0 0 1px rgba(80,60,35,.55),0 1px 4px rgba(0,0,0,.65)}
+ .hub::after{content:'';position:absolute;inset:15px;border-radius:50%;
+   background:radial-gradient(circle at 40% 35%,#1b1510,#070504 70%);
+   box-shadow:inset 0 2px 4px #000}
+ .cap{position:absolute;left:0;right:0;bottom:0;height:78px;padding:8px 14px 8px;z-index:2;
+   display:flex;flex-direction:column;justify-content:flex-end;gap:1px;color:#f5e9cc;
+   background:linear-gradient(180deg,rgba(18,13,9,0),rgba(18,13,9,.58) 28%,rgba(13,9,6,.86))}
+ .ttl{font:600 17px/1.22 Georgia,'DejaVu Serif',serif;white-space:nowrap;overflow:hidden;
+   text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,.5)}
+ .aut{font:11px/1.3 system-ui,sans-serif;color:#dccba6;white-space:nowrap;overflow:hidden;
+   text-overflow:ellipsis}
+ .chp{font:10px/1.4 system-ui,sans-serif;letter-spacing:.15em;text-transform:uppercase;
+   color:#bfa87f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .deck{position:absolute;left:24px;right:24px;bottom:12px;height:104px}
+ .head{position:absolute;left:50%;top:14px;width:204px;height:64px;margin-left:-102px;
+   border-radius:6px;background:linear-gradient(180deg,#0d0a08,#1c1510);
+   box-shadow:inset 0 3px 10px #000,0 0 0 1px rgba(90,70,40,.45)}
+ .head::before{content:'';position:absolute;left:8%;right:8%;top:50%;height:5px;margin-top:-2px;
+   border-radius:2px;background:linear-gradient(180deg,#2b2118,#4c3b28 58%,#231a12);
+   box-shadow:0 1px 0 rgba(255,255,255,.12)}
+ .head::after{content:'';position:absolute;left:41%;right:41%;top:7px;bottom:7px;border-radius:3px;
+   background:linear-gradient(180deg,#c2bcac,#6f695e 55%,#3a3730);opacity:.5}
+ .pin{position:absolute;top:32px;width:26px;height:26px;border-radius:50%;
+   background:radial-gradient(circle at 45% 40%,#231c14,#000 72%);
+   box-shadow:inset 0 2px 5px #000,0 0 0 1px rgba(255,255,255,.3)}
+ .pin.p1{left:64px}
+ .pin.p2{right:64px}
+ .brand{position:absolute;left:0;bottom:2px;font:700 9px/1.5 system-ui,sans-serif;
+   letter-spacing:.18em;text-transform:uppercase;color:#8a7a5c}
+ .brand span{display:block;font-weight:400;letter-spacing:.1em;color:#a3936f;font-size:8px}
+ .counter{position:absolute;right:0;bottom:0;padding:4px 8px 3px;border-radius:4px;
+   background:#15110c;color:#f2d79b;font:600 13px/1.3 ui-monospace,'DejaVu Sans Mono',monospace;
+   letter-spacing:.12em;font-variant-numeric:tabular-nums;
+   box-shadow:inset 0 2px 7px #000,0 1px 0 rgba(255,255,255,.45)}
+ .screw{position:absolute;width:12px;height:12px;border-radius:50%;
+   background:radial-gradient(circle at 35% 30%,#fdf8ec,#ab9c7e 62%,#6e6250);
+   box-shadow:inset 0 -1px 2px rgba(0,0,0,.5),0 1px 1px rgba(0,0,0,.4)}
+ .screw::after{content:'';position:absolute;left:1px;right:1px;top:5px;height:1.5px;
+   background:#6d6150;transform:rotate(28deg)}
+ .s1{left:14px;top:14px}.s2{right:14px;top:14px}.s3{left:14px;bottom:14px}.s4{right:14px;bottom:14px}
+ #scrub{position:absolute;left:0;right:0;bottom:52px;height:10px;background:var(--panel);
+   cursor:pointer;touch-action:none;transition:transform .22s ease,opacity .22s ease}
+ #scrubfill{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+ #scrubgrab{position:absolute;top:50%;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;
+   background:var(--accent2);box-shadow:0 0 0 2px var(--panel);left:0;pointer-events:none}
+ #bar{position:absolute;left:0;right:0;bottom:0;height:52px;display:flex;align-items:center;gap:2px;
+   background:var(--panel);color:var(--text);padding:0 4px;box-sizing:border-box;
+   transition:transform .22s ease,opacity .22s ease;border-top:1px solid var(--line)}
+ body.zen #bar{transform:translateY(100%);opacity:0;pointer-events:none}
+ body.zen #scrub{transform:translateY(100%);opacity:0;pointer-events:none}
+ button{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:6px;
+   font-size:16px;min-width:40px;height:36px}
+ button:active{background:var(--line)}
+ #rate{min-width:52px;text-align:center;font-variant-numeric:tabular-nums}
+ #title{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding-left:6px;
+   color:var(--dim);font-size:12px}
+ #batt{font-size:11px;color:var(--dim);padding:0 4px;font-variant-numeric:tabular-nums}
+ #batt.low{color:#ff8a65}
+ #load{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+   justify-content:center;gap:14px;background:var(--bg);color:var(--dim);z-index:9}
+ .spin{width:38px;height:38px;border:3px solid var(--line);border-top-color:var(--accent);
+   border-radius:50%;animation:sp .8s linear infinite}
+ @keyframes sp{to{transform:rotate(360deg)}}
+ #toc{position:absolute;top:0;left:0;width:100%;height:calc(100% - 52px);display:none;
+   flex-direction:column;background:var(--bg);color:var(--text);z-index:8}
+ #tocbody{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--line) var(--bg)}
+ #tocbody::-webkit-scrollbar{width:6px}
+ #tocbody::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+ #tocbody::-webkit-scrollbar-track{background:var(--bg)}
+ .tocrow{display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);
+   align-items:baseline;cursor:pointer}
+ .tocrow:hover{background:var(--card)}
+ .tocrow .n{color:var(--dim);font-size:12px;min-width:26px;text-align:right;
+   font-variant-numeric:tabular-nums}
+ .tocrow .l{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .tocrow.cur{background:var(--card);box-shadow:inset 3px 0 0 var(--accent)}
+ .tocrow.sel{background:var(--panel);box-shadow:inset 0 0 0 2px var(--accent)}
+ .tocrow.tog .l{color:var(--accent2)}
+</style></head><body>
+<div id="load"><div class="spin"></div><div id="loadtxt">spooling tape&hellip;</div></div>
+<div id="tape">
+ <div class="shell">
+  <div class="label">
+   <img id="cov" alt="">
+   <div class="tint"></div><div class="grain"></div><div class="gloss"></div>
+   <div class="side" id="side">Side A</div>
+   <div class="dur" id="dur">--:--</div>
+   <div class="win a"><div class="reel" id="ra"><div class="pack"></div><div class="hub"></div></div></div>
+   <div class="win b"><div class="reel" id="rb"><div class="pack"></div><div class="hub"></div></div></div>
+   <div class="cap">
+    <div class="ttl" id="ttl">&nbsp;</div>
+    <div class="aut" id="aut"></div>
+    <div class="chp" id="chp"></div>
+   </div>
+  </div>
+  <div class="deck">
+   <div class="head"></div>
+   <div class="pin p1"></div><div class="pin p2"></div>
+   <div class="brand">compact cassette<span>type IV &middot; metal &middot; 60</span></div>
+   <div class="counter" id="counter">00:00</div>
+  </div>
+  <div class="screw s1"></div><div class="screw s2"></div>
+  <div class="screw s3"></div><div class="screw s4"></div>
+ </div>
+</div>
+<div id="toc"><div id="tocbody"></div></div>
+<div id="scrub"><div id="scrubfill"></div><div id="scrubgrab"></div></div>
+<div id="bar">
+ <button id="tocbtn" title="chapters">&#9776;</button>
+ <button id="prev" title="previous chapter">&#9198;</button>
+ <button id="pp" title="play/pause">&#9654;</button>
+ <button id="next" title="next chapter">&#9197;</button>
+ <button id="slow" title="slower">&minus;</button>
+ <span id="rate">1.00x</span>
+ <button id="fast" title="faster">+</button>
+ <span id="title"></span>
+ <span id="batt"></span>
+ <button id="quit" title="back to library">&times;</button>
+</div>
+<audio id="a" preload="metadata"></audio>
+<script>
+const BOOK = __BOOK__;
+const audio = document.getElementById('a'), tape = document.getElementById('tape');
+const pp = document.getElementById('pp'), rateEl = document.getElementById('rate');
+const titleEl = document.getElementById('title');
+let data = null, chapters = [], duration = 0, rate = 1, sec = -1;
+try { rate = Math.min(3, Math.max(0.4, +(localStorage.getItem('ra:rate') || 1) || 1)); } catch (e) {}
+
+const fmt = t => {
+  t = Math.max(0, Math.floor(t || 0));
+  const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60;
+  const mm = h ? String(m).padStart(2, '0') : String(m);
+  return (h ? h + ':' : '') + mm + ':' + String(s).padStart(2, '0');
+};
+const enc = p => p.split('/').map(encodeURIComponent).join('/');
+
+function applyRate() {
+  audio.defaultPlaybackRate = rate;
+  audio.playbackRate = rate;
+  // one revolution per ~3.4 s at 1x: the reels answer the speed setting
+  tape.style.setProperty('--spin', (3.4 / Math.max(0.25, rate)).toFixed(2) + 's');
+  rateEl.textContent = rate.toFixed(2) + 'x';
+}
+
+function paint() {
+  const t = audio.currentTime || 0;
+  const d = duration || audio.duration || 0;
+  const f = d ? Math.min(1, Math.max(0, t / d)) : 0;
+  document.getElementById('scrubfill').style.width = (f * 100).toFixed(2) + '%';
+  document.getElementById('scrubgrab').style.left = (f * 100).toFixed(2) + '%';
+  // supply reel empties, take-up reel fills
+  tape.style.setProperty('--pa', (0.62 + 0.38 * (1 - f)).toFixed(3));
+  tape.style.setProperty('--pb', (0.62 + 0.38 * f).toFixed(3));
+  document.getElementById('counter').textContent = fmt(t);
+  if (!chapters.length) return;
+  let i = 0;
+  while (i + 1 < chapters.length && chapters[i + 1].start <= t) i++;
+  if (i !== sec) { sec = i; showChapter(); save(); }
+}
+
+function showChapter() {
+  if (!chapters.length) return;
+  const c = chapters[sec] || chapters[0];
+  const total = chapters.length;
+  document.getElementById('chp').textContent =
+    (total > 1 ? 'Ch ' + (sec + 1) + '/' + total + ' \u00b7 ' : '') + c.title;
+  titleEl.textContent = (data && data.title ? data.title : '') +
+    (total > 1 ? '  \u00b7  ' + (sec + 1) + '/' + total : '');
+}
+
+function setPlaying(on) {
+  document.body.classList.toggle('playing', !!on);
+  pp.innerHTML = on ? '&#10074;&#10074;' : '&#9654;';
+}
+
+function toggle() {
+  if (audio.paused) {
+    setPlaying(true);                       // respond to the button at once
+    audio.play().catch(() => setPlaying(false));
+  } else {
+    audio.pause();
+    setPlaying(false);
+  }
+}
+
+function seek(t, play) {
+  if (!isFinite(t)) return;
+  audio.currentTime = Math.max(0, Math.min(duration || audio.duration || t, t));
+  paint();
+  if (play) audio.play().catch(() => {});
+}
+
+function gotoChapter(i, play) {
+  if (!chapters.length) return;
+  i = Math.max(0, Math.min(chapters.length - 1, i));
+  seek(chapters[i].start, play);
+}
+
+function stepChapter(d) {
+  if (!chapters.length) return;
+  let i = 0;
+  while (i + 1 < chapters.length && chapters[i + 1].start <= audio.currentTime + 0.4) i++;
+  gotoChapter(i + d, !audio.paused);
+}
+
+function setRate(r) {
+  rate = Math.min(3, Math.max(0.4, Math.round(r * 100) / 100));
+  applyRate();
+  try { localStorage.setItem('ra:rate', rate); } catch (e) {}
+  save();
+}
+
+function save() {
+  try {
+    if (!data) return;
+    const d = duration || audio.duration || 0;
+    localStorage.setItem('ra:' + BOOK, JSON.stringify({
+      sec: Math.max(0, sec), par: 0, t: audio.currentTime || 0, rate,
+      pct: d ? Math.min(1, (audio.currentTime || 0) / d) : 0,
+      total: chapters.length || 1, narration: true, audio: true, at: Date.now(),
+    }));
+  } catch (e) {}
+}
+
+// ---- scrubber -----------------------------------------------------------
+const scrub = document.getElementById('scrub');
+let dragging = false;
+const fracAt = e => {
+  const r = scrub.getBoundingClientRect();
+  return r.width ? Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) : 0;
+};
+const seekFrac = f => seek(f * (duration || audio.duration || 0));
+scrub.addEventListener('pointerdown', e => {
+  dragging = true;
+  try { scrub.setPointerCapture(e.pointerId); } catch (err) {}
+  seekFrac(fracAt(e));
+});
+scrub.addEventListener('pointermove', e => { if (dragging) seekFrac(fracAt(e)); });
+scrub.addEventListener('pointerup', () => { dragging = false; });
+scrub.addEventListener('pointercancel', () => { dragging = false; });
+
+// ---- zen: the transport hides itself while the tape rolls ---------------
+let zen = true;
+try { zen = localStorage.getItem('ra:zen') !== '0'; } catch (e) {}
+let hideTimer = null;
+function showUI(ms) {
+  document.body.classList.remove('zen');
+  clearTimeout(hideTimer);
+  if (zen && ms !== 0 && !audio.paused) {
+    hideTimer = setTimeout(() => { if (!tocOpen) document.body.classList.add('zen'); },
+                           ms || 3200);
+  }
+}
+document.addEventListener('pointermove', () => showUI());
+document.addEventListener('pointerdown', () => showUI());
+
+// ---- chapter picker -----------------------------------------------------
+let tocOpen = false, tocSel = 0, tocRows = [], tocActions = [];
+
+function chapterName(i) {
+  const c = chapters[i] || {};
+  return c.title || ('Chapter ' + (i + 1));
+}
+
+function renderToc() {
+  const body = document.getElementById('tocbody');
+  body.textContent = '';
+  tocRows = [];
+  tocActions = [];
+  const add = (text, num, cls, action) => {
+    const d = document.createElement('div');
+    d.className = 'tocrow ' + (cls || '');
+    const n = document.createElement('span');
+    n.className = 'n';
+    n.textContent = num;
+    const l = document.createElement('span');
+    l.className = 'l';
+    l.textContent = text;
+    d.append(n, l);
+    d.onclick = () => { tocSel = tocRows.indexOf(d); markToc(); tocActivate(); };
+    body.appendChild(d);
+    tocRows.push(d);
+    tocActions.push(action);
+  };
+  add('Theme: ' + themeById(currentThemeId()).name + '  \u25b8', '\u25d1', 'tog',
+      () => cycleTheme());
+  add('Controls auto-hide: ' + (zen ? 'on' : 'off'), '\u25cc', 'tog',
+      () => { zen = !zen; try { localStorage.setItem('ra:zen', zen ? '1' : '0'); } catch (e) {}
+              renderToc(); showUI(); });
+  chapters.forEach((c, i) => add(chapterName(i), fmt(c.start), i === sec ? 'cur' : '',
+      () => { closeToc(); gotoChapter(i, !audio.paused); }));
+  tocSel = 0;
+  markToc();
+}
+
+function markToc() {
+  tocRows.forEach((r, i) => r.classList.toggle('sel', i === tocSel));
+  if (tocRows[tocSel]) tocRows[tocSel].scrollIntoView({block: 'nearest'});
+}
+
+function openToc() {
+  if (!data) return;
+  tocOpen = true;
+  showUI(0);
+  renderToc();
+  document.getElementById('toc').style.display = 'flex';
+}
+
+function closeToc() {
+  tocOpen = false;
+  document.getElementById('toc').style.display = 'none';
+  showUI();
+}
+
+function tocActivate() { const a = tocActions[tocSel]; if (a) a(); }
+document.getElementById('tocbtn').onclick = () => (tocOpen ? closeToc() : openToc());
+
+pp.onclick = toggle;
+document.getElementById('prev').onclick = () => stepChapter(-1);
+document.getElementById('next').onclick = () => stepChapter(1);
+document.getElementById('slow').onclick = () => setRate(rate - 0.1);
+document.getElementById('fast').onclick = () => setRate(rate + 0.1);
+document.getElementById('quit').onclick = back;
+
+function back() {
+  audio.pause();
+  save();
+  location.href = '/';
+}
+
+audio.ontimeupdate = () => { if (!dragging) paint(); };
+audio.ondurationchange = () => { if (isFinite(audio.duration)) duration = audio.duration; paint(); };
+audio.onplay = () => { applyRate(); setPlaying(true); showUI(); };
+audio.onpause = () => { setPlaying(false); showUI(0); };
+audio.onended = () => { setPlaying(false); save(); };
+audio.onerror = () => {
+  setPlaying(false);
+  document.getElementById('chp').textContent = 'this file cannot be decoded here';
+  document.getElementById('load').style.display = 'none';
+};
+audio.addEventListener('timeupdate', save);
+addEventListener('pagehide', save);
+
+function onKey(e) {
+  showUI();
+  if (e.key === 'Escape') { if (tocOpen) { closeToc(); return; } back(); return; }
+  if (tocOpen) {
+    if (e.key === 'ArrowDown' || e.key === 'j') { tocSel = Math.min(tocRows.length - 1, tocSel + 1); markToc(); }
+    else if (e.key === 'ArrowUp' || e.key === 'k') { tocSel = Math.max(0, tocSel - 1); markToc(); }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tocActivate(); }
+    else if (e.key === 'c') closeToc();
+    return;
+  }
+  if (e.key === 'c') { openToc(); return; }
+  if (e.key === ' ') { e.preventDefault(); toggle(); }
+  else if (e.key === 'ArrowRight') stepChapter(1);
+  else if (e.key === 'ArrowLeft') stepChapter(-1);
+  else if (e.key === 'ArrowUp') setRate(rate + 0.1);
+  else if (e.key === 'ArrowDown') setRate(rate - 0.1);
+  else if (e.key === 't' || e.key === 'T') cycleTheme();
+}
+addEventListener('keydown', onKey);
+
+// Gamepad: same mapping as the reader, with B as "back 30 seconds".
+const padHeld = {};
+const PAD = {0: 'toggle', 1: 'back30', 2: 'theme', 3: 'zen', 4: 'prev', 5: 'next',
+             6: 'scrubback', 7: 'scrubfwd', 8: 'toc', 12: 'speedup', 13: 'speeddown',
+             14: 'prev', 15: 'next'};
+const MENU_PAD = {0: 'ok', 1: 'close', 12: 'up', 13: 'down'};
+
+function doAction(a) {
+  if (a === 'toggle') toggle();
+  else if (a === 'back30') seek(audio.currentTime - 30);
+  else if (a === 'prev') stepChapter(-1);
+  else if (a === 'next') stepChapter(1);
+  else if (a === 'speedup') setRate(rate + 0.1);
+  else if (a === 'speeddown') setRate(rate - 0.1);
+  else if (a === 'theme') cycleTheme();
+  else if (a === 'zen') { zen = !zen; try { localStorage.setItem('ra:zen', zen ? '1' : '0'); } catch (e) {} showUI(); }
+  else if (a === 'toc') { tocOpen ? closeToc() : openToc(); }
+  else if (a === 'scrubback') seekFrac(Math.max(0, audio.currentTime / (duration || 1) - 0.05));
+  else if (a === 'scrubfwd') seekFrac(Math.min(1, audio.currentTime / (duration || 1) + 0.05));
+}
+
+function padTick() {
+  for (const gp of (navigator.getGamepads ? navigator.getGamepads() : [])) {
+    if (!gp) continue;
+    gp.buttons.forEach((b, i) => {
+      const key = gp.index + ':' + i;
+      const act = tocOpen ? MENU_PAD[i] : PAD[i];
+      if (act && b.pressed && !padHeld[key]) {
+        showUI();
+        if (act === 'up') { tocSel = Math.max(0, tocSel - 1); markToc(); }
+        else if (act === 'down') { tocSel = Math.min(tocRows.length - 1, tocSel + 1); markToc(); }
+        else if (act === 'ok') tocActivate();
+        else if (act === 'close') closeToc();
+        else doAction(act);
+      }
+      padHeld[key] = b.pressed;
+    });
+  }
+}
+function pollPad() { padTick(); requestAnimationFrame(pollPad); }
+pollPad();
+tape.addEventListener('click', e => { if (!tocOpen) toggle(); });
+
+// ---- themes (same ids as the library and the reader) --------------------
+const THEMES = [
+  {id: 'midnight', name: 'Midnight', bg: '#141414', panel: '#1d1d1d', card: '#191919',
+   text: '#e8e8e8', dim: '#8a8a8a', line: '#242424', accent: '#ffb300', accent2: '#ffd60a'},
+  {id: 'amoled', name: 'Amoled', bg: '#000000', panel: '#0a0a0a', card: '#0f0f0f',
+   text: '#dcdcdc', dim: '#767676', line: '#1a1a1a', accent: '#ffb300', accent2: '#ffd60a'},
+  {id: 'night', name: 'Night', bg: '#121212', panel: '#1a1a1a', card: '#161616',
+   text: '#cfcfcf', dim: '#7a7a7a', line: '#222222', accent: '#9fb4ff', accent2: '#c3d0ff'},
+  {id: 'candle', name: 'Candle', bg: '#191510', panel: '#221c13', card: '#1e1810',
+   text: '#e6d3a3', dim: '#a4906a', line: '#2b2317', accent: '#d4a72c', accent2: '#f0c75e'},
+  {id: 'slate', name: 'Slate', bg: '#1b1f24', panel: '#23282f', card: '#1f242b',
+   text: '#dbe2ea', dim: '#8b98a5', line: '#2b323a', accent: '#7aa2f7', accent2: '#9ab8ff'},
+  {id: 'nord', name: 'Nord', bg: '#2e3440', panel: '#3b4252', card: '#343b48',
+   text: '#eceff4', dim: '#9aa5b1', line: '#434c5e', accent: '#88c0d0', accent2: '#8fbcbb'},
+  {id: 'gruvbox', name: 'Gruvbox', bg: '#1d2021', panel: '#282828', card: '#232526',
+   text: '#ebdbb2', dim: '#a89984', line: '#3c3836', accent: '#fabd2f', accent2: '#d79921'},
+  {id: 'solar', name: 'Solarized', bg: '#002b36', panel: '#073642', card: '#04313c',
+   text: '#eee8d5', dim: '#93a1a1', line: '#0b4250', accent: '#b58900', accent2: '#cb4b16'},
+  {id: 'rose', name: 'Rose Pine', bg: '#191724', panel: '#1f1d2e', card: '#1c1a29',
+   text: '#e0def4', dim: '#908caa', line: '#26233a', accent: '#ebbcba', accent2: '#f6c177'},
+  {id: 'sepia', name: 'Sepia', bg: '#efe6d4', panel: '#f7efe0', card: '#e9dfcb',
+   text: '#3b3222', dim: '#6f6350', line: '#dccfae', accent: '#a35f00', accent2: '#c27200'},
+  {id: 'daylight', name: 'Daylight', bg: '#f5f2ec', panel: '#fffdf8', card: '#efeae1',
+   text: '#1f1c18', dim: '#6b6257', line: '#e0d8ca', accent: '#c2410c', accent2: '#ea580c'},
+  {id: 'paper', name: 'Paper', bg: '#efe9dd', panel: '#fbf7ef', card: '#e7dfd1',
+   text: '#2a241c', dim: '#7a6f5f', line: '#d9cfbd', accent: '#9a6b00', accent2: '#b8860b'},
+  {id: 'black', name: 'Black', bg: '#000000', panel: '#0b0b0b', card: '#111111',
+   text: '#f5f5f5', dim: '#8c8c8c', line: '#1d1d1d', accent: '#ffd60a', accent2: '#ffe066'},
+  {id: 'dark', name: 'Dark', bg: '#1a1a1a', panel: '#232323', card: '#1f1f1f',
+   text: '#f0f0f0', dim: '#909090', line: '#2e2e2e', accent: '#7dd3fc', accent2: '#bae6fd'},
+];
+const themeById = id => THEMES.find(t => t.id === id) || THEMES[0];
+function currentThemeId() {
+  let id = 'midnight';
+  try { id = localStorage.getItem('ra:theme') || 'midnight'; } catch (e) {}
+  const forced = new URLSearchParams(location.search).get('theme');
+  if (forced && THEMES.some(t => t.id === forced)) id = forced;
+  return themeById(id).id;
+}
+function applyTheme(id) {
+  const t = themeById(id);
+  const r = document.documentElement.style;
+  for (const k of ['bg', 'panel', 'card', 'text', 'dim', 'line', 'accent', 'accent2'])
+    r.setProperty('--' + k, t[k]);
+  r.setProperty('color-scheme',
+    (t.bg === '#f5f2ec' || t.bg === '#efe9dd') ? 'light' : 'dark');
+  try { localStorage.setItem('ra:theme', t.id); } catch (e) {}
+  return t;
+}
+function cycleTheme() {
+  const cur = THEMES.findIndex(t => t.id === currentThemeId());
+  applyTheme(THEMES[(cur + 1) % THEMES.length].id);
+  if (tocOpen) renderToc();
+}
+
+// ---- battery, headphones, load ------------------------------------------
+function pollStatus() {
+  fetch('/api/status').then(r => r.json()).then(s => {
+    const b = document.getElementById('batt');
+    if (s.level != null) {
+      b.textContent = (s.charging ? '\u26a1' : '') + s.level + '%';
+      b.classList.toggle('low', s.level <= 15 && !s.charging);
+    }
+  }).catch(() => {});
+}
+pollStatus();
+setInterval(pollStatus, 60000);
+let jackWas = null;
+setInterval(() => {
+  fetch('/api/jack').then(r => r.json()).then(s => {
+    if (jackWas === true && s.inserted === false && !audio.paused) toggle();
+    if (typeof s.inserted === 'boolean') jackWas = s.inserted;
+  }).catch(() => {});
+}, 2000);
+
+applyTheme(currentThemeId());
+applyRate();
+
+fetch('/api/book/' + encodeURIComponent(BOOK))
+.then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+.then(d => {
+  data = d;
+  chapters = d.chapters || [];
+  duration = d.duration || 0;
+  document.getElementById('ttl').textContent = d.title || BOOK;
+  document.getElementById('aut').textContent = d.author || '';
+  document.getElementById('dur').textContent = fmt(duration);
+  if (d.cover) document.getElementById('cov').src = '/label/' + encodeURIComponent(BOOK);
+  titleEl.textContent = d.title || '';
+  document.title = d.title || 'tape';
+  let pos = null;
+  try { pos = JSON.parse(localStorage.getItem('ra:' + BOOK)); } catch (e) {}
+  if (pos && pos.rate) { rate = pos.rate; applyRate(); }
+  if (chapters.length) showChapter(); else {
+    chapters = [{title: 'whole tape', start: 0}];
+    showChapter();
+  }
+  audio.src = '/audio/' + encodeURIComponent(BOOK);
+  applyRate();
+  audio.onloadedmetadata = () => {
+    if (isFinite(audio.duration) && audio.duration > 0) duration = audio.duration;
+    document.getElementById('dur').textContent = fmt(duration);
+    if (pos && pos.t) audio.currentTime = Math.min(pos.t, Math.max(0, duration - 2));
+    paint();
+    save();
+    document.getElementById('load').style.display = 'none';
+  };
+  // hide the spinner even if metadata never arrives (broken file)
+  setTimeout(() => { document.getElementById('load').style.display = 'none'; paint(); }, 2500);
+  if (new URLSearchParams(location.search).get('check') === '1') {
+    const ok = document.querySelectorAll('.win').length === 2 &&
+      document.getElementById('ra') && document.getElementById('rb') &&
+      chapters.length > 0 && !!document.getElementById('ttl').textContent;
+    document.title = ok ? 'CHECK OK tape' : 'CHECK FAIL tape';
+  }
+  if (new URLSearchParams(location.search).get('check') === 'ui') {
+    runUITests().catch(e => { document.title = 'UITESTS ERROR ' + e.message; });
+  }
+  if (new URLSearchParams(location.search).get('perf') === 'idle') {
+    setPlaying(true);
+    let frames = 0; const t0 = performance.now();
+    const step = () => {
+      frames++;
+      if (performance.now() - t0 < 3000) requestAnimationFrame(step);
+      else console.log('TAPEFPS', Math.round(frames / 3));
+    };
+    requestAnimationFrame(step);
+  }
+}).catch(() => {
+  document.getElementById('loadtxt').textContent = 'could not open this tape';
+});
+
+// ---- UI self-tests (?check=ui) -----------------------------------------
+async function runUITests() {
+  const results = [];
+  const check = async (name, fn) => {
+    try { await fn(); results.push(name + ' PASS'); }
+    catch (e) { results.push(name + ' FAIL ' + ((e && e.message) || e)); }
+  };
+  const assert = (c, m) => { if (!c) throw new Error(m || 'assert'); };
+  const pad = {index: 0, buttons: Array.from({length: 18}, () => ({pressed: false}))};
+  navigator.getGamepads = () => [pad];
+  const tap = i => {
+    pad.buttons[i].pressed = true;
+    padTick();
+    pad.buttons[i].pressed = false;
+    padTick();
+  };
+
+  await check('tape has two reels', async () => {
+    assert(document.querySelectorAll('.win .reel').length === 2, 'reels missing');
+  });
+  await check('reels stay still while paused', async () => {
+    setPlaying(false);
+    const st = getComputedStyle(document.getElementById('ra')).animationPlayState;
+    assert(st === 'paused', 'state ' + st);
+  });
+  await check('reels turn while playing', async () => {
+    setPlaying(true);
+    const st = getComputedStyle(document.getElementById('ra')).animationPlayState;
+    assert(st === 'running', 'state ' + st);
+    setPlaying(false);
+  });
+  await check('rate changes the reel period', async () => {
+    const before = getComputedStyle(document.getElementById('ra')).animationDuration;
+    setRate(2);
+    const after = getComputedStyle(document.getElementById('ra')).animationDuration;
+    assert(before !== after, 'duration unchanged');
+    setRate(1);
+  });
+  await check('picker opens and lists chapters', async () => {
+    openToc();
+    assert(tocOpen, 'did not open');
+    assert(tocRows.length >= 2, 'no rows');
+    closeToc();
+  });
+  await check('pad opens the picker and moves', async () => {
+    tap(8);
+    assert(tocOpen, 'pad did not open');
+    const before = tocSel;
+    tap(13);
+    assert(tocSel !== before, 'selection did not move');
+    tap(1);
+    assert(!tocOpen, 'pad B did not close');
+  });
+  await check('theme cycles', async () => {
+    const before = currentThemeId();
+    cycleTheme();
+    assert(currentThemeId() !== before, 'theme unchanged');
+    applyTheme(before);
+  });
+  await check('speed buttons click', async () => {
+    const before = rate;
+    document.getElementById('fast').click();
+    assert(rate > before, 'rate unchanged');
+    setRate(before);
+  });
+  await check('scrubber seeks', async () => {
+    seekFrac(0.5);
+    const d = duration || audio.duration || 0;
+    if (d) assert(Math.abs(audio.currentTime - d / 2) < d * 0.2, 'not applied');
+  });
+  await check('pad A toggles playback state', async () => {
+    const before = document.body.classList.contains('playing');
+    tap(0);
+    assert(document.body.classList.contains('playing') !== before, 'state unchanged');
+    audio.pause();
+  });
+
+  const pass = results.filter(r => r.includes(' PASS')).length;
+  document.title = 'UITESTS ' + pass + '/' + results.length + ' ' + results.join(' | ');
+}
+</script></body></html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = 'readaloud/1.0'
 
@@ -2379,13 +3398,16 @@ class Handler(BaseHTTPRequestHandler):
         root = self.server.root
         out = []
         for n in sorted(os.listdir(root)):
-            if n.lower().endswith('.epub'):
-                i = book_info(os.path.join(root, n))
-                out.append({
-                    'name': n, 'title': i['title'], 'author': i['author'],
-                    'subtitle': i['subtitle'], 'series': i['series'],
-                    'readaloud': i['readaloud'], 'cover': i['cover'],
-                })
+            low = n.lower()
+            if not (low.endswith('.epub') or low.endswith(AUDIO_EXTS)):
+                continue
+            i = media_info(os.path.join(root, n))
+            out.append({
+                'name': n, 'title': i['title'], 'author': i['author'],
+                'subtitle': i['subtitle'], 'series': i['series'],
+                'readaloud': i['readaloud'], 'cover': i['cover'],
+                'audio': bool(i.get('audio')),
+            })
         out.sort(key=lambda b: (b['title'] or b['name']).lower())
         return out
 
@@ -2453,6 +3475,29 @@ class Handler(BaseHTTPRequestHandler):
             with open(fname, 'rb') as f:
                 # revalidate: a half-written thumbnail must never stick for a day
                 return self._send(200, f.read(), ctype, {'Cache-Control': 'no-cache'})
+
+        if path.startswith('/label/'):
+            p = self._book_path(path[len('/label/'):])
+            if not p:
+                return self._send(404, b'no cover')
+            fname = label_file(p)
+            if not fname:
+                return self._send(404, b'no cover')
+            ctype = 'image/jpeg'
+            if fname.endswith('.cover'):
+                try:
+                    with open(os.path.join(CACHE_DIR, audio_info(p)['key'] + '.mime')) as f:
+                        ctype = f.read().strip() or ctype
+                except Exception:
+                    pass
+            with open(fname, 'rb') as f:
+                return self._send(200, f.read(), ctype, {'Cache-Control': 'no-cache'})
+
+        if path.startswith('/audio/'):
+            p = self._book_path(path[len('/audio/'):])
+            if not p or not is_audio(p):
+                return self._send(404, b'no audio')
+            return self._serve_audio(p)
 
         if path == '/api/storyteller':
             cfg = st_config()
@@ -2527,13 +3572,22 @@ class Handler(BaseHTTPRequestHandler):
             book = parse_qs(url.query).get('book', [''])[0]
             if not self._book_path(book):
                 return self._send(404, b'no such book')
-            page = PLAYER_HTML.replace('__BOOK__', json.dumps(book)).encode()
+            page = (TAPE_HTML if is_audio(book) else PLAYER_HTML)
+            page = page.replace('__BOOK__', json.dumps(book)).encode()
             return self._send(200, page)
 
         if path.startswith('/api/book/'):
             p = self._book_path(path[len('/api/book/'):])
             if not p:
                 return self._send(404, b'{}', 'application/json')
+            if is_audio(p):
+                i = audio_info(p)
+                data = {'audio': True, 'title': i['title'], 'subtitle': i['subtitle'],
+                        'author': i['author'], 'duration': i['duration'],
+                        'chapters': i['chapters'], 'cover': i['cover'],
+                        'section_count': len(i['chapters'])}
+                return self._send_gz(json.dumps(data).encode(), 'application/json',
+                                     cache='max-age=300')
             try:
                 _, raw, gz = load_book_cached(p)
             except Exception as e:
@@ -2552,6 +3606,52 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_entry(p, entry)
 
         self._send(404, b'not found')
+
+    def _serve_audio(self, book):
+        """Stream the m4b itself. Chromium seeks with Range requests, so this
+        must not read the file into memory; 64 KB chunks keep it at one buffer."""
+        try:
+            size = os.path.getsize(book)
+        except OSError:
+            return self._send(404, b'no audio')
+        if size <= 0:
+            return self._send(404, b'no audio')
+        ctype = 'audio/mp4' if book.lower().endswith(AUDIO_EXTS) else 'application/octet-stream'
+        start, end, code = 0, size - 1, 200
+        m = re.match(r'bytes=(\d*)-(\d*)$', (self.headers.get('Range') or '').strip())
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = int(m.group(2)) if m.group(2) else size - 1
+            else:
+                start = max(0, size - int(m.group(2) or 0))
+            end = min(end, size - 1)
+            if start > end or start >= size:
+                return self._send(416, b'', extra={'Content-Range': 'bytes */%d' % size})
+            code = 206
+        length = end - start + 1
+        self.send_response(code)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(length))
+        self.send_header('Accept-Ranges', 'bytes')
+        self.send_header('Cache-Control', 'no-cache')
+        if code == 206:
+            self.send_header('Content-Range', 'bytes %d-%d/%d' % (start, end, size))
+        self.end_headers()
+        if self.command == 'HEAD':
+            return
+        with open(book, 'rb') as f:
+            f.seek(start)
+            left = length
+            while left > 0:
+                chunk = f.read(min(65536, left))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+                left -= len(chunk)
 
     def _serve_entry(self, book, entry):
         try:

@@ -48,6 +48,16 @@
   parsers, the HTTP surface, range requests and a headless player load, with a
   `?check=1` hook that exercises the string/node word-timing path.
 
+- New: read aloud plays `.m4b`/`.m4a` audiobooks when there is no epub, drawing
+  an old compact cassette that fills the panel instead of the book view. The
+  cover is printed on the tape label (pre-cropped, warm paper tint, grain and
+  gloss), the two reels turn at the playback speed and freeze on pause, the
+  tape pack shrinks and fills with progress, and the counter shows elapsed
+  time. Metadata, cover and chapters come from the MP4 boxes (Nero `chpl` or
+  the QuickTime chapter track) with a cached parse, the file is streamed with
+  byte ranges, and the pad, scrubber, chapter picker, themes and remembered
+  position work as in the reader.
+
 - Perf: covers are cached as 96 px thumbnails, list images lazy-decode, and
   Storyteller series are collapsed and built only when opened. On the RG35XX H
   the library went from 672 MB resident to 431 MB, and the Storyteller section
