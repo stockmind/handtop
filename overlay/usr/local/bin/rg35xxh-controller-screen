@@ -1,27 +1,46 @@
 #!/usr/bin/python3
-"""External-control status screen (BT Controller and Wired Controller modes).
+"""External-control status screen (BT Controller, Wired Controller and Switch Controller modes,
+USB and Bluetooth).
 
 Full-screen layer-shell window over the desktop while the handheld is used as a controller for
 another device. Shows the connection state, the host's name, a live drawing of the handheld's
 controls (pixel art, drawn at half resolution and scaled 2x like the taskbar icons), battery,
 link info and how to stop. Reads JSON lines from the running service's status socket
-(rg35xxh-btpad or rg35xxh-usbpad) and closes itself
+(rg35xxh-btpad or rg35xxh-usbpad, also for Switch mode) and closes itself
 when that socket closes (the mode ended). Takes no input: every button goes to the other device.
+
+--saver (Battery saver, chosen in the External Controller app): redraws only when the picture
+changes, at most 15 per second, and switches the handheld's display off (wlopm, DSI-1) 30 s
+after the other device connected. Vol+ / Vol- (also F + Vol) and Power wake it for 10 s: the
+input daemon writes $XDG_RUNTIME_DIR/rg35xxh-extpad-wake on those presses (the only ones not sent
+to the other device), which this watches. It also comes back by itself when the connection
+drops, and always when this window ends (rg35xxh-extpad-dark marks the dark state; the input
+daemon switches the display on if this process died meanwhile).
 """
 import json
 import os
+import signal
 import socket
+import subprocess
 import sys
+import time
 
 import cairo
 import gi
 gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkLayerShell", "0.1")
-from gi.repository import Gdk, GLib, Gtk, GtkLayerShell  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk, GtkLayerShell  # noqa: E402
 
 STATUS_SOCKET = "/run/rg35xxh-extpad-status.sock"     # rg35xxh-btpad or rg35xxh-usbpad
 ICONS = "/usr/local/share/rg35xxh/icons"
+SAVER = "--saver" in sys.argv          # Battery saver (see the top)
+MAX_FPS = 15                           # Battery saver: redraws per second, at most
+DARK_AFTER_S, WAKE_S = 30, 10          # Battery saver: display off after connecting / after a wake
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+WAKE_FILE = os.path.join(RUNTIME, "rg35xxh-extpad-wake")   # written by the input daemon
+DARK_FLAG = os.path.join(RUNTIME, "rg35xxh-extpad-dark")   # exists while the display is off
+OUTPUT = "DSI-1"                       # the handheld's own display (an HDMI monitor stays on)
 W, H = 640, 480
 PW, PH = W // 2, H // 2          # pixel-art canvas (scaled 2x)
 
@@ -93,7 +112,8 @@ if LIGHT:                        # light background, dark ink (the drawn handhel
     BG = (0.875, 0.894, 0.925)                                   # #dfe4ec, the light wallpaper
     TEXT, DIM, OK, WARN = (0.17, 0.19, 0.23), (0.40, 0.44, 0.51), (0.15, 0.52, 0.27), (0.72, 0.43, 0.05)
 SUFFIX = "-light" if LIGHT else ""   # light-theme icon files (inputmode-*-light.png, battery-*-light.png)
-ACCENT = {"bt": (0.37, 0.50, 0.74), "usb": (0.75, 0.54, 0.36)}
+ACCENT = {"bt": (0.37, 0.50, 0.74), "usb": (0.75, 0.54, 0.36), "switch": (0.80, 0.33, 0.33),
+          "switch-bt": (0.80, 0.33, 0.33)}
 
 # HID report (rg35xxh-btpad): bytes 0-1 buttons, 2 hat (0-7, 8 = centre), 3-6 sticks LX LY RX RY,
 # 7-8 triggers. Button bits follow the Xbox layout; the handheld's face labels are Nintendo-style.
@@ -102,11 +122,17 @@ FACE = {"X": "xy", "A": "xb", "B": "xa", "Y": "xx"}      # physical label -> Xbo
 HAT_DIRS = {0: "u", 1: "ur", 2: "r", 3: "dr", 4: "d", 5: "dl", 6: "l", 7: "ul"}
 
 STATE_TEXT = {
-    "pairing": ("Ready to pair", "On your PC or phone: Bluetooth > Add device > \"Handtop Gamepad\""),
+    "pairing": ("Ready to pair", "On your PC or phone: Bluetooth > Add device > \"Handtop (Xbox)\""),
     "waiting": ("Waiting for {dev}", "Turn on Bluetooth there; it reconnects by itself"),
     "connected": ("Connected to {dev}", None),
     "cable": ("Connect the USB cable", "Right USB-C port (OTG2/DC) to the PC; the handheld charges meanwhile"),
     None: ("Starting…", None),
+}
+SWITCH_CABLE_HINT = "Right USB-C port to the Switch dock (USB-A), or through a USB-C OTG adapter"
+SWITCH_HINT = "F: Home (hold: quick settings)    F + Select: Capture"
+SWITCH_BT_TEXT = {      # Switch over Bluetooth (rg35xxh-switchbt): pairing happens on the Switch
+    "pairing": ("Ready to pair", "On the Switch: Controllers > Change Grip/Order"),
+    "waiting": ("Waiting for {dev}", "Wake the Switch; the handheld reconnects by itself"),
 }
 
 
@@ -166,6 +192,20 @@ class Screen(Gtk.Window):
         self.bat_icons = {}
         self.bat_tick = 0
         GLib.timeout_add(450, self.battery_tick)       # charging animation (same as the taskbar)
+        # Battery saver
+        self.draw_pending = False
+        self.last_draw = 0.0
+        self.drawn_key = None
+        self.dark = False
+        self.dark_timer = None
+        self.wake_monitor = None
+        if SAVER:
+            try:
+                open(WAKE_FILE, "a").close()
+                self.wake_monitor = Gio.File.new_for_path(WAKE_FILE).monitor_file(Gio.FileMonitorFlags.NONE, None)
+                self.wake_monitor.connect("changed", self.on_wake)
+            except (OSError, GLib.Error) as e:
+                print("rg35xxh-controller-screen: no wake file:", e, file=sys.stderr)
 
     # ------------------------------------------------------------ data
     def connect_status(self):
@@ -192,17 +232,99 @@ class Screen(Gtk.Window):
             return False
         self.buf += data
         *lines, self.buf = self.buf.split(b"\n")
+        old_state = self.st.get("state")
         for line in lines[-1:]:                       # only the newest state matters
             try:
                 self.st = json.loads(line)
             except ValueError:
                 pass
-        self.area.queue_draw()
+        if not SAVER:
+            self.area.queue_draw()
+            return True
+        state = self.st.get("state")
+        if state != old_state:
+            if state == "connected":
+                self.dark_in(DARK_AFTER_S)
+            else:                                     # connection lost / waiting: show it
+                self.cancel_dark()
+                self.light()
+        key = self.visual_key()
+        if key != self.drawn_key:                     # same picture as on screen: skip
+            self.drawn_key = key
+            self.schedule_draw()
         return True
 
     def redraw(self):
-        self.area.queue_draw()
+        if not self.dark:
+            self.area.queue_draw()
         return True
+
+    # ------------------------------------------------------------ battery saver
+    def visual_key(self):
+        """What the picture depends on: stick noise and values that draw the same pixels (the
+        caps move at most 6 px) don't trigger a redraw."""
+        buttons, hat, sticks, trig = self.report()
+        caps = tuple(round((a - 128) / 128 * 6) for a in sticks)
+        st = self.st
+        return (st.get("state"), st.get("device"), st.get("rssi"), st.get("rate"),
+                buttons, hat, caps, trig[0] > 0, trig[1] > 0)
+
+    def schedule_draw(self):
+        """At most MAX_FPS redraws per second; the newest state is drawn at the next slot.
+        Status updates come with every input report (up to hundreds per second): drawing each
+        one kept a core about 20 % busy (measured 2026-10-28), the biggest cost of the mode."""
+        if self.draw_pending or self.dark:
+            return
+        self.draw_pending = True
+        wait = max(0.0, self.last_draw + 1.0 / MAX_FPS - time.monotonic())
+        GLib.timeout_add(int(wait * 1000), self._draw_now)
+
+    def _draw_now(self):
+        self.draw_pending = False
+        self.last_draw = time.monotonic()
+        if not self.dark:
+            self.area.queue_draw()
+        return False
+
+    def dark_in(self, seconds):
+        self.cancel_dark()
+        self.dark_timer = GLib.timeout_add_seconds(seconds, self._go_dark)
+
+    def cancel_dark(self):
+        if self.dark_timer:
+            GLib.source_remove(self.dark_timer)
+            self.dark_timer = None
+
+    def _go_dark(self):
+        self.dark_timer = None
+        if self.dark or self.st.get("state") != "connected":
+            return False
+        self.dark = True
+        try:
+            open(DARK_FLAG, "w").close()
+        except OSError:
+            pass
+        wlopm("--off")
+        return False
+
+    def light(self):
+        if not self.dark:
+            return
+        self.dark = False
+        wlopm("--on")
+        try:
+            os.unlink(DARK_FLAG)
+        except FileNotFoundError:
+            pass
+        self.drawn_key = None
+        self.area.queue_draw()
+
+    def on_wake(self, monitor, f, other, event):
+        if event == Gio.FileMonitorEvent.DELETED:
+            return
+        self.light()
+        if self.st.get("state") == "connected":
+            self.dark_in(WAKE_S)
 
     # ------------------------------------------------------------ drawing
     def on_draw(self, widget, cr):
@@ -457,7 +579,7 @@ class Screen(Gtk.Window):
 
     def draw_header(self, cr):
         transport = self.st.get("transport", "bt")
-        path = f"{ICONS}/inputmode-{'bt' if transport == 'bt' else 'wired'}{SUFFIX}.png"
+        path = f"{ICONS}/inputmode-{'bt' if transport in ('bt', 'switch-bt') else 'wired'}{SUFFIX}.png"
         if (self.icon is None or self.icon_path != path) and os.path.exists(path):
             self.icon = cairo.ImageSurface.create_from_png(path)
             self.icon_path = path
@@ -471,9 +593,17 @@ class Screen(Gtk.Window):
             cr.restore()
         state = self.st.get("state")
         title, hint = STATE_TEXT.get(state, STATE_TEXT[None])
+        if transport == "switch-bt" and state in SWITCH_BT_TEXT:
+            title, hint = SWITCH_BT_TEXT[state]
+        if transport == "switch":
+            hint = SWITCH_CABLE_HINT if state == "cable" else hint or SWITCH_HINT
+        elif transport == "switch-bt":
+            hint = hint or SWITCH_HINT
         dev = self.st.get("device") or "your device"
         self.text(cr, title.format(dev=dev), 80, 46, 22, OK if state == "connected" else TEXT, bold=True)
-        sub = {"bt": "BT Controller", "usb": "Wired Controller (USB)"}.get(transport, "")
+        sub = {"bt": "BT Controller", "usb": "Wired Controller (USB)",
+               "switch": "Switch Controller (USB)",
+               "switch-bt": "Switch Controller (Bluetooth, experimental)"}.get(transport, "")
         self.text(cr, sub, 80, 64, 13, DIM)
         # battery (top right): the taskbar's pixel-art battery icon at 2x, then the percentage
         cap, charging = battery()
@@ -523,6 +653,13 @@ class Screen(Gtk.Window):
         self.text(cr, "Select + Start + L1 + R1 to stop", W / 2, 448, 15, DIM, align="center")
 
 
+def wlopm(arg):
+    try:
+        subprocess.run(["wlopm", arg, OUTPUT], timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        print("rg35xxh-controller-screen: wlopm:", e, file=sys.stderr)
+
+
 def battery():
     try:
         with open("/sys/class/power_supply/battery/capacity") as f:
@@ -543,9 +680,19 @@ if __name__ == "__main__":
     win = Screen()
     if "--demo" in sys.argv:          # fixed sample state, for screenshots / checking the drawing
         win.connect_status = lambda: False
-        usb = "--usb" in sys.argv
-        win.st = {"transport": "usb" if usb else "bt", "state": "connected", "device": "PC (USB)" if usb else "JASONPC",
+        usb = "--usb" in sys.argv or "--switch" in sys.argv
+        transport = ("switch" if "--switch" in sys.argv else "switch-bt" if "--switch-bt" in sys.argv
+                     else "usb" if usb else "bt")
+        win.st = {"transport": transport, "state": "connected",
+                  "device": {"switch": "Switch or PC (USB)", "usb": "PC (USB)",
+                             "switch-bt": "Nintendo Switch"}.get(transport, "JASONPC"),
                   "rate": 1000 if usb else 118, "rssi": None if usb else -64,
                   "report": [(1 << 1) | (1 << 4) | (1 << 7), 0, 2, 200, 90, 128, 128, 0, 255]}
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda *a: (Gtk.main_quit(), False)[1])
     win.show_all()
-    Gtk.main()
+    try:
+        Gtk.main()
+    finally:
+        win.cancel_dark()
+        win.light()                       # never leave the handheld's display off

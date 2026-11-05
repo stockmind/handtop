@@ -13,8 +13,9 @@ forwarded to the input daemon like Wired Controller mode). That needs two things
     the original is restored when the mode ends, also by ExecStopPost after a crash). Windows'
     driver binds only to product 0x0B13 and 0x0B20-0x0B27;
   - the real controller's HID report descriptor, byte for byte (below).
-Windows caches the descriptor per pairing: after switching profiles, remove "Handtop Gamepad" on
-the PC and pair again. Profile "generic" (RG35XXH_BTPAD_PROFILE=generic): the earlier plain HID
+Windows caches the descriptor per pairing: after switching profiles, remove the pad on
+the PC and pair again. Name on the other device: "Handtop (Xbox)" (up to v0.3.0: "Handtop
+Gamepad"; Windows shows the name it saw at pairing until the pad is paired again). Profile "generic" (RG35XXH_BTPAD_PROFILE=generic): the earlier plain HID
 gamepad, no identity change.
 
 Classic Bluetooth (BR/EDR) is switched off while the mode is on: otherwise Windows derives a
@@ -61,7 +62,7 @@ DSC_IFACE = "org.bluez.GattDescriptor1"
 ADV_IFACE = "org.bluez.LEAdvertisement1"
 AGENT_IFACE = "org.bluez.Agent1"
 
-NAME = "Handtop Gamepad"
+PROFILE_NAMES = {"xbox": "Handtop (Xbox)", "generic": "Handtop Gamepad"}   # short: fits the advertisement
 SOCKET = "/run/rg35xxh-extpad.sock"                 # shared with rg35xxh-usbpad (one runs at a time)
 STATUS_SOCKET = "/run/rg35xxh-extpad-status.sock"   # JSON lines for the status screen
 LAST_HOST = "/var/lib/rg35xxh/btpad-last-host"     # "address<TAB>name" of the last connected host
@@ -69,6 +70,7 @@ HID_UUIDS = ("00001124-", "00001812-")              # remote is an input device 
 EVENT = struct.Struct("<HHi")
 APPEARANCE_GAMEPAD = 0x03C4
 PROFILE = os.environ.get("RG35XXH_BTPAD_PROFILE", "xbox")   # "xbox" or "generic"
+NAME = PROFILE_NAMES.get(PROFILE, "Handtop Gamepad")
 XBOX_DEVICE_ID = "usb:045e:0b13:0509"        # Microsoft, Xbox Wireless Controller (model 1914), fw 5.9
 BT_CONF = "/etc/bluetooth/main.conf"
 # Connection interval asked for while BT Controller mode is on (units of 1.25 ms: 7.5-15 ms, like a
@@ -168,6 +170,8 @@ class Characteristic(dbus.service.Object):
         self.service, self.uuid, self.flags, self.descs = service, uuid, flags, []
         self.value = bytes(value)
         self.notifying = False
+        self.notify_fd = None             # set by AcquireNotify: notifications go straight to bluetoothd
+        self.notify_watch = None
         super().__init__(service.bus, self.path)
         service.chars.append(self)
 
@@ -175,8 +179,11 @@ class Characteristic(dbus.service.Object):
         return dbus.ObjectPath(self.path)
 
     def get_properties(self):
-        return {CHR_IFACE: {"Service": self.service.get_path(), "UUID": self.uuid, "Flags": self.flags,
-                            "Descriptors": dbus.Array([d.get_path() for d in self.descs], signature="o")}}
+        props = {"Service": self.service.get_path(), "UUID": self.uuid, "Flags": self.flags,
+                 "Descriptors": dbus.Array([d.get_path() for d in self.descs], signature="o")}
+        if "notify" in self.flags:        # offers AcquireNotify (see notify())
+            props["NotifyAcquired"] = dbus.Boolean(self.notify_fd is not None)
+        return {CHR_IFACE: props}
 
     @dbus.service.method(CHR_IFACE, in_signature="a{sv}", out_signature="ay")
     def ReadValue(self, options):
@@ -197,15 +204,47 @@ class Characteristic(dbus.service.Object):
         self.notifying = False
         log(f"notify off: {self.uuid}")
 
+    @dbus.service.method(CHR_IFACE, in_signature="ha{sv}")
+    def AcquireNotify(self, fd, options):
+        """BlueZ hands over a socket for notifications when a client subscribes: writing to it
+        skips D-Bus for every report (D-Bus signal + dbus-daemon + bluetoothd's D-Bus side cost
+        ~16 % of a core in BT Controller mode, measured 2026-10-28)."""
+        self._release_notify_fd()
+        self.notify_fd = fd.take()
+        os.set_blocking(self.notify_fd, False)
+        self.notify_watch = GLib.io_add_watch(self.notify_fd, GLib.IO_HUP | GLib.IO_ERR,
+                                              lambda *a: (self._release_notify_fd(), False)[1])
+        log(f"notify acquired (socket): {self.uuid}, mtu {int(options.get('mtu', 0))}")
+
+    def _release_notify_fd(self):
+        if self.notify_watch:
+            GLib.source_remove(self.notify_watch)
+            self.notify_watch = None
+        if self.notify_fd is not None:
+            try:
+                os.close(self.notify_fd)
+            except OSError:
+                pass
+            self.notify_fd = None
+            log(f"notify socket released: {self.uuid}")
+
     @dbus.service.signal(PROP_IFACE, signature="sa{sv}as")
     def PropertiesChanged(self, interface, changed, invalidated):
         pass
 
     def notify(self, value):
-        # Always emit: BlueZ delivers it to every client that enabled notifications, including
-        # bonded clients whose subscription it remembered from an earlier session (Windows does
-        # not subscribe again after reconnecting).
         self.value = bytes(value)
+        if self.notify_fd is not None:
+            try:
+                os.write(self.notify_fd, self.value)
+                return
+            except BlockingIOError:
+                return                    # link busy: the next report carries the newest state
+            except OSError:
+                self._release_notify_fd()
+        # No socket (yet): emit the value. BlueZ delivers it to every client that enabled
+        # notifications, including bonded clients whose subscription it remembered from an
+        # earlier session (Windows does not subscribe again after reconnecting).
         self.PropertiesChanged(CHR_IFACE, {"Value": dbus.Array(self.value, signature="y")}, [])
 
     @dbus.service.method(PROP_IFACE, in_signature="s", out_signature="a{sv}")

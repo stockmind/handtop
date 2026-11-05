@@ -1,13 +1,15 @@
 # External Controller
 
-**Apps → External Controller** (`rg35xxh-external-controller`): use the handheld as a game controller for a PC or phone. **Bluetooth** (BT Controller mode, `rg35xxh-btpad`; v0.2.0, an Xbox Wireless Controller since the next release) or **USB cable** (Wired Controller mode, `rg35xxh-usbpad`), with a status screen (`rg35xxh-controller-screen`) while it runs.
+**Apps → External Controller** (`rg35xxh-external-controller`): use the handheld as a game controller for a PC, phone or Nintendo Switch. **Bluetooth: Xbox** (BT Controller mode, `rg35xxh-btpad`; v0.2.0, an Xbox Wireless Controller since v0.3.0), **Bluetooth: Switch** (Switch Controller mode over Bluetooth, `rg35xxh-switchbt`, experimental), **USB cable: Xbox** (Wired Controller mode, `rg35xxh-usbpad`) or **USB cable: Switch** (Switch Controller mode, `rg35xxh-usbpad --switch`), with a status screen (`rg35xxh-controller-screen`) while it runs. The app shows two cards, Bluetooth and USB cable (each with its icon on top), each split into two halves to pick from: Xbox above (a monitor and keyboard) and Switch below (a TV and a gamepad); those two icons are generic on purpose, no brand logos (`tools/icons/gen_usb_target_icons.py`). Icons follow the Handtop theme (`-light` files). Picking Bluetooth: Switch while Bluetooth devices are connected to the handheld first lists them and asks (they disconnect, see below). Above the cards, a **Battery saver** switch (off by default; see "Battery saver" below).
+
+> **Disclaimer.** These modes present the USB or Bluetooth identity of compatible controllers (Microsoft Xbox, HORI, Nintendo Pro Controller) for interoperability only. Handtop is not affiliated with or endorsed by those companies; the names are their trademarks. A console, driver or firmware update may stop a mode working; check the terms of online services you use it with. See the [README](../../README.md#disclaimer).
 
 ## Bluetooth: BT Controller mode
 
 ### Use
 
-1. On the handheld: **Apps → External Controller**. The handheld switches to BT Controller mode (the taskbar's input-mode icon shows a controller with signal waves, blue with rainbow stripes) and appears as **"Handtop Gamepad"**.
-2. First time only, on the other device: Bluetooth → add device → **Handtop Gamepad** (Windows: Settings → Bluetooth & devices → Add device → Bluetooth). No PIN.
+1. On the handheld: **Apps → External Controller**. The handheld switches to BT Controller mode (the taskbar's input-mode icon shows a controller with signal waves, blue with rainbow stripes) and appears as **"Handtop (Xbox)"**.
+2. First time only, on the other device: Bluetooth → add device → **Handtop (Xbox)** (Windows: Settings → Bluetooth & devices → Add device → Bluetooth). No PIN.
 3. Play. Check it on Windows with `joy.cpl` ("Set up USB game controllers").
 4. Press **Select + Start + L1 + R1** together to return to desktop mode; this also ends BT Controller mode. (Same combo as Moonlight's quit; holding Start no longer exits here, so a long Start press reaches the other device.)
 
@@ -15,9 +17,11 @@ BT Controller mode is separate from gamepad mode: in gamepad mode the controls d
 
 Next time, just open BT Controller again: the paired device reconnects by itself within a few seconds.
 
-**Re-pairing:** remove "Handtop Gamepad" on the other device **and** on the handheld (Bluetooth tray → Devices), then pair again. If only one side forgets the pairing, the other refuses it.
+**Re-pairing:** remove "Handtop (Xbox)" (or the older "Handtop Gamepad") on the other device **and** on the handheld (Bluetooth tray → Devices), then pair again. If only one side forgets the pairing, the other refuses it.
 
-**Updating from v0.2.0:** the handheld now presents itself as an Xbox controller, and Windows remembers the old (generic) description per pairing. Remove "Handtop Gamepad" on the PC once and pair it again. Windows may also list a second "Handtop Gamepad" with a phone icon: that is the handheld's normal Bluetooth identity; ignore or remove it.
+**Names on the host (2026-10-28):** each mode is its own device on the PC or Switch (different radio type or USB identity, so one pairing can't switch between them), named after the mode: **"Handtop (Xbox)"** for Bluetooth: Xbox and USB cable: Xbox, **"Handtop (Switch)"** for USB cable: Switch, and **"Pro Controller"** for Bluetooth: Switch (the Switch accepts only that exact name). Short on purpose: a Bluetooth LE advertisement (31 bytes) has room for 16 characters of name next to the flags, the gamepad appearance and the two service IDs; "Handtop (Xbox)" is 14. Up to v0.3.0 the Bluetooth one was "Handtop Gamepad": Windows keeps showing the name it saw at pairing until the pad is removed and paired again (it works either way).
+
+**Updating from v0.2.0:** the handheld now presents itself as an Xbox controller, and Windows remembers the old (generic) description per pairing. Remove "Handtop Gamepad" on the PC once and pair it again. Windows may also list a second entry with a phone icon: that is the handheld's normal Bluetooth identity; ignore or remove it.
 
 ### What the other device sees
 
@@ -26,6 +30,23 @@ An **Xbox Wireless Controller** (Series X|S, model 1914) over Bluetooth LE. Wind
 Tested on Windows 11 (2026-10-21): driver, all controls, vibration. Android and Linux have drivers for this controller too (not tested yet).
 
 Fallback: `RG35XXH_BTPAD_PROFILE=generic` in the service's environment (`systemctl edit rg35xxh-btpad`) gives the v0.2.0 behaviour, a generic BLE gamepad (buttons 1–10, hat, X/Y, Z/Rz, Rx/Ry for the triggers) with no vibration; re-pair after switching.
+
+### Better compatibility (classic Bluetooth)
+
+A switch in the Bluetooth card, **"Xbox: better compatibility"**, off by default (remembered in `~/.config/rg35xxh/external-controller`, `xbox-bt = le | classic`). With it on, **Bluetooth → Xbox** presents an **Xbox One S controller** (model 1708, `045e:02fd`) over **classic Bluetooth** instead of the Series X|S controller over Bluetooth LE. Switching it on shows a pop-up: it is a separate pairing on the host (remove "Handtop (Xbox)" there and add it again), and Bluetooth devices connected to the handheld disconnect while it runs (the app lists them first, as for Bluetooth: Switch).
+
+Why: some PC Bluetooth adapters pair classic HID gamepads (DualShock 4, 8BitDo, the Xbox One S controller) fine but fail the Bluetooth LE pairing BT Controller mode needs. Found 2026-10-29 with a fake "CSR 5.0" clone dongle (`USB\VID_0A12&PID_0001`, REV 8891, claims LMP 9 / Bluetooth 5.0): Windows found "Handtop Gamepad" but every pairing ended in "try connecting your device again", while the user's own DualShock 4, 8BitDo SF30 and Xbox One S controllers worked with it. All three are classic Bluetooth; the Series X|S controller this mode copies is Bluetooth LE.
+
+How (`rg35xxh-switchbt --xbox`, `rg35xxh-btclassic.service`): the classic-Bluetooth machinery of Switch Controller mode over Bluetooth (bluetoothd restarted with `Class = 0x000508`, `DeviceID = usb:045e:02fd:0408` and without its input / hostname plugins, HID record, our own L2CAP channels, just-works pairing agent, reconnect to the last host in `/var/lib/rg35xxh/btclassic-host`), with:
+- the Xbox One S controller's classic-Bluetooth HID report descriptor, 334 bytes (Mystfit/ESP32-BLE-CompositeHID, MIT, from DJm00n/ControllersInfo's dump; byte-identical to the dump in xpadneo's docs);
+- input report 1 (16 bytes: sticks u16, triggers 10 bit, hat, 15 buttons, View as AC Back) on every change, at most one per 8 ms;
+- vibration from output report 3 (same layout as BT Controller mode's report 3), through the input daemon's motor gate;
+- battery in report 4, the Xbox battery byte (online, charging, rechargeable pack, level 0-3: hosts show only four steps). A first version sent the raw percentage; iOS read 84 % as 70 %.
+- Name "Handtop (Xbox)"; the input daemon sees `hello bt` (BT Controller mode, F not forwarded); status screen as in BT Controller mode.
+
+Both Xbox options use the handheld's one Bluetooth address, so a host keeps only one of them: switching the option means pairing again there.
+
+Tested 2026-10-29 (DDR4): pairs with an iPhone (iOS treats it as an Xbox controller), Minecraft with all buttons working, automatic reconnection after restarting the mode. Not yet tested: a Windows PC (the case it is for), vibration.
 
 ### Trade-off: classic Bluetooth pauses
 
@@ -47,6 +68,29 @@ Why: with classic Bluetooth on, Windows also derives a classic pairing key from 
 
 Tested 2026-10-21 with Windows 11: pairing, all controls in `joy.cpl`, automatic reconnection after leaving and re-entering the mode; with the Xbox identity: Xbox driver, vibration, identity restored when the mode ends.
 
+## Battery saver
+
+A switch above the cards in the app, **off by default** (Standard: the status screen stays on), remembered in `~/.config/rg35xxh/external-controller` (`power = standard | saver`). Switching it on shows a pop-up explaining how to get the screen back. It applies to all four modes.
+
+With Battery saver on:
+- **The handheld's display switches off 30 s after the other device connects** (`wlopm --off DSI-1`; an HDMI monitor stays on). **Vol+ / Vol−** (also F + Vol) and **Power** show it for 10 s: they are the only presses not sent to the other device. Vol still changes the volume; Power on a dark screen only wakes it (tap again for the power menu). It also comes back by itself when the connection drops (state "waiting" / "pairing" / "cable") and whenever the mode ends.
+- **The status screen redraws only when the picture changes**, at most 15 times a second (`visual_key`: stick caps by whole pixels, buttons, triggers, link info).
+
+How: the app starts `rg35xxh-controller-screen --saver`. The input daemon writes `$XDG_RUNTIME_DIR/rg35xxh-extpad-wake` on Vol / F + Vol / Power while an external mode is on; the screen watches that file (GIO file monitor, no polling). `rg35xxh-extpad-dark` exists while the display is off; the screen switches it back on when it ends (also on SIGTERM), and if it died meanwhile, the input daemon does when the mode ends.
+
+Always on, in both settings: Bluetooth: Xbox offers BlueZ a socket for its input notifications (`AcquireNotify`), which skips D-Bus for every report. BlueZ only uses it when the PC subscribes to notifications; Windows remembers its subscription when it reconnects to an existing pairing and then the D-Bus path is used as before (checked 2026-10-28: a reconnect used D-Bus).
+
+Measured 2026-10-28 (DDR4, `tools/measure-cpu.py`, 60 s while playing on a PC; % of 400 % = 4 cores; idle desktop 28 %; the battery's current reading is fixed on this unit, so CPU is what can be measured; the display and backlight being off saves more on top):
+
+| Mode | Standard | Battery saver |
+|---|---|---|
+| Bluetooth: Xbox | 70 % (status screen 19 % of a core, compositor 4 %, btpad + D-Bus + bluetoothd 15 %) | 33 % |
+| Bluetooth: Switch | 57 % (status screen 18 %) | 33 % |
+| USB cable: Switch | 60 % (status screen 21 %) | not measured |
+| USB cable: Xbox | 60 % (status screen 21 %) | not measured |
+
+With the display off, a mode costs about 5 % above the idle desktop. Not done (small gains, kept for later): taking CPU cores offline or limiting the frequency (the CPU already spends ~70 % of the time at its lowest 480 MHz), Wi-Fi power save or off (would drop SSH / Tailscale).
+
 ## Status screen
 
 While the mode is on, the handheld's screen shows a full-screen status page (`rg35xxh-controller-screen`, opened by the External Controller app, closed when the mode ends):
@@ -65,14 +109,14 @@ Data: `rg35xxh-btpad` publishes JSON lines on `/run/rg35xxh-extpad-status.sock` 
 
 ## USB cable: Wired Controller mode
 
-**Apps → External Controller → USB cable.** The handheld becomes a **wired Xbox 360 controller** for a PC: Windows uses its built-in Xbox driver (no install), XInput-only games work directly, and the PC reads the controls at ~1000 reports/s. Vibration requested by the game is played on the handheld's motor. The handheld charges from the PC at the same time. Select + Start + L1 + R1 ends it, like BT Controller mode; the taskbar shows the wired icon and the status screen says "Connected to PC (USB)".
+**Apps → External Controller → USB cable: Xbox.** The handheld becomes a **wired Xbox 360 controller** for a PC: Windows uses its built-in Xbox driver (no install), XInput-only games work directly, and the PC reads the controls at ~1000 reports/s. Vibration requested by the game is played on the handheld's motor. The handheld charges from the PC at the same time. Select + Start + L1 + R1 ends it, like BT Controller mode; the taskbar shows the wired icon and the status screen says "Connected to PC (USB)".
 
 - **Right USB-C port only (OTG2/DC).** The H700 has a single USB controller that can act as a device (MUSB, `musb-hdrc.5.auto`, PHY0 with ID detection and VBUS from the charger input); the left port (OTG1) is on EHCI/OHCI, which are host-only. Software cannot change this.
 - **Never automatic**: the port keeps its other uses (charging, USB devices on the handheld); the mode starts only from the app.
-- **One connection at a time**: `rg35xxh-btpad.service` and `rg35xxh-usbpad.service` conflict; the app stops the other one first.
+- **One connection at a time**: `rg35xxh-btpad.service`, `rg35xxh-usbpad.service` and `rg35xxh-switchpad.service` conflict; the app stops the others first.
 
 How it works:
-- `rg35xxh-usbpad` (root, `rg35xxh-usbpad.service`) creates a USB gadget with configfs: VID/PID 045e:028e (the Xbox 360 wired controller, so Windows binds its driver), one vendor interface (class ff/5d/01) with interrupt IN 0x81 and OUT 0x01 and the Xbox 360 class descriptor (type 0x21, 17 bytes) that tells the driver which endpoints to use. Strings say "Handtop Controller", so `joy.cpl` lists it as "Controller (Handtop Controller)" (the Xbox driver's naming; a real pad says "XBOX 360 For Windows"). Kept on purpose (Jason, 2026-10-26); Device Manager shows "Xbox 360 Controller for Windows".
+- `rg35xxh-usbpad` (root, `rg35xxh-usbpad.service`) creates a USB gadget with configfs: VID/PID 045e:028e (the Xbox 360 wired controller, so Windows binds its driver), one vendor interface (class ff/5d/01) with interrupt IN 0x81 and OUT 0x01 and the Xbox 360 class descriptor (type 0x21, 17 bytes) that tells the driver which endpoints to use. Product string "Handtop (Xbox)" (was "Handtop Controller" until 2026-10-28), so `joy.cpl` lists it as "Controller (Handtop (Xbox))" (the Xbox driver's naming, "Controller (<product>)"; a real pad says "XBOX 360 For Windows"); Device Manager shows "Xbox 360 Controller for Windows".
 - The interface is served from userspace through FunctionFS. The kernel's built-in FunctionFS rejects the 17-byte 0x21 descriptor (it only knows 0x21 as the 9-byte HID descriptor), and without it Windows loads its driver but never talks to the device. `usb_f_fs_xinput.ko` is a renamed copy of FunctionFS (filesystem `functionfs_xinput`, USB function `ffsxi`) that also accepts class descriptors on vendor-specific interfaces; it is generated from the ROCKNIX kernel's `f_fs.c` and built against the same tree by `build/06c-ffs-xinput.sh`.
 - The OUT endpoint must be 0x01: that is the number the MUSB controller assigns, and the class descriptor must name the same one (0x02 left the driver silent).
 - Input: the input daemon sends its gamepad events to `/run/rg35xxh-extpad.sock`, shared by both services (they introduce themselves with `hello bt` / `hello usb`); a report is sent to the PC on every change. Vibration (`00 08 00 <big> <small>` from the PC) goes back to the daemon as `rumble <big> <small>`, played at the stronger of the two on the single motor. Status for the screen: `/run/rg35xxh-extpad-status.sock` (`transport` = `usb`, `state` = `cable` | `connected`).
@@ -80,7 +124,84 @@ How it works:
 
 Tested 2026-10-21 with Windows 11: "Xbox 360 Controller for Windows" in Device Manager, the player-1 light command, ~1000 reports/s.
 
+## USB cable: Switch Controller mode
+
+**Apps → External Controller → USB cable: Switch.** The handheld becomes a **wired Nintendo Switch controller**. It poses as HORI's licensed wired pad (Pokkén Tournament DX Pro Pad), which the Switch accepts with no handshake and no setting; on a PC it is an ordinary HID gamepad that SDL (Steam, Ryujinx and other emulators) knows by its ID. Select + Start + L1 + R1 ends it, as in the other modes; the taskbar shows the wired icon and the status screen says "Connected to Switch or PC (USB)" plus the Home / Capture hint.
+
+**Connecting** (right USB-C port only, as for Wired Controller mode):
+- **Switch in the dock:** an A-to-C cable from a USB-A port of the dock to the handheld.
+- **Switch without the dock (handheld mode, Lite):** a USB-C OTG adapter (C plug to A socket) in the Switch, then the same A-to-C cable. A C-to-C cable does not work: the handheld's port lacks the USB-C resistors that make a USB-C host switch on its power (the same reason PD chargers don't charge it). The handheld then charges from the Switch's battery.
+- If the Switch doesn't react, open **Controllers → Change Grip/Order** and press L + R.
+- **Ryujinx (PC):** choose the pad ("Handtop (Switch)") as a **Pro Controller**, then rebind A, B, X and Y once in Configure: its default mapping swaps them for this pad (SDL already reports it by Nintendo labels, and Ryujinx's default swaps Xbox-style positions on top). Home and Capture arrive (`joy.cpl` buttons 13 / 14) but Ryujinx has no Home menu, so they do nothing there.
+
+**Controls:**
+
+| Handheld | Switch |
+|---|---|
+| A / B / X / Y | A / B / X / Y (the handheld's labels are printed where the Switch has them, so by label and by position agree) |
+| L1 / R1, L2 / R2 | L / R, ZL / ZR (digital, as on the handheld) |
+| Select / Start | − / + |
+| L3 / R3, D-pad, sticks | Same |
+| **F (tap)** | **Home** |
+| **F (hold 0.6 s)** | Home held (quick settings), until F is released |
+| **F + Select** | **Capture** (held as long as Select: hold for a video) |
+| F + Vol | Brightness, as always (no Home) |
+
+F does this only in Switch Controller mode. In the Xbox modes F stays unforwarded: Home there would be the Xbox Guide button, which opens the Game Bar on Windows.
+
+**Not available:** vibration (the HORI pad has no motor, so the Switch sends none), motion controls (the handheld has no motion sensor), NFC / amiibo, and the player lights. All of these need the Pro Controller's own protocol (see "Options considered").
+
+How it works:
+- `rg35xxh-switchpad.service` runs `rg35xxh-usbpad --switch`. It conflicts with `rg35xxh-btpad.service` and `rg35xxh-usbpad.service` (one connection at a time) and uses the same gadget path, FunctionFS mount, sockets and teardown as Wired Controller mode, so a crash of either leaves nothing the other can't clean up.
+- **Gadget:** VID/PID 0f0d:0092, bcdDevice 1.00, class at interface level; one HID interface (03/00/00) with the HID descriptor, interrupt IN 0x81 and OUT 0x01 (64 bytes, 5 ms at full speed, 1 ms at high speed). It runs at high speed: the real pad is full speed, but the MUSB controller refuses to start a gadget limited to full speed (`max_speed = full-speed` → `udc_start` −22, tested 2026-10-28). Strings: "Handtop" / "Handtop (Switch)".
+- **Report descriptor:** HORI's, 86 bytes (as used by the open Switch fight-stick projects): 16 buttons, a 4-bit hat plus 4 padding bits, X Y Z Rz (left X/Y, right X/Y) 0–255 with centre 128, one vendor byte; an 8-byte vendor output report, read and ignored.
+- **Input report**, 8 bytes: buttons as a 16-bit little-endian field (Y 0, B 1, A 2, X 3, L 4, R 5, ZL 6, ZR 7, − 8, + 9, L3 10, R3 11, Home 12, Capture 13), hat (0 = up, clockwise, 8 = centred), LX LY RX RY (Y grows downwards), vendor 0. Sent on every change and at least every 8 ms, as a real pad streams its state (the write returns when the host has read it).
+- **ep0:** the HID class requests come to the service through FunctionFS (`SETUP` events): GET_DESCRIPTOR for the report and HID descriptors, GET_REPORT (current state), GET_IDLE / GET_PROTOCOL, and SET_REPORT / SET_IDLE / SET_PROTOCOL (acknowledged). Anything else is stalled. Wired Controller mode still stalls everything on ep0, as before.
+- **Input daemon:** the service introduces itself with `hello switch`; the daemon then turns on F's Home / Capture ([../services/input-daemon.md](../services/input-daemon.md)) and uses the `rg35xxh-wired-mode` flag (taskbar icon, autosleep, Bluetooth tray behave as in Wired Controller mode). Home is sent as `BTN_MODE`, Capture as `KEY_RECORD`.
+- Logs: `journalctl -u rg35xxh-switchpad`.
+
+Options considered:
+- **Pro Controller emulation** (057e:2009): would add vibration and the player lights. It needs Nintendo's USB handshake, replies to the Switch's subcommands and fake SPI flash contents (calibration, colours), and the user has to turn on "Pro Controller Wired Communication". Much more code to get right and keep working across firmware updates, for features the handheld mostly lacks (no motion sensor). Kept as a possible later step.
+- **Bluetooth:** done separately, as a Pro Controller (next section). Wired came first because it needs no handshake.
+- **Home on a combo instead of F:** any combo of the controls the Switch sees would take a button combination away from games. F is never sent otherwise, so it was free; the cost is that an accidental F tap opens the Home menu.
+
+Tested 2026-10-28 on a DDR4 RG35XX H with Windows 11: enumerates as "Handtop Controller" (now "Handtop (Switch)"; configured, high speed, ~110–125 reports/s, ~2 % of one core while idle); every button, the hat and both sticks in `joy.cpl` (A = 3, B = 2, X = 4, Y = 1; F tap / hold = 13, F + Select = 14); unplug and replug; Select + Start + L1 + R1; switching straight to Wired Controller mode and back; starting it twice; recovery after the service was killed (the next start removes the leftover gadget). Ryujinx: Mario Kart 8 Deluxe played fine as a Pro Controller (after rebinding A/B/X/Y once). Unit tests for F / Home / Capture. **Not tested on a real Switch** (no unit at hand); the identity and report descriptor are the ones the open Switch pad projects use on real consoles.
+
+## Bluetooth: Switch Controller mode (experimental)
+
+**Apps → External Controller → Bluetooth: Switch.** The handheld becomes a **Nintendo Switch Pro Controller** over Bluetooth. The Switch only accepts Nintendo's own controllers over Bluetooth, so the handheld follows the Pro Controller's protocol. **Experimental:** tested with a PC (Windows 11, Ryujinx via SDL, which runs the same setup sequence as a Switch), **not with a real Switch** yet.
+
+**Use:**
+1. If Bluetooth devices are connected to the handheld, the app lists them first: Bluetooth restarts as a Pro Controller, so they disconnect. Keyboards, mice and controllers on classic Bluetooth stay off until the mode ends (bluetoothd runs without its input plugin); headphones and BLE devices may need reconnecting afterwards. Start or cancel.
+2. First time: on the Switch, **Controllers → Change Grip/Order**; the handheld pairs as "Pro Controller". On a PC: Bluetooth → Add device → Pro Controller.
+3. Later: start the mode and wake the Switch; the handheld reconnects to the last Switch (or PC) by itself.
+4. Controls as in Switch Controller mode over USB (by label, F = Home, F + Select = Capture). **Vibration works** (strength only, on the single motor, through the input daemon's gate). No motion controls (no sensor; the motion data reads zero), no NFC.
+5. Select + Start + L1 + R1 ends it; bluetoothd gets its own identity and plugins back.
+
+**Re-pairing:** remove "Pro Controller" on the PC / Switch **and** remove that host on the handheld (Bluetooth tray → Devices), then pair again. If only the host forgets it, the handheld keeps calling the old host ("Host is down" in the log) and the new pairing can be slow to appear or fail (seen 2026-10-28).
+
+**Same host for both Bluetooth modes:** both use the handheld's Bluetooth address, and Windows keeps one device per address, so pairing "Handtop (Xbox)" and "Pro Controller" with the same PC may replace one with the other (suspected, not confirmed). A PC for Xbox mode and a Switch for Switch mode don't meet this. Possible fix (not done): a separate static random address for Bluetooth: Xbox, which runs without classic Bluetooth anyway (existing Xbox pairings would need re-pairing once).
+
+**How it works** (`rg35xxh-switchbt`, root, `rg35xxh-switchbt.service`; written from public protocol notes: dekuNukem's Nintendo_Switch_Reverse_Engineering, and the clean-room notes of cajunpanda/bluetooth-nes-advantage, an ESP32 pad tested on Switch 1 and 2; no code from GPL implementations):
+- **Identity:** bluetoothd is restarted with a runtime copy of `main.conf` (`Class = 0x000508`, `DeviceID = usb:057e:2009:0001`) and without its `input` plugin (it would own the HID channels, PSM 17 / 19) and its `hostname` plugin (it sets the class from the chassis: "handset" = phone, `0x00020c`). Adapter alias "Pro Controller" (the exact name matters). `ExecStopPost=--restore` puts everything back after a crash, as in BT Controller mode.
+- **Discoverable as a gamepad:** while no host is connected the adapter is limited discoverable, which adds the 0x2000 bit: class `0x002508` exactly, which a Switch 2 requires. The Switch and PCs search with the *general* inquiry code, but this Bluetooth chip answers only one code (Read Number Of Supported IAC = 1) and the kernel's limited mode set it to the limited one: invisible. A raw HCI command (Write Current IAC LAP = GIAC) sets the general code back; the class keeps its bit. Re-armed every 170 s (limited mode needs a timeout).
+- **SDP:** an HID record (gamepad subclass, our own report descriptor with the report IDs and sizes the protocol uses; SSR fields 0xFFFF) registered through BlueZ's ProfileManager1. The HID channels are our own L2CAP sockets.
+- **Protocol:** output report 0x01 (rumble + subcommand) / 0x10 (rumble). Every subcommand is answered at once with input report 0x21: device info (Pro Controller, firmware 3.48, our address), SPI flash reads from a built-in fake flash image (factory stick calibration centred at 0x800 ± 0x600, IMU defaults, colours, stick parameters; user calibration erased so the factory values are used), input mode, IMU / vibration / lights (acknowledged); unknown ones get a plain ACK (silence stalls the Switch). Simple report 0x3F every 100 ms until the host picks a mode, then the full report 0x30 every 15 ms (~66/s), timer +1 per report. The handheld never asks for sniff mode itself (a real pad only accepts it).
+- **Vibration:** the strongest HD-rumble amplitude of the four bands → "rumble <big> <small>" to the input daemon (≤ 20/s, only while the host enabled vibration).
+- **Reconnect:** passive at first (1.5 s), then the handheld connects to the remembered host (`/var/lib/rg35xxh/switchbt-host`): 4 tries 5 s apart, then every 30 s for 3 minutes, then it only listens. Paired hosts are marked trusted. A pairing agent accepts just-works pairing (BlueZ's default would refuse it).
+- **Status screen:** transport `switch-bt`: "Ready to pair" with the Change Grip/Order hint, "Waiting for <Switch>", "Connected to <Switch>", reports/s; the Home / Capture hint while connected. Input daemon: `hello switch-bt`, flag `rg35xxh-bt-mode` (taskbar Bluetooth icon).
+- Logs: `journalctl -u rg35xxh-switchbt` (each setup command once per connection, mode changes, lights).
+
+**Tested** 2026-10-28 (DDR4 RG35XX H, Windows 11 + Ryujinx): pairing as "Pro Controller", the full setup sequence (device info, lights, SPI reads, vibration on, mode 0x30, Home light, IMU), Mario Kart 8 Deluxe smooth, automatic reconnection after restarting the mode, no sniff mode on the link (btmon), ~66 reports/s. Vibration in Mario Kart froze the handheld: the motor driver bug fixed in [../kernel.md](../kernel.md#rocknix-singleadc-joypadko-replaced-rumble-fix); with the fixed driver, an hour of Mario Kart with vibration (Ryujinx, Enable Rumble) ran without a problem.
+
+**Not tested yet:**
+- A real Switch 1 / Switch 2 (the pairing timing in Change Grip/Order is the usual trouble spot: reported for joycontrol on laptops' built-in radios); please report.
+- The app's warning with Bluetooth devices actually connected (none were during testing): it should list them and offer Cancel / Start Switch mode.
+- Bluetooth LE mice and keyboards while the mode is on: they should keep working, since BlueZ's "hog" plugin (LE input) stays loaded and only "input" (classic HID) is switched off, but they still drop once when bluetoothd restarts.
+
 ## Vibration safety
+
+**Root cause found and fixed (2026-10-28):** the lock-ups below came from ROCKNIX's motor driver taking a mutex in atomic context; Handtop now ships a fixed build of it ([../kernel.md](../kernel.md#rocknix-singleadc-joypadko-replaced-rumble-fix)). The input daemon's gate described here stays as a second line of defence.
 
 The motor is driven by ROCKNIX's joypad driver (`rocknix-singleadc-joypad`, memless force feedback on one PWM). Feeding it **endless effects** (replay length 0) that change rapidly froze the whole handheld three times during development (SSH dead, only a 10 s power-off helped); a web controller tester's "infinite vibration" over Wired Controller mode was enough to trigger it. So the input daemon never hands the driver an endless effect:
 

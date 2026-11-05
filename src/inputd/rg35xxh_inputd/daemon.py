@@ -6,9 +6,10 @@ Devices (grabbed exclusively while running):
   device with KEY_VOLUMEUP    volume keys (gpio-keys)
   device with KEY_POWER       power button (AXP717)
 Virtual devices (uinput): mouse, keyboard, and in gamepad mode an Xbox 360 pad.
-External controller modes (BT Controller: rg35xxh-btpad, wired: rg35xxh-usbpad) use the gamepad
-mapping too, but send the pad events over a Unix socket to that service instead of creating the
-local pad, so apps on the handheld see nothing. Only one of the two services runs at a time.
+External controller modes (BT Controller: rg35xxh-btpad, wired: rg35xxh-usbpad, Switch:
+rg35xxh-usbpad --switch over USB, rg35xxh-switchbt over Bluetooth) use the gamepad mapping too, but send the pad events over a Unix socket to
+that service instead of creating the local pad, so apps on the handheld see nothing. Only one of
+the services runs at a time.
 """
 import json
 import logging
@@ -46,18 +47,34 @@ HW_AXES = {E.ABS_X: "lx", E.ABS_Y: "ly", E.ABS_RX: "rx", E.ABS_RY: "ry"}
 TERMINALS = ("foot", "footclient", "org.codeberg.dnkl.foot", "xterm", "uxterm", "kitty", "alacritty")
 STATUS_LED = "/sys/class/leds/red:status"
 EXT_SOCKET = "/run/rg35xxh-extpad.sock"        # created by rg35xxh-btpad / -usbpad (root, group input)
-# Messages from the service: b"hello bt" | b"hello usb" first, later b"rumble <big> <small>" (0-255).
+# Messages from the service: b"hello bt" | b"hello usb" | b"hello switch" | b"hello switch-bt"
+# first, later b"rumble <big> <small>" (0-255).
 EXT_MODES = {   # transport: (flag file, notification title, notification text, taskbar icon)
     "bt": ("rg35xxh-bt-mode", "BT Controller mode",
            "Controls go to the paired PC/phone. Select + Start + L1 + R1 to stop.", "bt"),
     "usb": ("rg35xxh-wired-mode", "Wired Controller mode",
             "Controls go to the PC over the USB cable. Select + Start + L1 + R1 to stop.", "wired"),
+    "switch": ("rg35xxh-wired-mode", "Switch Controller mode",
+               "Controls go to the Switch over the USB cable. F: Home, F + Select: Capture. "
+               "Select + Start + L1 + R1 to stop.", "wired"),
+    "switch-bt": ("rg35xxh-bt-mode", "Switch Controller mode (Bluetooth)",
+                  "Controls go to the Switch over Bluetooth. F: Home, F + Select: Capture. "
+                  "Select + Start + L1 + R1 to stop.", "bt"),
 }
 # Every mode flag we put in $XDG_RUNTIME_DIR, so start-up and clean exit cannot forget one (the
 # keypad flag was missing from both after the fork added it: a log-out from keypad mode left the
 # taskbar showing its icon while the new daemon was in desktop mode).
 MODE_FLAGS = ("rg35xxh-gamepad-mode", "rg35xxh-keys-mode",
               "rg35xxh-bt-mode", "rg35xxh-wired-mode")
+
+EXT_HELLO = {b"hello usb": "usb", b"hello switch": "switch", b"hello switch-bt": "switch-bt"}   # else "bt"
+SWITCH_EXTS = ("switch", "switch-bt")           # F gives Home / Capture there
+# Battery saver in external controller modes: the status screen (rg35xxh-controller-screen
+# --saver) switches the handheld's display off while connected. Vol / F + Vol / Power are the
+# only presses not sent to the other device, so they wake it: the daemon writes EXT_WAKE, which
+# the screen watches. EXT_DARK exists while the display is off; if the screen died meanwhile,
+# the daemon switches the display back on when the mode ends.
+EXT_WAKE, EXT_DARK, EXT_OUTPUT = "rg35xxh-extpad-wake", "rg35xxh-extpad-dark", "DSI-1"
 BT_EVENT = struct.Struct("<HHi")               # evdev type, code, value
 # Mode-change feedback: the taskbar icon shakes and the motor wobbles with it, both driven from
 # here on one clock and one damped-spring model, x(t) = A e^(-DECAY t) sin(2 pi FREQ t):
@@ -164,7 +181,7 @@ class Daemon:
         self.pad = None            # virtual Xbox pad (gamepad mode only)
         self.pad_ff = {}           # virtual effect id -> physical effect id
         self.bt = None             # socket to rg35xxh-btpad / -usbpad (external controller modes)
-        self.ext = "bt"             # its transport, from the service's hello: "bt" | "usb"
+        self.ext = "bt"             # its transport, from the service's hello: "bt" | "usb" | "switch" | "switch-bt"
         self.ext_rumble_id = None   # effect id for vibration requested by the PC
         self.motor_timer = None     # motor gate (MOTOR_INTERVAL): pending updates, last update time
         self.motor_last = 0.0
@@ -715,6 +732,15 @@ class Daemon:
             return False
 
     def _command(self, name):
+        if self.bt:                       # external controller mode: wake the status screen
+            dark = os.path.exists(runtime_flag(EXT_DARK))
+            try:
+                with open(runtime_flag(EXT_WAKE), "w") as f:
+                    f.write(f"{time.monotonic():.3f} {name}\n")
+            except OSError as e:
+                log.debug("wake: %s", e)
+            if dark and name == "power_menu":
+                return                    # Power on a dark screen only wakes it (tap again for the menu)
         if name == "power_menu":
             spawn("rg35xxh-power-menu")
         elif name in ("volume_up", "volume_down"):
@@ -969,18 +995,18 @@ class Daemon:
             log.warning("External controller: cannot connect to %s: %s", EXT_SOCKET, e)
             spawn("notify-send", "-t", "5000", "External Controller", "Could not connect to the controller service")
             return True
-        self.ext = "usb" if hello == b"hello usb" else "bt"
+        self.ext = EXT_HELLO.get(hello, "bt")
         self.bt = s
         self.bt_watch = GLib.io_add_watch(s.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self._on_bt_data)
         log.info("%s: connected to %s", EXT_MODES[self.ext][1], EXT_SOCKET)
         if self.core.mode == "gamepad":           # local gamepad mode -> BT Controller mode
             self._destroy_pad()
             set_flag("rg35xxh-gamepad-mode", False)
-            self.core.request_gamepad(combo_exit=True)
+            self.core.request_gamepad(combo_exit=True, f_buttons=self.ext in SWITCH_EXTS)
             self._run([("mode", "gamepad")] + [("pad_abs", PAD_AXES[n], int(round(v * 32767)))
                                                for n, v in self.core.axes.items()])
         else:
-            self._run(self.core.request_gamepad(combo_exit=True))
+            self._run(self.core.request_gamepad(combo_exit=True, f_buttons=self.ext in SWITCH_EXTS))
         return True
 
     def _bt_send(self, etype, code, value):
@@ -1132,6 +1158,10 @@ class Daemon:
             log.info("%s: disconnected", EXT_MODES[self.ext][1])
         for flag in MODE_FLAGS:
             set_flag(flag, False)
+        if os.path.exists(runtime_flag(EXT_DARK)):      # battery saver left the display off
+            log.info("%s: display was still off, switching it on", EXT_MODES[self.ext][1])
+            spawn("wlopm", "--on", EXT_OUTPUT)
+            set_flag(EXT_DARK, False)
 
     def run(self):
         GLib.timeout_add(10, self._tick)

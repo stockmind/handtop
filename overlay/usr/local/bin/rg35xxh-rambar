@@ -1,0 +1,19 @@
+#!/bin/bash
+# waybar RAM/zram readout: two stacked horizontal pixel bars (mem on top, swap below).
+# JSON output so the newline in "text" renders as two lines. Exit 1/2 = yellow/red at 80/90% mem.
+read -r _ t _ < <(grep MemTotal /proc/meminfo)
+read -r _ a _ < <(grep MemAvailable /proc/meminfo)
+mp=$((100*(t-a)/t))
+read -r _ _ st su _ < <(tail -1 /proc/swaps)
+sp=$([ "$st" -gt 0 ] && echo $((100*su/st)) || echo 0)
+bar() { # 10 cells, p percent
+  local out="" i
+  for i in $(seq 0 9); do
+    [ $((i*10)) -lt "$1" ] && out="${out}█" || out="${out}░"
+  done
+  printf '%s' "$out"
+}
+printf '{"text": "%s\\n%s", "tooltip": "mem %s%% · swap %s%%"}\n' "$(bar $mp)" "$(bar $sp)" "$mp" "$sp"
+[ "$mp" -ge 90 ] && exit 2
+[ "$mp" -ge 80 ] && exit 1
+exit 0
