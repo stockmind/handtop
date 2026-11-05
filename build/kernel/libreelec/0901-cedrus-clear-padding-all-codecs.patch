@@ -1,7 +1,7 @@
 From: stockmind <slysimo@gmail.com>
 Subject: [PATCH] media: cedrus: clear the 16-line padding rows for every codec
 
-Ours. Clears capture padding once for every codec.
+Not part of the LibreELEC series. Clears the capture padding once for every codec.
 
 The capture buffer is sized to ALIGN(height, 16) because the engine writes the
 reconstruction in 16-line blocks. Those rows are never written, so they keep

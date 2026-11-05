@@ -88,17 +88,17 @@ fi
 grep -aE 'Using hardware decoding|Using software decoding' "$T/mpv.log" | head -2 | sed 's/^/        /'
 
 echo
-echo "mpv zero-copy, shipped config (60 frames, vo=dmabuf-wayland):"
-timeout 90 mpv --no-config --hwdec=drm --hwdec-codecs=h264,hevc,mpeg2video,vp8,vp9 \
-      --vo=dmabuf-wayland --no-audio --frames=60 \
-      --msg-level=all=info -- "$FILE" > "$T/mpv-zerocopy.log" 2>&1
-if grep -qa 'Using hardware decoding (drm' "$T/mpv-zerocopy.log"; then
-  chk "mpv renders zero-copy (drmprime, dmabuf-wayland)" 0
+echo "mpv --hwdec=auto-safe zero-copy (60 frames, what the image ships):"
+timeout 90 mpv --hwdec=auto-safe --vo=gpu --gpu-context=wayland --no-audio --frames=60 \
+      --msg-level=all=v -- "$FILE" > "$T/mpv-zerocopy.log" 2>&1
+if grep -qa 'Using hardware decoding (drm' "$T/mpv-zerocopy.log" \
+   && grep -qa 'dmabuf interop' "$T/mpv-zerocopy.log"; then
+  chk "mpv renders zero-copy (drmprime EGL dmabuf interop)" 0
 else
-  chk "mpv renders zero-copy (drmprime, dmabuf-wayland)" 1
+  chk "mpv renders zero-copy (drmprime EGL dmabuf interop)" 1
 fi
-grep -aE 'Using hardware decoding|Using software decoding|Cannot convert' "$T/mpv-zerocopy.log" \
-  | head -2 | sed 's/^/        /'
+grep -aE 'Using hardware decoding|dmabuf interop|Using software decoding' "$T/mpv-zerocopy.log" \
+  | head -3 | sed 's/^/        /'
 
 # A picture whose width is not a multiple of 64 is the case the driver's
 # 64-byte stride exists for: Mali only imports linear surfaces whose stride
@@ -127,16 +127,15 @@ else
   echo "  skip  416-wide check (no libx264 to make the test file)"
 fi
 
-# VP9: cedrus gained a VP9 backend (H.265 engine slot) in this image, see
-# docs/video-decode.md. Decode a clip twice, once through the VPU and once in
-# software, and require the first 10 frames to be bit-identical: "decodes with
-# no errors" alone has already passed on frames that were visually wrong.
+# VP9: the VPU now has a VP9 backend (out-of-tree series, docs/video-decode.md).
+# Decode a clip twice, once through the VPU and once in software, and require
+# the first 10 frames to be bit-identical: "decodes with no errors" alone has
+# already passed on frames that were visually wrong.
 #
-# A second run picks a clip whose width is not a multiple of 64. That is the
-# case that was broken until 2026-10-29: the VP9 backend kept the vendor's
-# SCALE1_STRIDE_ALIGN(1) (16-byte stride) while the capture stride is 64-byte
-# aligned, so every inter frame read its references with the wrong stride,
-# key frames decoded and everything looked fine in a short test.
+# The clip is generated at 416 wide when none is present. Widths that are not a
+# multiple of 64 are the case that was broken until the backend derived its
+# reference stride from the capture surface: key frames decoded, every inter
+# frame read its references with the wrong stride.
 vp9_check() {
 	local f=$1 label=$2
 	local wh pix_fmt raw_fmt psnr rc
@@ -179,7 +178,7 @@ vp9_check() {
 echo
 echo "VP9 hardware decode (10 frames, compared against software):"
 VP9F=""; VP9ODD=""
-for f in "$HOME"/test-media/vp9*.mkv "$HOME"/test-media/vp9*.webm "$HOME"/Downloads/*vp9*.mkv; do
+for f in "$HOME"/test-media/vp9*.* "$HOME"/Downloads/*vp9*.mkv "$HOME"/Downloads/*vp9*.webm "$HOME"/Downloads/media/*vp9*.mkv "$HOME"/Videos/*vp9*.mkv; do
 	[ -r "$f" ] || continue
 	[ "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$f" 2>/dev/null)" = vp9 ] || continue
 	w=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$f" 2>/dev/null)
@@ -189,15 +188,24 @@ for f in "$HOME"/test-media/vp9*.mkv "$HOME"/test-media/vp9*.webm "$HOME"/Downlo
 		VP9ODD="$f"
 	fi
 done
+if [ -z "$VP9F" ] && ffmpeg -hide_banner -encoders 2>/dev/null | grep -qw libvpx-vp9; then
+	GEN8="$T/vp9-640x360.mkv"; GEN10="$T/vp9-416x240-10.mkv"
+	timeout 180 ffmpeg -hide_banner -v error -f lavfi -i testsrc2=s=640x360:r=24 -t 2 \
+		-c:v libvpx-vp9 -b:v 800k -pix_fmt yuv420p "$GEN8" -y >/dev/null 2>&1
+	timeout 180 ffmpeg -hide_banner -v error -f lavfi -i testsrc2=s=416x240:r=24 -t 2 \
+		-c:v libvpx-vp9 -b:v 500k -pix_fmt yuv420p10le "$GEN10" -y >/dev/null 2>&1
+	[ -s "$GEN8" ] && VP9F="$GEN8"
+	[ -s "$GEN10" ] && VP9ODD="$GEN10"
+fi
 if [ -n "$VP9F" ]; then
 	vp9_check "$VP9F" ""
 	if [ -n "$VP9ODD" ]; then
 		vp9_check "$VP9ODD" "at $(( $(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$VP9ODD") % 64 ))-off-64 width"
 	else
-		echo "  skip  VP9 width-not-multiple-of-64 check (no such clip; vp9-*.mkv in ~/test-media)"
+		echo "  skip  VP9 width-not-multiple-of-64 check (no such clip)"
 	fi
 else
-	echo "  skip  VP9 check (no test clip; put one in ~/test-media/vp9-*.mkv)"
+	echo "  skip  VP9 check (no test clip and libvpx-vp9 not available)"
 fi
 
 echo

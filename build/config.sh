@@ -1,8 +1,10 @@
 # Shared build configuration. Sourced by build scripts.
+# shellcheck shell=bash
+# shellcheck disable=SC2034  # every variable here is read by the scripts that source this file
 TOP="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"   # absolute, independent of $HOME/sudo
 WORK="${WORK:-$TOP/work}"
 
-RELEASE_VERSION="0.3.5"            # used in the image name when not building from a git checkout
+RELEASE_VERSION="0.3.8"            # used in the image name when not building from a git checkout
 RAM_TYPE="${RAM_TYPE:-DDR4}"          # DDR4 (default) or DDR3 depending on board revision
 
 ROCKNIX_VERSION="20261001"
@@ -21,8 +23,22 @@ KVER="7.2.0"                       # ROCKNIX kernel version (must match modules/
 LINUX_VERSION="7.2"
 LINUX_URL="https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${LINUX_VERSION}.tar.xz"
 LINUX_SHA256="f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3"
-KTOOLCHAIN_URL="https://developer.arm.com/-/media/Files/downloads/gnu/15.2.rel1/binrel/arm-gnu-toolchain-15.2.rel1-x86_64-aarch64-none-linux-gnu.tar.xz"
-KTOOLCHAIN_SHA256="9a685b335bd709d683a8c782253c37e8c36c10e6924e59e39d4769b02132eb43"
+# Kernel compiler: Arm's GCC release ROCKNIX uses, in the build for this host (x86_64 or arm64;
+# both checksums from Arm's .sha256asc files). Same compiler version either way.
+KTOOLCHAIN_VERSION="15.2.rel1"
+KTOOLCHAIN_SHA256_X86_64="9a685b335bd709d683a8c782253c37e8c36c10e6924e59e39d4769b02132eb43"
+KTOOLCHAIN_SHA256_AARCH64="97e3f600c00413088bb21109475443f9a1c57b4f75336a6e820acd43b065f875"
+KTOOLCHAIN_HOST="$(uname -m)"
+case "$KTOOLCHAIN_HOST" in
+  x86_64)  KTOOLCHAIN_SHA256="$KTOOLCHAIN_SHA256_X86_64" ;;
+  aarch64) KTOOLCHAIN_SHA256="$KTOOLCHAIN_SHA256_AARCH64" ;;
+  *)       KTOOLCHAIN_SHA256="" ;;   # 06b-cedrus.sh stops with a message
+esac
+KTOOLCHAIN_URL="https://developer.arm.com/-/media/Files/downloads/gnu/${KTOOLCHAIN_VERSION}/binrel/arm-gnu-toolchain-${KTOOLCHAIN_VERSION}-${KTOOLCHAIN_HOST}-aarch64-none-linux-gnu.tar.xz"
+# Cedrus VP9 series in build/kernel/libreelec/: the LibreELEC.tv commit its files were copied
+# from. The patches are in this repo, so the build never fetches it; it only tells the weekly
+# upstream check (git-path, build/upstreams.conf) where to look for newer changes.
+LIBREELEC_CEDRUS_COMMIT="43711f2a265bc688675498fceaa91b3cfdf17c09"
 # Gamepad / motor driver rebuilt with our fix (06d-joypad.sh): the rocknix-joypad version ROCKNIX
 # $ROCKNIX_VERSION ships (its package.mk: PKG_VERSION / PKG_SHA256)
 JOYPAD_COMMIT="d02ed13aae08113f6f9e0e9d699cb29bb3450fa2"
@@ -30,12 +46,21 @@ JOYPAD_URL="https://github.com/ROCKNIX/rocknix-joypad/archive/${JOYPAD_COMMIT}.t
 JOYPAD_SHA256="89ade1769d6eb7b4f37265f26407a422cdbcf517487f80eb1c29964904ca138e"
 CMA_SIZE="256M"                    # contiguous memory for the decoder (no IOMMU, see docs/video-decode.md)
 
-# FFmpeg with the V4L2 request-API hwaccels (04c-v4l2-ffmpeg.sh): Kwiboo's tree, the same
-# patchset Moonlight embeds. Pinned commit of branch v4l2-request-n7.1.3, which is rebased on
-# FFmpeg n7.1.3 and reports the same libav ABI as Debian's ffmpeg 7.1.5, so nothing else is
-# rebuilt (mpv keeps working against the replaced libs).
-FFMPEG_V4L2REQ_URL="https://github.com/Kwiboo/FFmpeg"
-FFMPEG_V4L2REQ_PIN="fad85d9c76611c09b561167ab405c667a0dcdeb7"
+# FFmpeg with the V4L2 request-API hwaccels (04c-v4l2-ffmpeg.sh) = FFmpeg release + Kwiboo's
+# patchset (the one Moonlight embeds), applied as a diff.
+# - Base: the FFmpeg release Debian ships (trixie: 7.1.5), so the security fixes Debian has are
+#   in ours too and the libav ABI matches the one mpv, Chromium and VLC were built against.
+#   When Debian moves on (7.1.6, ...), bump FFMPEG_VERSION / FFMPEG_COMMIT to the same release:
+#   docs/video-decode.md, "Updating FFmpeg".
+# - Patchset: branch v4l2-request-n7.1.3 is KWIBOO_COMMITS commits on top of n7.1.3
+#   (KWIBOO_BASE); the build applies diff KWIBOO_BASE..KWIBOO_PIN onto the base.
+FFMPEG_URL="https://github.com/FFmpeg/FFmpeg"
+FFMPEG_VERSION="7.1.5"
+FFMPEG_COMMIT="3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587"   # tag n7.1.5
+KWIBOO_URL="https://github.com/Kwiboo/FFmpeg"
+KWIBOO_BASE="f46e514491172d15bd74b4abb1814cd2f05a763e"     # tag n7.1.3
+KWIBOO_PIN="fad85d9c76611c09b561167ab405c667a0dcdeb7"      # head of v4l2-request-n7.1.3
+KWIBOO_COMMITS=14
 
 # Target system identity
 HOSTNAME_TARGET="rg35xxh"
@@ -52,9 +77,9 @@ BUILD_EXTRA_CA="${BUILD_EXTRA_CA:-}"
 
 # nwg-drawer (not packaged in trixie; cross-compiled from source)
 NWG_DRAWER_VERSION="v0.7.5"
-GO_VERSION="1.27.1"                # pinned Go release, downloaded by 00-host-deps.sh (SHA-256 checked)
-GO_SHA256_AMD64="63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445"
-GO_SHA256_ARM64="3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec"
+GO_VERSION="1.27.3"                # pinned Go release, downloaded by 00-host-deps.sh (SHA-256 checked)
+GO_SHA256_AMD64="65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"
+GO_SHA256_ARM64="a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49"
 GO_DEFAULT="$WORK/tools/go/bin/go"
 GO_TOOLCHAIN="${GO_TOOLCHAIN:-$GO_DEFAULT}"   # or set to your own Go >= 1.25
 

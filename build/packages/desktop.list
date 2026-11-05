@@ -49,6 +49,8 @@ imv
 qpdfview
 mpv
 python3-textual          # modern TUI framework (the TUI client); mouse support, neon styling
+libva2                    # VA-API client library: Chromium and VLC decode on the VPU through it
+libva-drm2                # vaGetDisplayDRM(), for clients that hand the driver a render node
 xarchiver
 # Themes / fonts
 adwaita-icon-theme

@@ -2,57 +2,13 @@
 
 ## Unreleased
 
-- Fix: mpv no longer drops the video track on software-decoded files. The
-  `dmabuf-wayland` VO only accepts dmabuf frames and mpv does not fall back to
-  the next VO when the filter chain fails, so every AV1 file (off the hwdec
-  whitelist) played audio with no picture; `scripts/vo-by-codec.lua` now picks
-  the VO from the file's video codec.
-
-- Fix: Cedrus padding clears now respect planar and semiplanar layouts and odd
-  heights; the VP9 decode gate compares 10-bit frames as P010.
-
-- New: VP9 decodes on the VPU, and so does H.265 Main10. The video engine on
-  this SoC has a VP9 decoder in the H.265 slot that mainline cedrus never
-  driver'd; the image now carries Jernej Skrabec's out-of-tree series (from
-  LibreELEC's Allwinner patch set, authors and per-patch purpose in
-  `build/kernel/libreelec/README.md`) plus the `v4l2-vp9` helper module it
-  needs, which ROCKNIX does not ship. Output is bit-identical to a software
-  decode at 720p, 854x480, 1366x768, 1080p and 4K, 8- and 10-bit
-  (`PSNR average:inf`). One fix on top is ours: the VP9 backend kept the
-  vendor's `SCALE1_STRIDE_ALIGN(1)` (16-byte stride) after `0002` made the
-  capture stride 64-byte aligned, so key frames decoded and every inter frame
-  read its references with the wrong stride - invisible at 1280/1920/3840,
-  broken at 416/854/1366. `0430-cedrus-vp9-stride-align.patch` derives the
-  field from `bytesperline`; the patch header has the align sweep and
-  `docs/video-decode.md` the details. 10-bit also needed `0414` (H.265 P010
-  output): without it HEVC Main10 decoded to garbage, which is why it is in
-  the set. Measured with mpv on 1080p24: 11 % of one core zero-copy against
-  107 % in software, 9 % at 720p, 13 % at 4K, and a 5-minute soak showed flat
-  memory/CMA and no decoder errors. `mpv.conf` now lists `vp9` in
-  `hwdec-codecs` and prefers `vo=dmabuf-wayland` (subtitles and OSD verified
-  there), and `tools/check-video-decode.sh` gates VP9 against a software
-  decode, including a width that is not a multiple of 64, and 8- and 10-bit
-  both. Two caveats, both in `docs/video-decode.md`: Chromium's VA path shows up
-  to 15 rows of padding at the bottom of clips whose height is not a multiple of
-  16 (the driver reports a 16-aligned height on purpose; making it report the
-  coded height hangs the engine), and 10-bit at such heights (234, 360) is close
-  but not bit-exact (32.8/59.9 dB) while 480/576/720/1080 are `inf`. YouTube:
-  the browser still decodes on the CPU (~280 % of one core for AV1, ~240 % with
-  VP9 forced) because Chromium's MSE path does not hand frames to VA-API in this
-  build; a two-file extension in the image
-  (`/usr/lib/handtop/yt-prefer-vp9`, off by default) makes YouTube serve VP9
-  instead of AV1, which is still software - it costs about the same, so it is
-  left disabled. The VPU path for YouTube is the native client: `goblin-tv` ->
-  `goblin-watch` -> mpv plays it zero-copy at ~21 % of one core. Details and
-  everything tried in `docs/video-decode.md`.
-
-
-- Fix: `04c` uses upstream's checks again (`grep -w … >/dev/null`, not `grep -qw`):
-  with `pipefail`, `-q` stops reading ffmpeg's long list at the first match, grep
-  dies of SIGPIPE and the build fails on a check that actually passed. The
-  ffmpeg build itself is upstream's verbatim (Kwiboo `fad85d9` + the drm patch),
-  so an upstream bump lands without a conflict — the fork's video work sits in
-  `04e` (VA-API), beside ffmpeg rather than inside it.
+- Change: the fork is synced to upstream v0.3.8. Upstream now carries the
+  work this fork started (VA-API/Chromium/VLC on the VPU, the cedrus VP9
+  series with the reference-stride and padding fixes) and improves it (VP9
+  10-bit layout, 10-bit HEVC, Battery saver, low-battery shutdown). The fork
+  keeps its own additions: the Jellyfin client and Streams, zram-only memory
+  (no SD swap file), the on-board `goblin-watch`, the kernel-message log, the
+  weekly yt-dlp timer, the zsh login shell and read aloud.
 
 - Change: the client is called `jellyfin` everywhere, not just in the drawer:
   `/usr/local/bin/jellyfin`, `/etc/default/jellyfin` (was `goblin-dash`),
@@ -114,15 +70,6 @@
   (Mon 04:00, randomised, `Persistent=true`), because YouTube's extractor
   changes break a stale yt-dlp within weeks. `goblin-watch` itself is unchanged.
 
-- Note: YouTube in Chromium stays software-decoded. Its player now probes
-  codecs from a worker and negotiates over SABR, so the usual
-  `isTypeSupported`/`MediaCapabilities`/`addSourceBuffer` overrides (checked:
-  they work on a plain page, `vp9 → false`) no longer change what YouTube
-  serves; the browser ends up on VP9 at 260-300 % CPU and ~1 GB RSS, against
-  47 % for `goblin-watch` (mpv picks H.264 itself). Local files in Chromium
-  still hardware-decode. The extension and the Chromium memory flags were
-  therefore not shipped.
-
 - Fix: kernel messages are logged to a file again. On this image journald never
   imports `/dev/kmsg` (a probe written there shows in `dmesg` and never appears
   in `journalctl -k`, even after restarting journald), so the 2026-10-23 hangs
@@ -143,73 +90,6 @@
   progressive format, and VLC cannot mux a video-only and an audio-only URL).
   Twitch works in either player (muxed HLS).
 
-- Change: Chromium and VLC use the VPU out of the box. `build/04e-va-api.sh`
-  ships the VA-API driver in the image and the desktop session exports
-  `LIBVA_DRIVER_NAME=v4l2_request` before `exec labwc`; nothing else is needed
-  (VLC's default `avcodec-hw=any` and Chromium's own VA-API enablement do the
-  rest). libva has no config file and no usable built-in default driver on
-  arm64, which is why the variable is required at all; unsetting it, or
-  dropping the line, returns both apps to software decode cleanly.
-
-- Change: the VA-API driver is based on upstream master again, not tag 1.3.
-  Master's `surface: simplify backing` (f54d8d2) gives every VA surface one
-  CAPTURE buffer for its lifetime, queued as `V4L2_MEMORY_DMABUF` — stable
-  memory from creation. That is what Chromium needs, so the previous
-  "keep the backing and copy each decoded frame into it" workaround is gone and
-  Chromium keeps its zero-copy path. The pin had only been on 1.3 because
-  master's `require multiplane support` (4cb4bde) deleted the dual-planar
-  plumbing and cedrus exposes single-planar only; `build/patches/libva-v4l2-request-fixes.patch`
-  restores that fallback (~80 lines: format accessors plus the buffer-type
-  choice in probe, context and surface setup) instead of pinning an old tag.
-  A multiplanar conversion of cedrus itself was rejected: ~300–400 lines across
-  the video layer and three codec backends, affecting Moonlight, ffmpeg/mpv,
-  VLC and Chromium alike, to fix one client; the libva patch is also the piece
-  worth sending upstream.
-
-- Feature: Chromium video runs on the VPU and displays correctly (it used to
-  show a flat green rectangle). Chromium exports its whole frame pool (22
-  surfaces) to EGL at start-up, before any of them has been decoded, and then
-  never asks the driver again; on tag 1.3 those early exports were throwaway
-  backings that the driver dropped when the decode context bound the surface to
-  a CAPTURE buffer, so Chromium sampled freed, zeroed memory (YUV 0,0,0 =
-  green). Measured on 1080p24: 154–174 % of one core against 251–260 %
-  software, ~1.0 GB RSS either way.
-
-- Feature: VLC 3 plays video zero-copy on the VPU. It has no V4L2 path of its
-  own, but it speaks VA-API, and the libva driver over the request API reaches
-  Cedrus. Two VA-API fixes were needed on top of the single-planar port:
-  `vaAcquireBufferHandle()` was a stub returning UNIMPLEMENTED (VLC probes its
-  dmabuf path before accepting the GL converter, and silently fell back to
-  software without it), and `vaExportSurfaceHandle()` only split NV12 into
-  layers when the client asked for `VA_EXPORT_SURFACE_SEPARATE_LAYERS` — VLC 3
-  passes `flags=0` and then rejects any multi-plane layer, so it rendered an
-  empty GL surface (green). Measured 1080p24: H.264 11 % of one core (VLC
-  software 227 %, mpv 18 %), HEVC 22 %, HEVC 540p 13 %.
-
-- Feature: `tools/bench-video-players.py` measures every playback path on the
-  device — CPU, RSS, GPU devfreq and battery draw — and the resulting table
-  (mpv, VLC, ffmpeg, Chromium; hardware and software) is in
-  `docs/video-decode.md`. Two findings worth keeping: the Mali never leaves its
-  minimum 420 MHz at the 640×480 panel (playback is CPU/VPU-bound, not GPU), and
-  the AXP gauge reports 416–427 mA whatever runs, so CPU time is the only
-  usable energy proxy. The VPU is cheaper, not faster: decode-only ffmpeg does
-  27 fps on hardware against 57 fps on the CPU, at a third of the CPU time.
-
-- Fix: the blue video is gone — zero-copy works for every picture width.
-  The VPU decodes into a picture whose stride the Cedrus driver aligned to 16
-  bytes, and Mali (this SoC has a Mali-G31) only imports linear surfaces
-  whose stride and plane offsets are 64-byte aligned. Panfrost refused
-  every picture whose width was not a multiple of 64 ("rejecting image due
-  to unsupported offset or stride alignment"), the VO kept its clear colour
-  and the video area stayed a flat blue rectangle — 416-wide and odd-aspect
-  transcodes hit it constantly. The VPU's framebuffer line stride is
-  programmable, so `build/kernel/0002-cedrus-64-byte-stride.patch` aligns
-  the capture stride to 64 bytes and programs the register from the
-  negotiated `bytesperline`. Measured on the device with the patched
-  module: 416, 544, 720, 854 and 1366 wide all import without a single
-  Mesa rejection, and the zero-copy picture matches the software-decoded
-  frame (88 dB PSNR, the difference being the OSD clock).
-
 - Change: the client always plays zero-copy. It used to predict the width
   of every file, start mpv on the copy path for the widths it could not
   predict, and check the width of the frame that was really playing over
@@ -219,14 +99,11 @@
 
 - Change: `tumbler` is dropped again. It was installed to work around Thunar's "missing exec" error, but that error is the missing MIME database: with the caches refreshed, `exo-open` (what Thunar calls) opens a video with no thumbnail service running at all, and without the caches it fails with tumbler running too. On a 1 GB device the thumbnail service is RAM and CPU for a cosmetic feature, so it goes.
 
-
 - Fix: file associations work for a fresh home. GIO can guess the type of a file without the MIME databases, but it cannot map a type to an application, so a fresh home had no handler for a video file and Thunar fell back to running a literal `%U` ("missing exec"). The image had no `/usr/share/mime/mime.cache` and no `mimeinfo.cache` for `/usr/local/share/applications` at all; `build/05-configure-base.sh` now refreshes both, and `tools/deploy.sh` does the same when it updates a live device.
-
 
 - Change: the patched FFmpeg keeps Debian's feature set. The first version of `build/04c-v4l2-ffmpeg.sh` enabled only drm/udev/dav1d, so the replacement was a downgrade against the ~60 external libraries Debian's build uses: no gnutls (no https in libavformat, so mpv could not play URLs), no x264/lame/opus/vorbis/vpx encoders, no libass (no subtitle rendering). The build now enables the same set, installs the runtime side of each into the image, and gates on them (https protocol, the five encoders, the ass filter).
 
 - Change: the replaced FFmpeg libraries are held with `apt-mark` (`libavcodec61`, `libavdevice61`, `libavfilter10`, `libavformat61`, `libavutil59`, `libpostproc58`, `libswresample5`, `libswscale8`), so an upgrade cannot reinstall Debian's ones and silently drop the VPU path. `THIRD-PARTY.md` lists the FFmpeg tree, the pinned commit and the local patch.
-
 
 - Change: video plays fullscreen and B closes it. The client starts mpv with
   `--fullscreen` (the film fills the 640x480 panel) and the client is out of
@@ -371,7 +248,6 @@
 
 - Fix: MPEG-2 and VP8 play on the VPU too. mpv only tries hardware for the codecs on its built-in whitelist, so both stayed on the CPU ("codec mpeg2video is not on whitelist") even though Cedrus decodes them; `/etc/mpv/mpv.conf` now sets `hwdec-codecs=h264,hevc,mpeg2video,vp8` (the option replaces the default list, so H.264/HEVC stay listed). Measured 2026-10-21, 120 frames, `vo=gpu --profile=fast`: MPEG-2 1080i 88.8 -> 45.6 % CPU, VP8 720p 92.1 -> 48.1 %, same fps -- battery and thermal headroom, not frame rate. VP9 and AV1 are deliberately left out of that list: this kernel's Cedrus has no decoder for them and mpv's attempt does not fail cleanly (an error per frame), so they are never attempted and decode in software right away -- which also replaces the `[av1]` profile that only existed to keep mpv from trying them.
 
-
 - Fix: clicking a video in Thunar works again. `/usr/local/share/applications/mpv.desktop` was a hide-stub from v0.1.0 with no `Exec=`, and it shadows Debian's real entry of the same id, so every association naming `mpv.desktop` failed with "Desktop file didn't specify Exec field" (the stub came back on the device through an overlay deploy). It is now a full entry -- `Exec=mpv -- %U`, an icon, the video and audio types -- and keeps `NoDisplay=true`, so mpv stays out of the drawer and is a usable handler at the same time. No separate `play-mpv.desktop` and no skel `mimeapps.list` are needed: the entry declares the types itself.
 
 - Change: `tools/deploy.sh` grows `console` and `session` targets, so a device can be brought to the image state without a reflash: the whole overlay (scripts, icons, themes, units, rules, mako/waybar/drawer configs) is copied as root with `/etc/default/goblin-dash` left alone, then Waybar/mako/swaybg/inputd/labwc are restarted. `all` runs inputd + console + session + goblin.
@@ -406,17 +282,41 @@
 
 - Change: `/etc/mpv/mpv.conf` gained an `[av1]` profile (`hwdec=no`). The Cedrus VPU has no AV1 decoder in this kernel, and `auto-safe` still tries `av1-drm`/`av1-drm-copy` first — both fail on every frame here instead of falling back cleanly. Software (dav1d) plays AV1 real time with 0 dropped frames (measured 2026-10-17: 1920x884@24 and 3840x1772@30 music videos); HEVC/H.264 keep zero-copy `drm`. The profile must come last in the file: activating a profile re-enables options set above it.
 
-- Docs: Chromium's VA-API route to the VPU was built, measured and rejected. It works as far as the decoder — `VaapiVideoDecoder` drives `/dev/video0` (Cedrus), 81 % of one core at 1080p24 against 185–195 % in software, 0 dropped frames once past startup — but the picture never reaches the screen: a solid green rectangle in every configuration, because Chromium's Linux decoder only offers the GL output path and has nothing to fall back on. `docs/video-decode.md` carries the backend build, the measurements and the flag matrix; no image change follows from it, Chromium video stays software-decoded.
-
 - Change: the image ships **zsh as the login shell** with the shell setup the handheld has been running: `zsh` joins `base.list`, `05-configure-base.sh` sets it for `rg`, and `/etc/skel/.zshrc` (Oh My Zsh + `git`/`docker`/`zsh-autosuggestions`/`zsh-syntax-highlighting` + starship) is copied into every fresh home. Oh My Zsh and the two custom plugins come from the new `build/04d-ohmyzsh.sh`, pinned to the revisions the device runs. Until now the environment had to be recreated by hand after a reflash; a reflash now keeps it. The `overlay/etc/zsh/zprofile` hook above is what starts the desktop on a zsh login shell.
 - Fix: switching the login shell to zsh left the device on a bare tty1 shell after a reboot (no desktop). The session launcher is `/etc/profile.d/zz-rg35xxh-session.sh` and Debian's zsh does not read `/etc/profile`, so it never ran; the overlay now ships `/etc/zsh/zprofile` with `emulate sh -c 'source /etc/profile'`, which restores `/etc/profile.d` (session launcher, dev-tools PATH) for zsh login shells.
 
-- Fix: hardware video decoding now works in the system ffmpeg and mpv. `build/04c-v4l2-ffmpeg.sh` cross-builds Kwiboo's FFmpeg (`v4l2-request-n7.1.3`, the V4L2 Request API patchset — the same code Moonlight embeds) instead of jc-kynesim/rpi-ffmpeg. The old build registered only the mainline `drm` hwaccel, which segfaults against Cedrus; the new one registers the `v4l2request` hwdevice and the h264/hevc/av1/vp8/vp9/mpeg2video hwaccels. Measured on the device: a full 23:55 540p HEVC episode decoded at 108 fps (4.5× real time) with 0 decode errors, and `mpv --hwdec=v4l2request-copy` reports "Using hardware decoding".
-- Fix: zero-copy playback works, and `/etc/mpv/mpv.conf` now ships `hwdec=auto-safe` + `profile=fast`. An FFmpeg-side patch (`build/patches/ffmpeg-v4l2request-drm.patch`, applied by `04c`) registers the stateless V4L2 request decoders under the `drm` hwdevice as well, so stock mpv's DRM PRIME interop renders their dmabufs. Measured on the device: 540p HEVC 0 dropped frames over 10 s (whole 23:55 episode too), and 1080p HEVC/H.264 0 dropped frames once the scaler is bilinear — the default high-quality scaler was the real 1080p bottleneck (23 → 51 fps), not the decoder, which sustains 99 fps (HEVC) and 51 fps (H.264) in zero-copy and roughly half that in copy mode. `auto-safe` still falls back to the copy variants and then to software; that software path is unchanged and still segfaults intermittently inside Mesa's panfrost driver (3/5 runs, with Debian's stock libavcodec), which is why hardware decoding is preferred.
-- Fix: images shipped a stale second copy of the patched ffmpeg under `/usr/local` (an earlier revision of `build/04c` used `--prefix=/usr/local`). Because `/usr/local/bin` precedes `/usr/bin` in `PATH`, the `ffmpeg` a user ran was that old build with no `v4l2request`; mpv was unaffected (the loader prefers `/usr/lib`). `04c` now removes it.
-- Fix: the desktop user could not open the dma-buf heaps (`/dev/dma_heap/*` are `root:root 0600`), so ffmpeg logged `Unable to open any dma_heap device` and every dmabuf-based hardware path was unavailable. New udev rule `72-rg35xxh-dma-heap.rules` grants group `video` access.
-- Docs: rewrote `docs/video-decode.md` with the measurements above; `tools/check-video-decode.sh` now requires a real decode (Cedrus VPU engaged, 0 decode errors, exit 0) instead of a capability listing — that listing is what let the earlier broken build through. The same tool now also asserts the zero-copy path (`mpv --hwdec=auto-safe` selecting the `drm` hwdec and using the drmprime EGL dmabuf interop), and `docs/desktop.md` no longer calls zero-copy a gap.
-- Removed: the mpv-side alternative (`build/patches/mpv-v4l2request-drmprime.patch` + `tools/build-mpv-v4l2request.sh`, "route B"). It was never shipped: the FFmpeg-side patch covers every consumer (mpv, the `ffmpeg` CLI, anything else a user installs), while an mpv patch would need a distribution package rebuild. The tree keeps the FFmpeg side only.
+## v0.3.8
+
+- ⚠️ **Known issue (still open):** Bluetooth is sometimes missing on the first boot after flashing. Restart once (Power → Restart); it works from then on.
+- **New: low-battery warning and shutdown.** At 10 % a warning stays on screen until tapped and the handheld buzzes three times; at 5 % it shuts down cleanly after a 3-minute countdown, which plugging in the charger cancels. Before, only Screen off did this; in normal use the battery could run flat, which can damage the SD card's filesystem. Levels in `/etc/rg35xxh/power.conf` (`LOW_BATTERY_WARN_PCT`, `LOW_BATTERY_SHUTDOWN_PCT`, 0 = off).
+- **New: Battery saver.** One switch caps the CPU at 1.0 GHz (from 1.4 GHz) and halves the screen brightness; turning it off puts both back. Switch it with the new **Battery saver** button in the power menu (works over fullscreen apps too) or by tapping the battery on the taskbar, which gets a green outline while it is on. It stays on across reboots. Wi-Fi power save stays off on purpose (it could stall the Wi-Fi). How much it saves is not measured yet; most of it should come from the dimmer screen. The power menu is now a 3 + 2 grid: Sleep, Restart, Shut down / Battery saver, Log out.
+- **Fixed: 10-bit VP9 and HEVC are now exact at every width.** 10-bit VP9 at some widths (for example 352, 416, 480, 544, 1282) was close to the software result but not identical, and 10-bit HEVC at 1282 pixels wide was visibly wrong. The decoder now uses Jernej Skrabec's buffer layout fix from LibreELEC (`0438`), which replaces two of our own patches (`0900`, `0902`); every clip in a 25-clip test (VP9 8/10-bit, HEVC 8/10-bit, H.264, VP8, MPEG-2) matches the software decode bit for bit. Limit, unchanged: 10-bit VP9 at 4K doesn't fit in the decoder's memory. Closes #8.
+- **For builders:** the weekly upstream check now watches Arm's GNU toolchain releases (`arm-gnu`). ROCKNIX releases built with GCC 16 wait until Arm publishes GCC 16, so our kernel modules keep being built with the same compiler as ROCKNIX's kernel (`docs/kernel.md`).
+
+## v0.3.7
+
+- ⚠️ **Known issue (still open):** Bluetooth is sometimes missing on the first boot after flashing. Restart once (Power → Restart); it works from then on.
+- **New: VP9 decodes on the VPU, 8- and 10-bit.** The H616/H700 video engine has a VP9 decoder in the H.265 slot, but mainline cedrus has no backend for it. The image now carries Jernej Skrabec's out-of-tree series from LibreELEC's Allwinner patch set (a snapshot of 2026-11-01; files, authors, per-patch purpose and what is deliberately left out in `build/kernel/libreelec/README.md`) plus the `v4l2-vp9` helper module it needs, which ROCKNIX does not ship; `build/06b-cedrus.sh` applies the series with `--fuzz=0`, builds both modules and checks their symbol versions against ROCKNIX's own. Output is bit-identical to software at 416x234, 720p, 854x480, 1366x768, 1080p and 4K 8-bit, and at 384x216, 448x256, 512x288, 640x360, 720p, 854x480 and 1366x768 10-bit (`PSNR average:inf`). CPU on paced 1080p24: 11 % of one core zero-copy on the shipped VO (21 % on `vo=gpu`) against 107 % in software; 9 % at 720p, 13 % at 4K. Three fixes on top of the series are ours: `0900-cedrus-vp9-stride-align.patch` (the backend kept the vendor's 16-byte reference-stride alignment after the capture stride became 64-byte aligned, which broke every width not a multiple of 64) and `0901-cedrus-clear-padding-all-codecs.patch` (the 16-line capture padding is now cleared with neutral chroma, so consumers that do not crop, such as Chromium's VA-API path, do not show a line of stale colour) and `0902-cedrus-2bit-plane-size.patch` (10-bit VP9 at widths 128k+1 to 128k+3, such as 1282, wrote past the end of the decode buffer; found by @stockmind in #8). `mpv.conf` adds `vp9` to `hwdec-codecs`, and `tools/check-video-decode.sh` gates VP9 against a software decode, including an off-64 width. The YouTube entry in v0.3.6 says the engine cannot decode VP9; with this it can, but Chromium stays on H.264 through the enhanced-h264ify policy, so the browser does not depend on this out-of-tree backend. VP9 serves local files, other sites and clients such as mpv, ffmpeg and VLC. Limits: 10-bit at widths 32 bytes past a 64-byte multiple (352, 416, 480, 544) is 25-29 dB and not exact, and AV1 stays software. Details in `docs/video-decode.md`.
+- Change: mpv's default video output is `vo=dmabuf-wayland,gpu` (was `vo=gpu`). dmabuf-wayland hands the decoder's dmabufs straight to the compositor and costs about half the CPU of the gpu VO (paced 1080p24 VP9: 11 % of one core against 21 %), and subtitles and OSD were verified to render on it. Trade-off: it only accepts dmabuf frames and mpv does not fall back when a VO rejects frames after initialising, so `overlay/etc/mpv/scripts/vo-by-codec.lua` sets `vo=gpu` for codecs outside `hwdec-codecs` (AV1); the cost is one extra script and a choice keyed on the codec whitelist rather than on what the decoder actually did.
+- New: the screen dims 10 seconds before auto-sleep, as a warning; touch anything and it comes back and the 10 minutes start over. Only when a sleep would really follow (not while charging, in controller modes, with HDMI or in Screen off). Seconds in `/etc/rg35xxh/power.conf` (`AUTOSLEEP_DIM_SECONDS`, 0 = off).
+- Fixed: in the power menu, Sleep no longer stays highlighted while the pointer is on another button, and the four buttons are the same width (the right column was wider).
+
+## v0.3.6
+
+- **This release carries security fixes** (FFmpeg, Bluetooth pairing): reflash to get them; installed handhelds don't receive them any other way yet. Most of the fixes below come from an external review of the whole codebase; the report and what was done about each finding are in `docs/audits/`.
+- ⚠️ **Known issue (still open):** Bluetooth is sometimes missing on the first boot after flashing. Restart once (Power → Restart); it works from then on.
+- **Security: FFmpeg brought up to 7.1.5.** The hardware-decoding FFmpeg in the image was based on FFmpeg 7.1.3, while Debian ships 7.1.5: about 390 upstream commits behind, among them two security fixes for crafted media files (CVE-2026-8461, CVE-2026-38347). Because these libraries replace Debian's and are held, Debian's own updates never reached them. They are now built from 7.1.5, the same release as Debian's, with the same hardware decoding. `ffmpeg -version` shows `7.1.5-handtop-v4l2request-…`. Reflash to get it.
+- **Security: Bluetooth controller modes no longer accept everything.** While a Bluetooth mode was waiting for a PC or Switch, any device nearby could pair, and in Bluetooth: Xbox it was trusted for good, so it could have posed as a keyboard. Now each mode accepts only what a controller needs, Bluetooth keyboards and mice can't connect to the handheld while a mode is on (your own ones pause and come back afterwards), only the device that actually uses the handheld as a controller is trusted, and anything else that paired during the mode is unpaired when it ends. Pairing works as before, with no extra steps.
+- **YouTube plays on the hardware decoder in Chromium.** YouTube normally sends VP9 or AV1, which the handheld's video engine can't decode, so it played on the CPU. Chromium now installs the enhanced-h264ify extension on first launch (like uBlock Origin Lite), which makes YouTube send H.264 instead (up to 1080p), and that plays on the video engine. You can change what it blocks from its toolbar button. **Pick 480p** in YouTube's quality menu: the screen is 640×480, so higher shows nothing more and only costs CPU (1080p plays but drops a few frames).
+- **Chromium and VLC decode on the VPU.** Both speak VA-API, which Debian does not connect to the stateless V4L2 decoder, so they were software-only. The image now ships `libva-v4l2_request` (a VA-API driver over the request API) and the session exports `LIBVA_DRIVER_NAME=v4l2_request`, which makes it the session's VA-API driver: **Chromium then decodes on the VPU with no flags**, and VLC too when it is installed (`apt install vlc`, XWayland). mpv's `hwdec=auto-safe` also moves to `vaapi` for H.264 and HEVC (same zero-copy dmabuf path; `--hwdec=drm` still works through DRM PRIME), and any client that wants another VA driver can still override the variable. The driver carries three fixes: single-planar support (cedrus is not multiplanar, so upstream master refuses it), `vaAcquireBufferHandle()` (VLC's dmabuf probe), and one plane per layer on export (VLC rejects a composite layer and shows a green window). Measured on the device, 1080p24: Chromium 154–174 % of one core against 251–260 % in software, VLC H.264 11 % against 227 %. VP9/AV1 stay software (no Cedrus decoder). Details and verification in `docs/video-decode.md`.
+- **Controls are harder to lose.** A typo in `rg35xxh-input.conf` (a value that isn't a number, is out of range, a yes/no that isn't, an unknown key name) used to stop the input daemon, which left the handheld with no buttons; now that one line is ignored, the default is used, and the reason is in `inputd.log`. If the daemon's input handling ever hits an error, it restarts itself within a few seconds instead of leaving the pointer or buttons dead, and a gamepad still held by the previous daemon at start-up is waited for instead of being used half-set-up. Leaving gamepad mode no longer lets a game's last vibration through. The input daemon's code in the image is now owned by root (it was writable by the desktop user).
+- **External Controller:** over Bluetooth (Xbox, and Xbox with better compatibility), a button release or a stick returning to the centre could get lost when the radio was busy at that moment, leaving the button held on the PC until the next input; such a report is now sent again a moment later. Stopping USB cable mode while it is still starting up (switching mode, shutting down) now always removes the USB setup cleanly.
+- **Logging out (or a crash) during Screen off no longer leaves the next session dark and slow.** Screen off's low-power state (backlight off, three CPU cores offline, audio off) outlived the session, so the new desktop could start with the screen dark and one core. Each session now leaves it first.
+- **Buttons no longer get stuck after a busy moment.** If the system was too busy to read the controls for a moment, a button release could get lost and the button stayed held (a mouse button kept dragging, for example). The input daemon now notices the lost input and reads the controls' real state again.
+- **Display:** with an HDMI monitor at a scale other than 1 (or rotated), Extend now puts the handheld's screen right below the monitor instead of leaving a gap the pointer couldn't cross. A resolution Test now switches back after 15 s of real time, even if a display command is slow.
+- **Wi-Fi from `wifi.txt`:** if NetworkManager refuses the settings (a WPA password must be 8–63 characters), the Wi-Fi profile you already had for that network now stays, instead of being deleted first. The password stays in the file so you can fix it and reboot.
+- Building: the launcher (nwg-drawer) is now compiled with Go 1.27.3 (was 1.27.1), which carries Go's latest security fixes.
+- Building: the kernel-module steps now work on arm64 build hosts too (they always downloaded the x86_64 compiler), and an edited kernel patch in `build/kernel/` is picked up by the next build (before, the old kernel tree was reused).
 
 ## v0.3.5
 

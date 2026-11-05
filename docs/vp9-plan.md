@@ -5,6 +5,9 @@ output that matches a software decode. Every milestone ends with a test on the
 device and a commit on the fork branch `vp9-cedrus` (patch under
 `build/kernel/`), never on main until it decodes correctly.
 
+Upstream v0.3.7/v0.3.8 now carries this series (patches `0438`, `0900`-`0902`);
+this plan is kept for the measurements and the reasoning.
+
 ## Milestones (each one testable, each one a commit)
 
 **M0 — plan + branch + build loop** (no code yet)

@@ -2,15 +2,15 @@ From: stockmind <slysimo@gmail.com>
 Subject: [PATCH] media: cedrus: filter P010 by depth (0418 rebased onto 0414)
 
 LibreELEC's 0418-media-cedrus-Filter-P010-by-depth-like-AFBC-formats.patch does
-not apply to this tree: 0414 already brings the generic .depth filter into
-cedrus_find_format(), so 0417's per-format helper (and the P010 skip block that
-0417 adds) are now dead weight and the patch's hunks drift.
+not apply to this tree: 0417 already brings the generic .depth filter into
+cedrus_find_format(), so its own per-format helper (and the P010 skip block it
+adds) are dead weight and the patch's hunks drift.
 
 This is the same change with the hunks rebased: drop
-cedrus_is_10bit_dst_format_supported() and the skip block that calls it, and
-leave the depth filtering to fmt->depth. Design and intent are Jernej Skrabec's
-from 0418 (LibreELEC.tv projects/Allwinner/patches/linux/); only the context is
-ours.
+cedrus_is_10bit_dst_format_supported() and the skip block that calls it (both
+from 0412), and leave the depth filtering to fmt->depth (0417). Design and
+intent are Jernej Skrabec's from 0418 (LibreELEC.tv
+projects/Allwinner/patches/linux/); only the context is ours.
 ---
 --- a/drivers/staging/media/sunxi/cedrus/cedrus_video.c
 +++ b/drivers/staging/media/sunxi/cedrus/cedrus_video.c

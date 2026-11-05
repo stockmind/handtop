@@ -6,14 +6,19 @@ check it rather than trust it. Branch `vp9-cedrus`, merged to `main` at
 
 ## What was changed, and where
 
+Upstream v0.3.7 and v0.3.8 took this work over and renamed the patches:
+`0430` became `0900`, then was folded into `0438` with the 10-bit layout fix;
+`0432` became `0901`; the 2-bit plane fix became `0902`. The numbers below are
+the ones this branch used; the effects are the same and are now upstream's.
+
 | # | change | file(s) | ours? |
 |---|---|---|---|
 | 1 | VP9 backend for cedrus (H.265 engine slot), P010 output, 10-bit helpers, H.265 P010 | `build/kernel/libreelec/0410…0421` | no — Jernej Skrabec via LibreELEC, see `build/kernel/libreelec/README.md` |
-| 2 | VP9 reference stride (`SCALE1_STRIDE_ALIGN`) derived from the reconstruct surface | `build/kernel/libreelec/0430-cedrus-vp9-stride-align.patch` | yes |
-| 3 | Clear linear 4:2:0 capture padding rows for every codec, in `cedrus_device_run()` | `build/kernel/libreelec/0432-…` | yes |
+| 2 | VP9 reference stride (`SCALE1_STRIDE_ALIGN`) derived from the reconstruct surface | upstream v0.3.7 `0900`, then `0438` | now upstream |
+| 3 | Clear linear 4:2:0 capture padding rows for every codec, in `cedrus_device_run()` | upstream v0.3.7 `0901` | now upstream |
 | 4 | Ship `v4l2-vp9.ko` (helper module ROCKNIX lacks) + symbol/vermagic checks | `build/06b-cedrus.sh` | yes |
 | 5 | mpv defaults: `vo=dmabuf-wayland,gpu`, `vp9` in `hwdec-codecs` | `overlay/etc/mpv/mpv.conf` | yes |
-| 6 | YouTube on VP9 (extension hiding AV1 from capability queries) | `overlay/usr/lib/handtop/yt-prefer-vp9/`, `overlay/etc/chromium.d/50-rg35xxh` | yes |
+| 6 | YouTube on VP9 (extension hiding AV1 from capability queries) | dropped; upstream ships enhanced-h264ify instead | no |
 | 7 | Gates and harnesses | `tools/check-video-decode.sh`, `tools/bench-video-matrix.sh`, `tools/vp9-soak.sh`, `tools/check-video-matrix.sh` | yes |
 
 Patch chain order matters: `0001`,`0002` (in `build/kernel/`) then

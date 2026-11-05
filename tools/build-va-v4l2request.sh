@@ -22,8 +22,9 @@
 #
 # The artifact is staged at work/va-driver/v4l2_request_drv_video.so; --ship
 # installs it into the rootfs, and tools/test-va-v4l2request.sh runs the checks
-# on the device. Nothing selects the driver unless a client sets
-# LIBVA_DRIVER_NAME=v4l2_request, so shipping it changes no default behaviour.
+# on the device. With LIBVA_DRIVER_NAME=v4l2_request exported for the session it
+# is the VA-API driver every client finds, so Chromium decodes on the VPU with no
+# flags; mpv is unaffected (it uses the FFmpeg hwaccels, not VA-API).
 #
 # Needs qemu-aarch64 binfmt and root. Run from anywhere:
 #
@@ -40,7 +41,7 @@ VA_TAG="f54d8d2c36433b38ba9b8633ac10eec444ac9cf1"   # master: surface: simplify 
 VA_URL="https://github.com/sofus13/libva-v4l2_request.git"
 SRC="$WORK/src/libva-v4l2_request"
 OUT="$WORK/va-driver"
-DEV_PKGS="meson ninja-build pkg-config libva-dev libdrm-dev ca-certificates git"
+DEV_PKGS="meson ninja-build pkg-config libva-dev libdrm-dev"
 
 # Fresh pinned checkout on the host side (network here, not in the chroot).
 [ -e "$SRC" ] && safe_rm -r "$SRC"
@@ -64,6 +65,10 @@ in_chroot "apt-get update -qq && apt-get install -y -qq --no-install-recommends 
 in_chroot "mkdir -p /opt/va-build"
 tar -C "$SRC" --exclude=.git -cf - . | tar -C "$ROOTFS/opt/va-build" -xf -
 in_chroot "cd /opt/va-build && meson setup build >/dev/null && ninja -C build"
+# the build tools must not stay in the image (same rule as 04c)
+in_chroot "apt-get purge -y -qq $DEV_PKGS && apt-get autoremove -y -qq --purge && apt-get clean"
+safe_rm -r "$ROOTFS"/var/lib/apt/lists/*          # the index is ~40 MB; 04c keeps it out too
+mkdir -p "$ROOTFS/var/lib/apt/lists/partial"
 
 mkdir -p "$OUT"
 cp "$ROOTFS/opt/va-build/build/src/v4l2_request_drv_video.so" "$OUT/"

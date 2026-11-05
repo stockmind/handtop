@@ -50,7 +50,7 @@ Since 2026-10-26 blueman's applet and tray no longer run all the time (they took
 
 ## Session start and log out
 
-Auto-login on tty1 starts labwc (`/etc/profile.d/zz-rg35xxh-session.sh`); **Log out** ends labwc, getty logs in again and a fresh session starts. labwc runs `/etc/xdg/labwc/autostart` in its own process group. Wayland clients (Waybar, applets, …) end with labwc, but the helpers that are not (input daemon loop, battery icon animation, Tailscale tray) would outlive it: so each autostart first stops the previous session's process group (its id is kept in `$XDG_RUNTIME_DIR/rg35xxh-autostart.pgid`; `SIGTERM`, then it **waits until the group is gone**, up to 5 s, then `SIGKILL`) and only then starts the new helpers, and resets the failed-start counter that `zz-rg35xxh-session.sh` uses (3 failed starts in a row leave a shell on tty1). Found 2026-10-26: after a log-out the taskbar showed two Tailscale icons and two input daemons were running. The first fix stopped the old group without waiting, and the next log-out froze the whole handheld: the old input daemon died while the new one was taking over the gamepad and vibration motor. The wait, and the input daemon's clean exit and single-instance lock, are what prevent this; see [services/input-daemon.md](services/input-daemon.md#stopping-restarting-one-instance) before changing either.
+Auto-login on tty1 starts labwc (`/etc/profile.d/zz-rg35xxh-session.sh`); **Log out** ends labwc, getty logs in again and a fresh session starts. labwc runs `/etc/xdg/labwc/autostart` in its own process group. Wayland clients (Waybar, applets, …) end with labwc, but the helpers that are not (input daemon loop, battery icon animation, Tailscale tray) would outlive it: so each autostart first stops the previous session's process group (its id is kept in `$XDG_RUNTIME_DIR/rg35xxh-autostart.pgid`; `SIGTERM`, then it **waits until the group is gone**, up to 5 s, then `SIGKILL`) and only then starts the new helpers, and resets the failed-start counter that `zz-rg35xxh-session.sh` uses (3 failed starts in a row leave a shell on tty1). It also leaves Screen off if the previous session ended in it ([apps/power-menu.md](apps/power-menu.md)). Found 2026-10-26: after a log-out the taskbar showed two Tailscale icons and two input daemons were running. The first fix stopped the old group without waiting, and the next log-out froze the whole handheld: the old input daemon died while the new one was taking over the gamepad and vibration motor. The wait, and the input daemon's clean exit and single-instance lock, are what prevent this; see [services/input-daemon.md](services/input-daemon.md#stopping-restarting-one-instance) before changing either.
 
 ## Shell components: Waybar + nwg-drawer + wlogout
 
@@ -58,7 +58,7 @@ Auto-login on tty1 starts labwc (`/etc/profile.d/zz-rg35xxh-session.sh`); **Log 
 |---|---|---|
 | Panel | **Waybar** | Bottom taskbar, classic-desktop styling: open windows, clock, battery, tray |
 | Launcher | **nwg-drawer** | Full-screen app icon grid — usable with mouse/D-pad (type-to-search launchers rejected: no keyboard) |
-| Power menu | **wlogout** | Full-screen large buttons: Sleep, Restart / Log out, Shut down. Opened by Power (tap) |
+| Power menu | **wlogout** | Full-screen large buttons: Sleep, Restart, Shut down / Battery saver, Log out. Opened by Power (tap) |
 | Notifications | **mako** | |
 
 Chosen over LXQt-on-labwc (heavier) and sfwbar (smaller community) for low RAM and gamepad-friendly large targets.
@@ -73,7 +73,7 @@ Chosen over LXQt-on-labwc (heavier) and sfwbar (smaller community) for low RAM a
 - Physical keyboard: Super+D apps, Super+Enter terminal, Super+E files, Super+X power menu, Alt+F4 close, Print screenshot.
 - **No xdg-desktop-portal**: it delayed Waybar startup (portal activation timeouts) and is only needed for screen sharing/Flatpak; GTK apps use their own file dialogs.
 - Audio: speaker starts at 100 % on a fresh system (`/etc/wireplumber/wireplumber.conf.d/50-rg35xxh.conf`; WirePlumber default is 40 %); the codec DAC and Line Out are set to 100 % by `rg35xxh-hwinit`.
-- Memory: zram swap only (all of RAM, zstd): paging to the microSD looked like a hang, so the 2 GB `/swapfile` is gone and `earlyoom` kills the browser instead of freezing the device (see the changelog). Chromium flags in `/etc/chromium.d/50-rg35xxh`; uBlock Origin Lite force-installed by policy (`/etc/chromium/policies/managed/ublock-origin-lite.json`, downloaded on first launch).
+- Memory: zram swap only (all of RAM, zstd): paging to the microSD looked like a hang, so the 2 GB `/swapfile` is gone and `earlyoom` kills the browser instead of freezing the device (see the changelog). Chromium flags in `/etc/chromium.d/50-rg35xxh`; uBlock Origin Lite and enhanced-h264ify (YouTube in H.264, so the VPU decodes it: [video-decode.md](video-decode.md)) force-installed by policy (`/etc/chromium/policies/managed/extensions.json`, downloaded on first launch). Both go in one file: Chromium does not merge a list policy that is set in two files of the same directory, so a second file would drop one of the two.
 - Component logs: `~/.local/state/session/*.log`, labwc: `~/.local/state/labwc.log`.
 
 ## Core use
@@ -94,7 +94,7 @@ Selection rule: light apps for 1 GB RAM; Qt apps preferred where equal, since mo
 | Purpose | Package(s) | Why |
 |---|---|---|
 | Remote desktop | `moonlight-qt` (official Moonlight Cloudsmith repo, debian/trixie arm64) | Core use case |
-| Browser | `chromium` + uBlock Origin Lite | Smoothest browser tested on this device (see below). Heavy browsing → use the PC via Moonlight |
+| Browser | `chromium` + uBlock Origin Lite + enhanced-h264ify | Smoothest browser tested on this device (see below). Heavy browsing → use the PC via Moonlight |
 | File manager | `thunar`, `udisks2`, `gvfs`, `exfatprogs`, `dosfstools`, `eject` | Light, Wayland-capable, familiar. Other drives (TF2 card, USB sticks) mount with a tap — see [apps/files.md](apps/files.md) |
 | Terminal | `foot` | Lightest Wayland terminal; stable app_id `foot` for copy/paste detection |
 | Text editor | `mousepad` (GUI), `micro` + `nano` (terminal) | Simple; micro supports mouse and Ctrl+C/V |
