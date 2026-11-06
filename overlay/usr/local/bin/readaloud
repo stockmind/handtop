@@ -843,7 +843,7 @@ def label_file(book):
     src = os.path.join(CACHE_DIR, key + '.cover') if key else ''
     if not info.get('cover') or not src or not os.path.exists(src):
         return None
-    out = os.path.join(CACHE_DIR, key + '.label.jpg')
+    out = os.path.join(CACHE_DIR, key + '.label2.jpg')
     if os.path.exists(out) and os.path.getsize(out) > 512:
         return out
     with _LABEL_LOCK:
@@ -851,11 +851,27 @@ def label_file(book):
             return out
         import subprocess
         tmp = out + '.tmp.jpg'
+        pal = palette_file(book)
+        hexc = lambda c: '0x%02x%02x%02x' % tuple(c)
+        if pal.get('left') and pal.get('right'):
+            # The whole cover, centred, with the spare label area filled by the
+            # colours sampled from its left and right border (a printed wrapper,
+            # not a crop through the middle of the artwork).
+            grad = ('gradients=s=576x262:c0=%s:c1=%s:x0=0:y0=131:x1=576:y1=131:'
+                    'type=linear:nb_colors=2' % (hexc(pal['left']), hexc(pal['right'])))
+            cmd = ['ffmpeg', '-y', '-nostdin', '-threads', '1', '-v', 'error',
+                   '-f', 'lavfi', '-i', grad, '-i', src,
+                   '-filter_complex',
+                   '[1:v]scale=576:262:force_original_aspect_ratio=decrease[fg];'
+                   '[0:v][fg]overlay=(W-w)/2:(H-h)/2:shortest=1,format=yuv420p',
+                   '-frames:v', '1', '-q:v', '3', tmp]
+        else:
+            cmd = ['ffmpeg', '-y', '-nostdin', '-threads', '1', '-v', 'error',
+                   '-i', src, '-vf',
+                   'scale=576:262:force_original_aspect_ratio=increase,crop=576:262',
+                   '-q:v', '3', tmp]
         try:
-            subprocess.run(['ffmpeg', '-y', '-nostdin', '-threads', '1', '-v', 'error',
-                            '-i', src, '-vf',
-                            'scale=576:262:force_original_aspect_ratio=increase,crop=576:262',
-                            '-q:v', '3', tmp], timeout=30, capture_output=True)
+            subprocess.run(cmd, timeout=30, capture_output=True)
         except Exception:
             pass
         if os.path.exists(tmp) and os.path.getsize(tmp) > 512:
@@ -875,7 +891,7 @@ def art_file(book):
     src = os.path.join(CACHE_DIR, key + '.cover') if key else ''
     if not info.get('cover') or not src or not os.path.exists(src):
         return None
-    out = os.path.join(CACHE_DIR, key + '.art.jpg')
+    out = os.path.join(CACHE_DIR, key + '.art2.jpg')
     if os.path.exists(out) and os.path.getsize(out) > 512:
         return out
     with _LABEL_LOCK:
@@ -884,10 +900,12 @@ def art_file(book):
         import subprocess
         tmp = out + '.tmp.jpg'
         try:
+            pal = palette_file(book)
+            pad = '0x%02x%02x%02x' % tuple(pal.get('middle') or (244, 239, 226))
             subprocess.run(['ffmpeg', '-y', '-nostdin', '-threads', '1', '-v', 'error',
                             '-i', src, '-vf',
                             'scale=340:340:force_original_aspect_ratio=decrease,'
-                            'pad=360:360:(ow-iw)/2:(oh-ih)/2:color=0xf4efe2',
+                            'pad=360:360:(ow-iw)/2:(oh-ih)/2:color=' + pad,
                             '-q:v', '3', tmp], timeout=30, capture_output=True)
         except Exception:
             pass
@@ -914,7 +932,9 @@ def palette_file(book):
     out = os.path.join(CACHE_DIR, key + '.palette.json')
     try:
         with open(out) as f:
-            return json.load(f)
+            pal = json.load(f)
+        if all(k in pal for k in ('top', 'bottom', 'left', 'right', 'middle')):
+            return pal
     except Exception:
         pass
     import subprocess
@@ -932,8 +952,11 @@ def palette_file(book):
         n = len(chunk) // 3
         return [round(sum(chunk[i * 3 + c] for i in range(n)) / n) for c in range(3)]
     rows = [data[i * 24:(i + 1) * 24] for i in range(8)]
+    col = lambda c: b''.join(rows[i][c * 3:c * 3 + 3] for i in range(8))
     pal = {'top': mean(rows[0] + rows[1]),
            'bottom': mean(rows[6] + rows[7]),
+           'left': mean(col(0)),
+           'right': mean(col(7)),
            'middle': mean(b''.join(rows[2:6]))}
     try:
         with open(out, 'w') as f:
@@ -1865,7 +1888,9 @@ CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://w
  #tape[data-skin="studio"] .shell::before{opacity:.22}
  #tape[data-skin="studio"] .shell::after{content:'';position:absolute;left:12px;right:12px;top:12px;
    bottom:102px;border-radius:18px;z-index:0;
-   background:linear-gradient(180deg,color-mix(in srgb,var(--amb-top,#000) 22%,transparent),
+   background:linear-gradient(90deg,color-mix(in srgb,var(--amb-left,#000) 34%,transparent),
+     transparent 42% 58%,color-mix(in srgb,var(--amb-right,#000) 34%,transparent)),
+     linear-gradient(180deg,color-mix(in srgb,var(--amb-top,#000) 18%,transparent),
      transparent 52%),linear-gradient(180deg,rgba(88,90,94,.34),rgba(30,31,34,.62) 60%,rgba(18,19,21,.78));
    box-shadow:inset 0 0 0 2px rgba(255,255,255,.13),inset 0 2px 16px rgba(0,0,0,.6),
      0 1px 0 rgba(255,255,255,.16)}
@@ -1987,7 +2012,254 @@ CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://w
    font:700 16px/62px Georgia,serif;text-align:center;font-style:normal}
  #tape[data-skin="slim"] .screw{width:9px;height:9px;background:radial-gradient(circle at 35% 30%,#f7f4ea,#a09a88 62%,#6d6758)}
  #tape[data-skin="slim"] .s1{left:12px;top:12px}#tape[data-skin="slim"] .s2{right:12px;top:12px}
- #tape[data-skin="slim"] .s3{left:12px;bottom:12px}#tape[data-skin="slim"] .s4{right:12px;bottom:12px}"""
+ #tape[data-skin="slim"] .s3{left:12px;bottom:12px}#tape[data-skin="slim"] .s4{right:12px;bottom:12px} /* ---------- shared decorations (only some skins show these) ---------- */
+ .deco{display:none;position:absolute;z-index:4}
+ /* ---------- chrome: metal Type IV blank ---------- */
+ #tape[data-skin="chrome"] .shell{border-radius:22px;
+   background:linear-gradient(168deg,#5b6066 0%,#2a2d31 16%,#43484e 34%,#191c20 58%,#34383d 80%,#22252a 100%);
+   box-shadow:0 20px 38px rgba(0,0,0,.72),inset 0 2px 0 rgba(255,255,255,.35),
+     inset 0 -4px 10px rgba(0,0,0,.7),inset 0 0 0 1px rgba(255,255,255,.18)}
+ #tape[data-skin="chrome"] .shell::before{opacity:.35}
+ #tape[data-skin="chrome"] .label{left:22px;right:22px;top:14px;height:150px;border-radius:5px;
+   background:linear-gradient(180deg,#f8fafb 0%,#d8dde1 28%,#aab2b8 52%,#ced3d7 57%,#f0f2f4 100%);
+   box-shadow:inset 0 0 0 2px #79828a,inset 0 3px 6px #fff,0 3px 8px rgba(0,0,0,.55)}
+ #tape[data-skin="chrome"] .label img#cov{display:none}
+ #tape[data-skin="chrome"] .label .cap{top:0;bottom:auto;height:150px;padding:22px 150px 0 158px;
+   background:none;justify-content:center;color:#1a1d20}
+ #tape[data-skin="chrome"] .ttl{font:800 21px/1.15 system-ui,sans-serif;color:#15181b;letter-spacing:-.02em}
+ #tape[data-skin="chrome"] .aut{color:#39424a;font-size:11px}
+ #tape[data-skin="chrome"] .chp{color:#8c2a1c;font-weight:700;letter-spacing:.18em}
+ #tape[data-skin="chrome"] .side,#tape[data-skin="chrome"] .dur{background:#1c2024;color:#e8ecef}
+ #tape[data-skin="chrome"] .stk{display:block;position:absolute;left:34px;top:28px;width:112px;padding:3px;
+   background:#f2f4f5;z-index:2;box-shadow:0 2px 6px rgba(0,0,0,.6),inset 0 0 0 1px #8c949a}
+ #tape[data-skin="chrome"] .stk img{display:block;width:106px;height:106px;object-fit:cover}
+ #tape[data-skin="chrome"] .stk #stkcap{display:none}
+ #tape[data-skin="chrome"] .win{top:182px;width:120px;height:120px;
+   box-shadow:0 0 0 3px #d7dbde,0 0 0 5px #5a6168,inset 0 7px 16px rgba(0,0,0,.9)}
+ #tape[data-skin="chrome"] .win.a{left:126px}
+ #tape[data-skin="chrome"] .win.b{right:126px}
+ #tape[data-skin="chrome"] .hub{width:54px;height:54px;margin:-27px 0 0 -27px;
+   background:repeating-conic-gradient(from 0deg,#f4f6f7 0 30deg,#9aa2a8 30deg 58deg);
+   box-shadow:inset 0 0 0 1px #3a4147,0 1px 4px #000}
+ #tape[data-skin="chrome"] .hub::after{inset:17px}
+ #tape[data-skin="chrome"] .deck{bottom:6px;height:88px}
+ #tape[data-skin="chrome"] .head{top:4px;height:70px;background:linear-gradient(180deg,#111418,#1d2126)}
+ #tape[data-skin="chrome"] .brand{color:#8f979e}
+ #tape[data-skin="chrome"] .brand span{color:#6f777e}
+ #tape[data-skin="chrome"] .counter{background:#0c0e11;color:#9fd8ff}
+ /* ---------- clear: transparent shell, cover as a paper insert ---------- */
+ #tape[data-skin="clear"] .shell{border-radius:26px;
+   background:linear-gradient(155deg,rgba(226,235,240,.74),rgba(142,160,170,.6) 40%,
+     rgba(198,212,220,.62) 70%,rgba(122,140,150,.64));
+   box-shadow:0 22px 40px rgba(0,0,0,.62),inset 0 2px 2px rgba(255,255,255,.85),
+     inset 0 -6px 14px rgba(0,0,0,.35),inset 0 0 0 2px rgba(255,255,255,.5)}
+ #tape[data-skin="clear"] .shell::before{opacity:.5}
+ #tape[data-skin="clear"] .label{left:18px;right:18px;top:14px;height:250px;background:transparent;
+   box-shadow:none;isolation:auto}
+ #tape[data-skin="clear"] .label img#cov{display:none}
+ #tape[data-skin="clear"] .label .tint,#tape[data-skin="clear"] .label .grain,
+ #tape[data-skin="clear"] .label .gloss{display:none}
+ #tape[data-skin="clear"] .label::after{box-shadow:none}
+ #tape[data-skin="clear"] .bigart{display:block;position:absolute;inset:0;width:100%;height:100%;
+   opacity:.62;border-radius:6px;overflow:hidden;z-index:1;box-shadow:inset 0 0 0 1px rgba(255,255,255,.45)}
+ #tape[data-skin="clear"] .bigart img{width:100%;height:100%;object-fit:cover}
+ #tape[data-skin="clear"] .bigart i{background:linear-gradient(180deg,rgba(255,255,255,.16),
+   rgba(232,240,244,.3) 55%,rgba(208,220,226,.72)),radial-gradient(#0000 40%,rgba(255,255,255,.25) 100%)}
+ #tape[data-skin="clear"] .win{top:46px;width:140px;height:140px;
+   box-shadow:0 0 0 3px rgba(255,255,255,.72),0 0 0 5px rgba(90,108,118,.22),
+     inset 0 8px 18px rgba(0,0,0,.82);background:radial-gradient(circle at 50% 45%,#241c14,#0b0806 76%)}
+ #tape[data-skin="clear"] .win.a{left:134px}
+ #tape[data-skin="clear"] .win.b{right:134px}
+ #tape[data-skin="clear"] .hub{width:62px;height:62px;margin:-31px 0 0 -31px;
+   background:repeating-conic-gradient(from 0deg,#fbf8ee 0 32deg,#b9b19c 32deg 58deg)}
+ #tape[data-skin="clear"] .hub::after{inset:20px}
+ #tape[data-skin="clear"] .cap{left:0;right:0;bottom:0;height:62px;padding:6px 12px;
+   background:linear-gradient(180deg,rgba(251,252,252,.94),rgba(223,230,233,.96));color:#20262a}
+ #tape[data-skin="clear"] .ttl{color:#1c2226;font-size:16px}
+ #tape[data-skin="clear"] .aut{color:#5a656c}
+ #tape[data-skin="clear"] .chp{color:#7c5c22}
+ #tape[data-skin="clear"] .side,#tape[data-skin="clear"] .dur{background:rgba(255,255,255,.82);color:#20262a}
+ #tape[data-skin="clear"] .deck{bottom:6px;height:88px}
+ #tape[data-skin="clear"] .head{top:0;height:66px;opacity:.8}
+ #tape[data-skin="clear"] .brand{color:#5a6a72}
+ #tape[data-skin="clear"] .brand span{color:#7a8a92}
+ #tape[data-skin="clear"] .counter{background:#12262c;color:#bfeaf2;box-shadow:inset 0 2px 7px #000,0 1px 0 #ffffff88}
+ /* ---------- wood: hi-fi wooden case, brass plate, VU meter ---------- */
+ #tape[data-skin="wood"] .shell{border-radius:20px;background:
+   repeating-linear-gradient(92deg,#5b3d25 0 6px,#6e4a2c 6px 13px,#4d3420 13px 18px,#7a5232 18px 25px),
+   linear-gradient(180deg,#8a5f3b,#4a3020);
+   box-shadow:0 22px 40px rgba(0,0,0,.72),inset 0 2px 0 rgba(255,255,255,.24),
+     inset 0 0 0 2px #2e1e12,inset 0 -5px 12px rgba(0,0,0,.45)}
+ #tape[data-skin="wood"] .shell::before{opacity:.18}
+ #tape[data-skin="wood"] .label{left:30px;right:30px;top:16px;height:150px;border-radius:4px;
+   background:linear-gradient(180deg,#f5e9ce,#e4d2a9 58%,#d5c08f);
+   box-shadow:inset 0 0 0 2px #8a6a33,inset 0 2px 6px rgba(255,255,255,.6),0 3px 8px rgba(0,0,0,.5)}
+ #tape[data-skin="wood"] .label img#cov{display:none}
+ #tape[data-skin="wood"] .label .cap{top:0;bottom:auto;height:150px;padding:20px 150px 0 152px;
+   background:none;justify-content:center;color:#3c2b15}
+ #tape[data-skin="wood"] .ttl{font:600 22px/1.15 Georgia,'DejaVu Serif',serif;color:#3c2b15}
+ #tape[data-skin="wood"] .aut{color:#6c5230}
+ #tape[data-skin="wood"] .chp{color:#8a3a1a;letter-spacing:.16em}
+ #tape[data-skin="wood"] .side,#tape[data-skin="wood"] .dur{background:#3a2818;color:#f0d9a0}
+ #tape[data-skin="wood"] .stk{display:block;position:absolute;left:40px;top:30px;width:104px;padding:3px;
+   background:#f7efdc;z-index:2;box-shadow:0 2px 6px rgba(0,0,0,.55),inset 0 0 0 1px #8a6a33}
+ #tape[data-skin="wood"] .stk img{display:block;width:98px;height:98px;object-fit:cover}
+ #tape[data-skin="wood"] .stk #stkcap{display:none}
+ #tape[data-skin="wood"] .win{top:182px;width:124px;height:124px;
+   box-shadow:0 0 0 4px #d8bd84,0 0 0 6px #3a2818,inset 0 7px 16px rgba(0,0,0,.85)}
+ #tape[data-skin="wood"] .win.a{left:120px}
+ #tape[data-skin="wood"] .win.b{right:120px}
+ #tape[data-skin="wood"] .hub{width:56px;height:56px;margin:-28px 0 0 -28px;
+   background:repeating-conic-gradient(from 0deg,#f6ecd4 0 30deg,#b89a62 30deg 58deg)}
+ #tape[data-skin="wood"] .hub::after{inset:18px}
+ #tape[data-skin="wood"] .deck{bottom:6px;height:92px}
+ #tape[data-skin="wood"] .head{top:2px;height:68px;background:linear-gradient(180deg,#17120c,#2a2114)}
+ #tape[data-skin="wood"] .meter{display:flex;left:32px;bottom:16px;height:34px;gap:3px;align-items:flex-end;z-index:5}
+ #tape[data-skin="wood"] .meter i{display:block;width:5px;border-radius:1px;
+   background:linear-gradient(180deg,#ff5a3c,#ffd35a 55%,#7ad48a)}
+ #tape[data-skin="wood"] .meter i:nth-child(1){height:28%}
+ #tape[data-skin="wood"] .meter i:nth-child(2){height:44%}
+ #tape[data-skin="wood"] .meter i:nth-child(3){height:36%}
+ #tape[data-skin="wood"] .meter i:nth-child(4){height:58%}
+ #tape[data-skin="wood"] .meter i:nth-child(5){height:48%}
+ #tape[data-skin="wood"] .meter i:nth-child(6){height:70%}
+ #tape[data-skin="wood"] .meter i:nth-child(7){height:40%}
+ #tape[data-skin="wood"] .meter i:nth-child(8){height:56%}
+ #tape[data-skin="wood"] .brand{display:none}
+ #tape[data-skin="wood"] .counter{background:#241a10;color:#f0d08a}
+ /* ---------- vinyl: sleeve + record ---------- */
+ #tape[data-skin="vinyl"] .shell{left:50%;margin-left:-198px;top:0;width:396px;height:392px;border-radius:3px;
+   background:#0f0f12;box-shadow:0 22px 40px rgba(0,0,0,.72),inset 0 0 0 1px rgba(255,255,255,.08)}
+ #tape[data-skin="vinyl"] .shell::before{display:none}
+ #tape[data-skin="vinyl"] .label{left:0;right:0;top:0;height:392px;border-radius:3px;background:transparent;
+   box-shadow:none;overflow:visible;isolation:auto;z-index:2}
+ #tape[data-skin="vinyl"] .label img#cov{display:none}
+ #tape[data-skin="vinyl"] .label .tint,#tape[data-skin="vinyl"] .label .grain,
+ #tape[data-skin="vinyl"] .label .gloss,#tape[data-skin="vinyl"] .label::after{display:none}
+ #tape[data-skin="vinyl"] .bigart{display:block;position:absolute;left:0;top:0;width:396px;height:392px;
+   border-radius:3px;overflow:hidden;opacity:1;z-index:1}
+ #tape[data-skin="vinyl"] .bigart img{width:100%;height:100%;object-fit:cover}
+ #tape[data-skin="vinyl"] .bigart i{background:linear-gradient(180deg,#0000 52%,rgba(0,0,0,.82) 100%)}
+ #tape[data-skin="vinyl"] .stk,#tape[data-skin="vinyl"] .deck,#tape[data-skin="vinyl"] .screw,
+ #tape[data-skin="vinyl"] .slimhead,#tape[data-skin="vinyl"] .slimsnap{display:none}
+ #tape[data-skin="vinyl"] .win{display:none}
+ #tape[data-skin="vinyl"] .win.a{display:block;left:214px;top:52px;width:288px;height:288px;border-radius:50%;z-index:3;
+   background:repeating-radial-gradient(circle,#101012 0 2px,#17171a 2px 4px,#0b0b0d 4px 6px);
+   box-shadow:0 10px 26px rgba(0,0,0,.8),inset 0 0 40px #000}
+ #tape[data-skin="vinyl"] .win.a .pack{display:none}
+ #tape[data-skin="vinyl"] .win.a .hub{width:86px;height:86px;margin:-43px 0 0 -43px;
+   background:radial-gradient(circle,#d8b35a 0 30%,#b23a2a 31% 44%,#e8dcc0 45% 100%);
+   box-shadow:inset 0 0 0 2px #7a2c20,0 2px 6px #000}
+ #tape[data-skin="vinyl"] .win.a .hub::after{inset:36px}
+ #tape[data-skin="vinyl"] .tonearm{display:block;right:10px;top:4px;width:8px;height:226px;z-index:4;
+   background:linear-gradient(90deg,#e2e3e6,#7c7f86);border-radius:4px;
+   transform-origin:top center;transform:rotate(24deg);box-shadow:0 2px 6px rgba(0,0,0,.6)}
+ #tape[data-skin="vinyl"] .tonearm b{position:absolute;left:-12px;bottom:-14px;width:32px;height:30px;
+   border-radius:6px;background:linear-gradient(180deg,#c9cbd0,#6e7178)}
+ #tape[data-skin="vinyl"] .cap{left:0;right:0;bottom:0;height:126px;padding:10px 18px;z-index:5;
+   background:linear-gradient(180deg,#0000,rgba(0,0,0,.82) 42%,rgba(0,0,0,.92))}
+ #tape[data-skin="vinyl"] .ttl{font-size:20px}
+ #tape[data-skin="vinyl"] .side{background:rgba(0,0,0,.6)}
+ #tape[data-skin="vinyl"] .dur{right:auto;left:10px;top:34px;background:rgba(0,0,0,.6)}
+ /* ---------- minidisc ---------- */
+ #tape[data-skin="minidisc"] .shell{left:50%;margin-left:-210px;top:28px;width:420px;height:330px;border-radius:18px;
+   background:linear-gradient(160deg,rgba(126,196,214,.8),rgba(38,88,108,.84) 50%,rgba(92,162,182,.74));
+   box-shadow:0 20px 38px rgba(0,0,0,.65),inset 0 2px 0 rgba(255,255,255,.6),
+     inset 0 -4px 10px rgba(0,0,0,.35),inset 0 0 0 2px rgba(255,255,255,.3)}
+ #tape[data-skin="minidisc"] .shell::before{opacity:.3}
+ #tape[data-skin="minidisc"] .label{left:20px;right:20px;top:14px;height:94px;border-radius:5px;
+   background:#f6f3e9;box-shadow:inset 0 0 0 1px #3a4a50,0 2px 6px rgba(0,0,0,.4)}
+ #tape[data-skin="minidisc"] .label img#cov{display:none}
+ #tape[data-skin="minidisc"] .label .cap{position:absolute;inset:0;padding:8px 12px;background:none;color:#1e2a2e}
+ #tape[data-skin="minidisc"] .label .tint,#tape[data-skin="minidisc"] .label .grain,
+ #tape[data-skin="minidisc"] .label .gloss{display:none}
+ #tape[data-skin="minidisc"] .ttl{color:#14232a;font-size:15px}
+ #tape[data-skin="minidisc"] .aut{color:#4a5a60}
+ #tape[data-skin="minidisc"] .chp{color:#2e6a78}
+ #tape[data-skin="minidisc"] .side,#tape[data-skin="minidisc"] .dur{background:#224a56;color:#dff4f8}
+ #tape[data-skin="minidisc"] .stk{display:block;position:absolute;left:50%;top:132px;width:168px;height:168px;
+   margin-left:-90px;border-radius:50%;overflow:hidden;z-index:2;
+   box-shadow:0 0 0 6px #e7ecec,0 0 0 8px #31545e,0 6px 16px rgba(0,0,0,.5)}
+ #tape[data-skin="minidisc"] .stk img{width:100%;height:100%;object-fit:cover}
+ #tape[data-skin="minidisc"] .stk #stkcap{display:none}
+ #tape[data-skin="minidisc"] .win{display:none}
+ #tape[data-skin="minidisc"] .win.a{display:block;left:50%;top:205px;width:22px;height:22px;margin-left:-11px;
+   border-radius:50%;z-index:3;background:#cfd6d6;box-shadow:inset 0 0 0 1px #0006}
+ #tape[data-skin="minidisc"] .win.a .pack{display:none}
+ #tape[data-skin="minidisc"] .win.a .hub{width:16px;height:16px;margin:-8px 0 0 -8px;
+   background:repeating-conic-gradient(from 0deg,#f1f0ea 0 40deg,#9aa6a6 40deg 60deg)}
+ #tape[data-skin="minidisc"] .win.a .hub::after{inset:5px}
+ #tape[data-skin="minidisc"] .deck{left:20px;right:20px;bottom:10px;height:44px}
+ #tape[data-skin="minidisc"] .head,#tape[data-skin="minidisc"] .pin{display:none}
+ #tape[data-skin="minidisc"] .brand{bottom:4px;color:#e7f4f7;font-size:0}
+ #tape[data-skin="minidisc"] .brand::before{content:'MINIDISC \00b7 MD';font-size:8px;letter-spacing:.18em}
+ #tape[data-skin="minidisc"] .brand span{display:none}
+ #tape[data-skin="minidisc"] .counter{background:#10262c;color:#9fe6f2}
+ /* ---------- walkman ---------- */
+ #tape[data-skin="walkman"] .shell{left:50%;margin-left:-240px;top:10px;width:480px;height:380px;border-radius:30px;
+   background:linear-gradient(160deg,#33424f,#1a232c 45%,#0e1318 100%);
+   box-shadow:0 20px 40px rgba(0,0,0,.72),inset 0 2px 0 rgba(255,255,255,.2),
+     inset 0 -4px 10px rgba(0,0,0,.7),inset 0 0 0 1px rgba(255,255,255,.08)}
+ #tape[data-skin="walkman"] .shell::before{opacity:.2}
+ #tape[data-skin="walkman"] .shell::after{content:'';position:absolute;right:28px;top:78px;width:92px;height:148px;
+   border-radius:46px;background:repeating-radial-gradient(circle at 50% 50%,#0b1014 0 2px,#26323c 2px 4px);
+   box-shadow:inset 0 0 14px #000;opacity:.85;z-index:0}
+ #tape[data-skin="walkman"] .label{left:22px;right:auto;top:20px;width:330px;height:250px;border-radius:10px;
+   background:#111;box-shadow:inset 0 0 0 2px #4a5a68,inset 0 4px 14px #000,0 2px 6px #0007}
+ #tape[data-skin="walkman"] .label .cap{height:72px;padding:6px 10px;background:linear-gradient(180deg,#0000,#000c)}
+ #tape[data-skin="walkman"] .side,#tape[data-skin="walkman"] .dur{background:rgba(10,14,18,.82);color:#d8e2ea}
+ #tape[data-skin="walkman"] .win{top:44px;width:112px;height:112px}
+ #tape[data-skin="walkman"] .win.a{left:46px}
+ #tape[data-skin="walkman"] .win.b{right:auto;left:172px}
+ #tape[data-skin="walkman"] .hub{width:50px;height:50px;margin:-25px 0 0 -25px;
+   background:repeating-conic-gradient(from 0deg,#f6f2e6 0 32deg,#b9b19c 32deg 58deg)}
+ #tape[data-skin="walkman"] .hub::after{inset:16px}
+ #tape[data-skin="walkman"] .deck{left:auto;right:22px;top:20px;bottom:auto;width:100px;height:34px}
+ #tape[data-skin="walkman"] .head,#tape[data-skin="walkman"] .pin,#tape[data-skin="walkman"] .brand{display:none}
+ #tape[data-skin="walkman"] .counter{background:#0a1216;color:#7fd6f2;box-shadow:inset 0 2px 6px #000,0 1px 0 #ffffff33}
+ #tape[data-skin="walkman"] .keys{display:flex;left:22px;right:22px;bottom:14px;height:74px;gap:8px;z-index:5}
+ #tape[data-skin="walkman"] .keys i{flex:1;border-radius:4px;
+   background:linear-gradient(180deg,#6a7d8d,#2a3741 55%,#1a232b);
+   box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 3px 5px rgba(0,0,0,.55)}
+ #tape[data-skin="walkman"] .keys i:nth-child(3){background:linear-gradient(180deg,#8fd8f5,#2f6f8c 60%,#1d4658)}
+ body.playing #tape[data-skin="walkman"] .keys i:nth-child(3){box-shadow:0 0 12px #6cd0ff,inset 0 1px 0 #fff8}
+ /* ---------- 8-track ---------- */
+ #tape[data-skin="cart"] .shell{left:50%;margin-left:-250px;top:14px;width:500px;height:372px;border-radius:14px;
+   background:linear-gradient(180deg,#2e2e31,#18181b 55%,#0c0c0e);
+   box-shadow:0 20px 40px rgba(0,0,0,.75),inset 0 2px 0 rgba(255,255,255,.16),inset 0 -4px 10px #000}
+ #tape[data-skin="cart"] .shell::before{opacity:.15}
+ #tape[data-skin="cart"] .label{left:18px;right:18px;top:14px;height:226px;border-radius:3px;
+   background:#e8dfc8;box-shadow:inset 0 0 0 2px #0a0a0c,0 2px 6px #000}
+ #tape[data-skin="cart"] .ttl{font-size:19px}
+ #tape[data-skin="cart"] .chp{color:#8a3a1a}
+ #tape[data-skin="cart"] .side{background:#7a1e14;color:#fff}
+ #tape[data-skin="cart"] .dur{background:#1a1a1c;color:#f0e2c0}
+ #tape[data-skin="cart"] .stk{display:block;position:absolute;left:auto;right:38px;top:38px;width:108px;padding:3px;
+   background:#f7f1e2;z-index:2;transform:rotate(1.5deg);box-shadow:0 2px 6px #0007}
+ #tape[data-skin="cart"] .stk img{display:block;width:102px;height:102px;object-fit:cover}
+ #tape[data-skin="cart"] .stk #stkcap{display:none}
+ #tape[data-skin="cart"] .label .cap{padding:8px 130px 8px 14px;height:88px;bottom:0;top:auto;
+   justify-content:flex-end;background:linear-gradient(180deg,#0000,rgba(0,0,0,.62) 32%,rgba(0,0,0,.82))}
+ #tape[data-skin="cart"] .ttl,#tape[data-skin="cart"] .aut,#tape[data-skin="cart"] .chp{color:#f5ebd2}
+ #tape[data-skin="cart"] .chp{color:#e0b48a}
+ #tape[data-skin="cart"] .win{display:none}
+ #tape[data-skin="cart"] .win.a{display:block;left:50%;top:258px;width:150px;height:70px;margin-left:-75px;
+   border-radius:6px;background:#0a0a0b;box-shadow:inset 0 3px 10px #000,0 0 0 2px #3a3a3e}
+ #tape[data-skin="cart"] .win.a .reel{inset:6px 20px}
+ #tape[data-skin="cart"] .win.a .pack{border-radius:50%}
+ #tape[data-skin="cart"] .win.a .hub{width:34px;height:34px;margin:-17px 0 0 -17px;
+   background:repeating-conic-gradient(from 0deg,#efe6d2 0 30deg,#a89a7e 30deg 58deg)}
+ #tape[data-skin="cart"] .win.a .hub::after{inset:11px}
+ #tape[data-skin="cart"] .deck{left:18px;right:18px;bottom:6px;height:66px}
+ #tape[data-skin="cart"] .head{display:none}
+ #tape[data-skin="cart"] .pin{display:none}
+ #tape[data-skin="cart"] .brand{left:8px;bottom:2px;color:#9a9a9e;font-size:0}
+ #tape[data-skin="cart"] .brand::before{content:'8-TRACK \00b7 PROGRAM';font-size:8px;letter-spacing:.18em}
+ #tape[data-skin="cart"] .brand span{display:none}
+
+ #tape[data-skin="cart"] .counter{right:8px;background:#0c0c0e;color:#e8c86a}
+
+"""
 
 CASSETTE_HTML = r"""<div id="tape" data-skin="label">
  <div class="shell">
@@ -2011,6 +2283,9 @@ CASSETTE_HTML = r"""<div id="tape" data-skin="label">
   <div class="win b"><div class="reel" id="rb"><div class="pack"></div><div class="hub"></div></div></div>
   <div class="slimhead"><b>A</b><span id="slimline"></span><em id="slimtime">00:00</em></div>
   <div class="slimsnap"><img id="slimcov" alt=""><div><b id="slimaut"></b><span id="slimpct"></span></div><i>RA</i></div>
+  <div class="deco keys"><i></i><i></i><i></i><i></i><i></i></div>
+  <div class="deco meter"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <div class="deco tonearm"><b></b></div>
   <div class="deck">
    <div class="head"></div>
    <div class="pin p1"></div><div class="pin p2"></div>
@@ -2601,8 +2876,10 @@ function chapterName(i) {
 
 // ---- listen-only tape (the same audio element, so switching is seamless) ----
 let tapeMode = false, tapeDur = null, tapeSkin = 'label';
-const SKINS = ['label', 'studio', 'slim'];
-const SKIN_NAMES = {label: 'Mixtape', studio: 'Studio', slim: 'Slim'};
+const SKINS = ['label', 'studio', 'slim', 'chrome', 'clear', 'wood', 'vinyl', 'minidisc', 'walkman', 'cart'];
+const SKIN_NAMES = {label: 'Mixtape', studio: 'Studio', slim: 'Slim', chrome: 'Chrome',
+  clear: 'Clear', wood: 'Wood', vinyl: 'Vinyl', minidisc: 'MiniDisc',
+  walkman: 'Walkman', cart: '8-Track'};
 try { tapeSkin = localStorage.getItem('ra:skin') || 'label'; } catch (e) {}
 const forcedSkinR = new URLSearchParams(location.search).get('skin');
 if (SKINS.includes(forcedSkinR)) tapeSkin = forcedSkinR;
@@ -2673,6 +2950,8 @@ function tapeInit() {
       const st = document.documentElement.style;
       if (c.top) st.setProperty('--amb-top', 'rgb(' + c.top.join(',') + ')');
       if (c.bottom) st.setProperty('--amb-bot', 'rgb(' + c.bottom.join(',') + ')');
+      if (c.left) st.setProperty('--amb-left', 'rgb(' + c.left.join(',') + ')');
+      if (c.right) st.setProperty('--amb-right', 'rgb(' + c.right.join(',') + ')');
     }).catch(() => {});
   }
   const tt = tapeTotals();
@@ -3372,8 +3651,10 @@ function showChapter() {
 }
 
 // ---- skins --------------------------------------------------------------
-const SKINS = ['label', 'studio', 'slim'];
-const SKIN_NAMES = {label: 'Mixtape', studio: 'Studio', slim: 'Slim'};
+const SKINS = ['label', 'studio', 'slim', 'chrome', 'clear', 'wood', 'vinyl', 'minidisc', 'walkman', 'cart'];
+const SKIN_NAMES = {label: 'Mixtape', studio: 'Studio', slim: 'Slim', chrome: 'Chrome',
+  clear: 'Clear', wood: 'Wood', vinyl: 'Vinyl', minidisc: 'MiniDisc',
+  walkman: 'Walkman', cart: '8-Track'};
 let skin = 'label';
 try { skin = localStorage.getItem('ra:skin') || 'label'; } catch (e) {}
 const forcedSkin = new URLSearchParams(location.search).get('skin');
@@ -3730,6 +4011,8 @@ fetch('/api/book/' + encodeURIComponent(BOOK))
       const st = document.documentElement.style;
       if (c.top) st.setProperty('--amb-top', 'rgb(' + c.top.join(',') + ')');
       if (c.bottom) st.setProperty('--amb-bot', 'rgb(' + c.bottom.join(',') + ')');
+      if (c.left) st.setProperty('--amb-left', 'rgb(' + c.left.join(',') + ')');
+      if (c.right) st.setProperty('--amb-right', 'rgb(' + c.right.join(',') + ')');
     }).catch(() => {});
   }
   titleEl.textContent = d.title || '';

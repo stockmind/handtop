@@ -64,14 +64,21 @@ the exact section/paragraph fraction.
 
 ## Skins
 
-Three cassette skins ship, changed with `k` or the "Tape skin" row in the
-picker (stored as `ra:skin`, forced with `?skin=label|studio|slim`):
+Ten skins ship, changed with `k` or the "Tape skin" row in the picker
+(stored as `ra:skin`, forced with `?skin=`):
 
 | Skin | Look | Where the info goes |
 |---|---|---|
-| **Mixtape** | cream shell, the cover printed across the whole label, reel windows punched through it | title, author and chapter on the printed band at the label bottom; duration chip top right |
-| **Studio** | smoky translucent shell, big reels, printed top strip with a red rule, red `SIDE`/chapter blocks, a taped-on photo | title and author on the top strip, chapter number in the right block, a soft print of the cover in the free space between and under the reels, plus a sharp cover sticker with chapter and progress |
-| **Slim** | white dictaphone tape: header window, ribbed tape deck, hand-written bottom label | title and chapter in the header line, elapsed time under it, author and progress on the bottom sticker next to the cover and a red tab |
+| **Mixtape** | cream shell, the cover printed across the label (whole cover, side bars filled from the cover edge colours), reel windows punched through | title, author and chapter on the printed band; duration top right |
+| **Studio** | smoky translucent shell, big reels, top strip with a red rule, red SIDE/chapter blocks, a blended cover print between and under the reels plus a taped-on photo | title/author on the top strip, chapter in the right block, sticker caption with chapter and progress |
+| **Slim** | white dictaphone tape: header window, ribbed deck, hand-written bottom sticker | title/chapter/time in the header, author/progress on the sticker with the cover |
+| **Chrome** | glossy metal Type IV shell, brushed silver label plate, chrome reels | title/author/chapter on the plate, cover photo inset, duration chip |
+| **Clear** | transparent shell with a paper cover insert behind the mechanism, white caption strip | title and chapter on the strip; cover faded behind the reels |
+| **Wood** | wooden hi-fi case, brass plate and reel rims, a small VU meter | title on the brass plate, cover photo, chapter, elapsed on the counter |
+| **Vinyl** | album sleeve with the cover, a black record with a printed centre label, tonearm | title/author/chapter on the sleeve; the disc label carries the chapter number |
+| **MiniDisc** | translucent teal MD cartridge, round window showing the cover, side label strip | title/author/chapter on the strip, centre hub turns, progress on the counter |
+| **Walkman** | portable player body, cassette window with cover and reels, five transport keys, speaker grille | title/chapter over the window, elapsed and percentage in the LCD |
+| **8-Track** | black cartridge, large cover label, single loop window, PROGRAM branding | title/author/chapter on the label band, cover sticker, counter |
 
 The skins are pure CSS on the same markup; only the cover images differ (a
 576x262 label crop and a 360 px square print, both cached). Nothing animates

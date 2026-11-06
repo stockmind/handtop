@@ -197,11 +197,14 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(info['title'], 'Test Tape')
         self.assertEqual(info['chapters'], [])
 
-    def test_label_is_cropped_to_the_tape(self):
+    def test_label_uses_the_cover_and_its_edge_colours(self):
         tape = make_m4b(self.tmp)
         label = ra.label_file(str(tape))
         self.assertTrue(label and pathlib.Path(label).stat().st_size > 512)
-        self.assertTrue(label.endswith('.label.jpg'))
+        self.assertTrue(label.endswith('.label2.jpg'))
+        pal = ra.palette_file(str(tape))
+        self.assertEqual(len(pal['left']), 3)
+        self.assertEqual(len(pal['right']), 3)
 
 
 class ServerTests(unittest.TestCase):

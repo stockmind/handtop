@@ -61,12 +61,13 @@
   it; the switch is seamless because it reuses the same audio element, so
   position and playback carry over, and the preference is remembered. The tape
   shows the cover, book, author, chapter, elapsed/total time and percentage.
-  Three skins ship (`k` or the picker): Mixtape (the cover printed across the
-  label), Studio (translucent shell, big reels, red side/chapter blocks and a
-  taped-on cover print) and Slim (a dictaphone tape with a header line and a
-  hand-written bottom sticker). The cover is cropped once to a label and a
-  square print, and the border of the cover is sampled for an ambient tint
-  around the cassette; the skins are CSS-only and only the reels animate.
+  Ten skins ship (`k` or the picker): Mixtape, Studio, Slim, Chrome, Clear,
+  Wood, Vinyl, MiniDisc, Walkman and 8-Track, each embedding the cover, title,
+  author, chapter and progress in its own layout. The label keeps the whole
+  cover with the spare area filled from the colours sampled at its left and
+  right border; the same palette tints the room around the cassette. Every
+  skin is CSS-only on one shared markup and only the reels (or the MD hub /
+  record label) animate.
 
 - New: read aloud plays `.m4b`/`.m4a` audiobooks when there is no epub, drawing
   an old compact cassette that fills the panel instead of the book view. The
