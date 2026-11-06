@@ -544,12 +544,15 @@ def is_readaloud(path):
 # than its headers. Parsed metadata, the cover and a label-sized crop are
 # cached on disk next to the epub covers.
 AUDIO_EXTS = ('.m4b', '.m4a')
+MUSIC_EXTS = ('.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wav')
+MUSIC_ALL = tuple(dict.fromkeys(AUDIO_EXTS + MUSIC_EXTS))
 _AINFO = {}
 _LABEL_LOCK = threading.Lock()
+_MUSIC = {'at': 0.0, 'root': '', 'data': None}
 
 
 def is_audio(path):
-    return os.path.splitext(path)[1].lower() in AUDIO_EXTS
+    return os.path.splitext(path)[1].lower() in MUSIC_ALL
 
 
 def _atoms(f, start, end):
@@ -595,8 +598,8 @@ def _descend(f, start, end, path):
 
 
 _MP4_TAGS = {b'\xa9nam': 'title', b'\xa9alb': 'album', b'\xa9ART': 'artist',
-             b'aART': 'artist', b'\xa9wrt': 'author', b'\xa9grp': 'series',
-             b'\xa9day': 'year'}
+             b'aART': 'albumartist', b'\xa9wrt': 'author', b'\xa9grp': 'series',
+             b'\xa9day': 'year', b'\xa9gen': 'genre'}
 
 
 def _mp4_ilst(f, start, end):
@@ -757,10 +760,95 @@ def _mp4_chapter_track(f, moov):
     return []
 
 
+def _track_pair(v):
+    try:
+        a, _, b = str(v or '').partition('/')
+        return int(a or 0), int(b or 0)
+    except Exception:
+        return 0, 0
+
+
+def _extract_cover(path, key):
+    """One embedded picture (or folder.jpg) to <key>.cover, like the epub path."""
+    import subprocess
+    cover = os.path.join(CACHE_DIR, key + '.cover')
+    mime = os.path.join(CACHE_DIR, key + '.mime')
+    if os.path.exists(cover) and os.path.getsize(cover) > 256:
+        return True
+    try:
+        proc = subprocess.run(['ffmpeg', '-y', '-nostdin', '-threads', '1', '-v', 'error',
+                               '-i', path, '-map', '0:v:0', '-c', 'copy', '-frames:v', '1',
+                               '-f', 'image2pipe', '-'],
+                              timeout=30, capture_output=True)
+        data = proc.stdout
+        kind = 'image/jpeg' if data[:3] == b'\xff\xd8\xff' else \
+               'image/png' if data[:8] == b'\x89PNG\r\n\x1a\n' else ''
+        if kind and len(data) > 256:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(cover, 'wb') as f:
+                f.write(data)
+            with open(mime, 'w') as f:
+                f.write(kind)
+            return True
+    except Exception:
+        pass
+    folder = os.path.dirname(path)
+    for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        low = name.lower()
+        if low.rsplit('.', 1)[0] in ('cover', 'folder', 'front', 'album') and \
+           low.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+            src = os.path.join(folder, name)
+            try:
+                with open(src, 'rb') as f:
+                    data = f.read()
+                if len(data) < 256:
+                    continue
+                os.makedirs(CACHE_DIR, exist_ok=True)
+                with open(cover, 'wb') as f:
+                    f.write(data)
+                with open(mime, 'w') as f:
+                    f.write('image/png' if low.endswith('.png') else
+                            'image/webp' if low.endswith('.webp') else 'image/jpeg')
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def _probe_into(info, path, key):
+    """ffprobe fallback for mp3/flac/ogg/... (the MP4 path reads boxes itself)."""
+    import subprocess
+    try:
+        proc = subprocess.run(['ffprobe', '-v', 'error', '-show_format', '-show_streams',
+                               '-of', 'json', path], timeout=30, capture_output=True)
+        d = json.loads(proc.stdout or b'{}')
+        tags = {k.lower(): v for k, v in (d.get('format', {}).get('tags') or {}).items()}
+        get = lambda *names: next((str(tags[n]).strip() for n in names if tags.get(n)), '')
+        title = get('title')
+        if title:
+            info['title'] = title
+        info['author'] = get('artist', 'album_artist', 'author')
+        info['album'] = get('album')
+        info['albumartist'] = get('album_artist')
+        info['genre'] = get('genre')
+        info['year'] = get('date', 'year')[:4]
+        info['track'], info['track_total'] = _track_pair(get('track'))
+        try:
+            info['duration'] = round(float(d.get('format', {}).get('duration') or 0), 2)
+        except Exception:
+            info['duration'] = 0.0
+        if _extract_cover(path, key):
+            info['cover'] = True
+    except Exception:
+        pass
+
+
 def audio_info(path):
-    """Metadata, chapters and cover for an m4b, cached like book_info."""
+    """Metadata, chapters and cover for an audio file, cached like book_info."""
     fallback = posixpath.splitext(os.path.basename(path))[0]
     blank = {'title': fallback, 'author': '', 'subtitle': '', 'series': '',
+             'album': '', 'albumartist': '', 'track': 0, 'track_total': 0,
+             'year': '', 'genre': '',
              'cover': False, 'readaloud': False, 'audio': True, 'duration': 0.0,
              'chapters': [], 'key': ''}
     try:
@@ -782,7 +870,12 @@ def audio_info(path):
         except Exception:
             pass
     else:
+        ext = posixpath.splitext(path)[1].lower()
+        if ext not in ('.m4b', '.m4a'):
+            _probe_into(info, path, key)
         try:
+            if ext not in ('.m4b', '.m4a'):
+                raise StopIteration       # probe path fills the same fields
             with open(path, 'rb') as f:
                 size = os.fstat(f.fileno()).st_size
                 moov = _child(f, 0, size, b'moov')
@@ -798,6 +891,13 @@ def audio_info(path):
                         info['title'] = title
                     info['author'] = author
                     info['series'] = get(b'\xa9grp')
+                    info['album'] = get(b'\xa9alb')
+                    info['albumartist'] = get(b'aART')
+                    info['genre'] = get(b'\xa9gen')
+                    info['year'] = get(b'\xa9day')[:4]
+                    trk = tags.get(b'trkn')
+                    if trk and len(trk[1]) >= 6:
+                        info['track'], info['track_total'] = struct.unpack('>HH', trk[1][2:6])
                     covr = tags.get(b'covr')
                     if covr and covr[1]:
                         mime = {13: 'image/jpeg', 14: 'image/png', 27: 'image/bmp'}.get(covr[0], 'image/jpeg')
@@ -808,6 +908,8 @@ def audio_info(path):
                             mf.write(mime)
                         info['cover'] = True
                     info['chapters'] = _mp4_chpl(f, moov) or _mp4_chapter_track(f, moov)
+        except StopIteration:
+            pass
         except Exception:
             pass
         if info['title'] and ':' in info['title']:
@@ -917,6 +1019,70 @@ def art_file(book):
         except OSError:
             pass
     return src
+
+
+
+# ---- music library ------------------------------------------------------
+# Tracks are grouped into albums by tag (or by folder when untagged). Per-file
+# metadata is cached by audio_info, so the grouping is a listdir plus JSON reads.
+def music_data(root):
+    now = time.time()
+    if _MUSIC['data'] is not None and _MUSIC['root'] == root and now - _MUSIC['at'] < 30:
+        return _MUSIC['data']
+    groups = {}
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for name in files:
+            if posixpath.splitext(name)[1].lower() not in MUSIC_EXTS:
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                i = audio_info(path)
+            except Exception:
+                continue
+            album = (i.get('album') or '').strip() or os.path.basename(dirpath)
+            artist = (i.get('albumartist') or i.get('author') or '').strip() or 'Unknown artist'
+            key = (album.lower(), artist.lower(), '' if i.get('album') else dirpath)
+            gid = hashlib.sha1(('m1|' + '|'.join(key)).encode()).hexdigest()[:10]
+            g = groups.setdefault(gid, {'id': gid, 'album': album, 'artist': artist,
+                                        'year': (i.get('year') or ''), 'cover': '',
+                                        'tracks': [], 'duration': 0.0})
+            if not g['year'] and i.get('year'):
+                g['year'] = i['year']
+            if not g['cover'] and i.get('cover'):
+                g['cover'] = os.path.relpath(path, root).replace(os.sep, '/')
+            g['tracks'].append({
+                'file': os.path.relpath(path, root).replace(os.sep, '/'),
+                'title': i.get('title') or name,
+                'artist': artist,
+                'album': album,
+                'track': int(i.get('track') or 0),
+                'duration': float(i.get('duration') or 0),
+                'cover': bool(i.get('cover')),
+            })
+    albums = []
+    for g in groups.values():
+        g['tracks'].sort(key=lambda t: (t['track'] or 9999, t['title'].lower()))
+        g['duration'] = round(sum(t['duration'] for t in g['tracks']), 1)
+        if not g['cover']:
+            g['cover'] = g['tracks'][0]['file'] if g['tracks'] else ''
+        albums.append(g)
+    albums.sort(key=lambda a: (a['artist'].lower(), a['album'].lower()))
+    _MUSIC.update(at=now, root=root, data=albums)
+    return albums
+
+
+def music_queue(root, album='', shuffle=False):
+    import random
+    albums = music_data(root)
+    if album:
+        tracks = next((a['tracks'] for a in albums if a['id'] == album), [])
+    else:
+        tracks = [t for a in albums for t in a['tracks']]
+    tracks = list(tracks)
+    if shuffle:
+        random.shuffle(tracks)
+    return tracks
 
 
 def palette_file(book):
@@ -1096,13 +1262,73 @@ LIBRARY_HTML = """<!doctype html><html><head><meta charset="utf-8"><title>Read a
  .tprev .pb{height:4px;border-radius:2px;margin-top:8px}
  .tname{padding:6px 10px;font-size:12px;border-top:1px solid var(--line);flex:0 0 auto}
  #empty{padding:26px 16px;color:var(--dim);font-size:13px;line-height:1.6}
+ #tabs{display:flex;gap:2px;flex:0 0 auto}
+ #tabs button{width:auto;min-width:52px;height:27px;font-size:11px;font-weight:600;
+   border-radius:6px;background:var(--card);color:var(--dim);padding:0 8px}
+ #tabs button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+ #sortbtn,#shufbtn{width:auto;min-width:0;padding:0 7px;font-size:11px;height:27px}
+ #music{flex:1;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;
+   scrollbar-color:var(--line) var(--bg)}
+ #music::-webkit-scrollbar{width:6px}
+ #music::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+ #music::-webkit-scrollbar-track{background:var(--bg)}
+ #music.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));
+   gap:12px 10px;padding:12px 10px 20px;align-content:start}
+ #music.grid .st{display:flex;flex-direction:column;align-items:stretch;gap:5px;border:0;
+   padding:0;background:none;border-radius:7px}
+ #music.grid .cover{width:100%;border-radius:7px;overflow:hidden;
+   box-shadow:0 3px 10px rgba(0,0,0,.5),inset 0 0 0 1px rgba(255,255,255,.06)}
+ #music.grid img{width:100%;height:auto;aspect-ratio:2/3;object-fit:cover;border-radius:7px}
+ #music.grid .info{width:100%;padding:0 1px}
+ #music.grid .t{font-size:12px;line-height:1.25;white-space:normal;max-height:2.5em;overflow:hidden;
+   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+ #music.grid .s,#music.grid .a,#music.grid .m{display:none}
+ #music.flow{display:flex;flex-direction:row;gap:0;padding:26px calc(50% - 75px);overflow-x:auto;
+   overflow-y:hidden;align-items:center;perspective:700px;perspective-origin:50% 45%;
+   scrollbar-width:none;background:var(--bg)}
+ #music.flow::-webkit-scrollbar{display:none}
+ #music.flow .st{flex:0 0 auto;width:150px;margin:0 -18px;display:flex;flex-direction:column;
+   align-items:center;gap:6px;padding:0;border:0;background:none;transform-style:preserve-3d;
+   backface-visibility:hidden}
+ #music.flow .cover{width:150px}
+ #music.flow img{width:150px;height:auto;aspect-ratio:2/3;object-fit:cover;border-radius:4px;
+   box-shadow:0 10px 22px rgba(0,0,0,.65),inset 0 0 0 1px rgba(255,255,255,.07)}
+ #music.flow .info{width:150px;text-align:center;opacity:.9}
+ #music.flow .t{font-size:12px;white-space:normal;height:2.5em;overflow:hidden;
+   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+ #music.flow .s,#music.flow .a,#music.flow .m{display:none}
+ #tracks{position:absolute;inset:0;background:var(--bg);z-index:11;display:none;flex-direction:column}
+ #tracks.open{display:flex}
+ #tracks header{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);
+   border-bottom:1px solid var(--line);flex:0 0 auto}
+ #tracks header b{flex:1;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;
+   text-overflow:ellipsis}
+ #tracksbody{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--line) var(--bg)}
+ #tracksbody::-webkit-scrollbar{width:6px}
+ #tracksbody::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+ .trow{display:flex;gap:8px;align-items:baseline;padding:10px 14px;border-bottom:1px solid var(--line);
+   cursor:pointer;outline:none}
+ .trow:hover,.trow:focus{background:var(--card)}
+ .trow .n{color:var(--dim);font-size:12px;min-width:26px;text-align:right;
+   font-variant-numeric:tabular-nums}
+ .trow .l{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .trow .d{color:var(--dim);font-size:11px;font-variant-numeric:tabular-nums}
+ .trow.shuf .l{color:var(--accent2)}
 </style></head><body>
 <header><h1>Read aloud</h1>
+  <nav id="tabs"><button id="tabbooks" class="on" title="books">Books</button><button id="tabmusic" title="music">Music</button></nav>
+  <button id="sortbtn" title="sort albums" style="display:none">Artist</button>
+  <button id="shufbtn" title="shuffle all music" style="display:none">&#8646;</button>
   <span id="batt" title="battery"></span>
   <button id="themebtn" title="theme">&#9681;</button>
   <button id="viewbtn" title="list / grid / covers">&#9776;</button>
   <button id="quit" title="close the player">&#10005;</button></header>
 <div id="list"></div>
+<div id="music" style="display:none"></div>
+<div id="tracks">
+ <header><b id="trackstitle"></b><button id="tracksx" title="close">&#10005;</button></header>
+ <div id="tracksbody"></div>
+</div>
 <div id="themes">
   <header><h1>Theme</h1><button id="themecancel" title="close">&#10005;</button></header>
   <div id="themegrid"></div>
@@ -1114,6 +1340,9 @@ window.onerror = (m, s, l, c) => {
 };
 document.getElementById('quit').onclick = () => fetch('/quit').catch(() => {});
 addEventListener('keydown', e => {
+  if (e.key === '1') { setTab('books'); return; }
+  if (e.key === '2') { setTab('music'); return; }
+  if (e.key === 'm' || e.key === 'M') { setTab(tab === 'music' ? 'books' : 'music'); return; }
   if (e.key === 't' || e.key === 'T') {
     const el = document.getElementById('themes');
     if (el.classList.contains('open')) closeThemes(); else openThemes();
@@ -1128,6 +1357,7 @@ addEventListener('keydown', e => {
 });
 addEventListener('keydown', e => {
   if (e.key === 'Escape' || e.key === 'q') {
+    if (tracksOpen) { closeTracks(); return; }
     if (document.getElementById('themes').classList.contains('open')) { closeThemes(); return; }
     fetch('/quit').catch(() => {});
   }
@@ -1244,6 +1474,7 @@ fetch('/api/books').then(r => r.json()).then(books => {
   }
   focusRow(0);
   applyTheme(currentThemeId());
+  if (new URLSearchParams(location.search).get('tab') === 'music') setTab('music');
   if (new URLSearchParams(location.search).get('check') === 'ui') {
     runUITests().catch(e => { document.title = 'UITESTS ERROR ' + e.message; });
   }
@@ -1283,9 +1514,11 @@ const forced = new URLSearchParams(location.search).get('view');
 if (VIEWS.includes(forced)) view = forced;
 const listEl = document.getElementById('list');
 const viewBtn = document.getElementById('viewbtn');
+let tab = 'books', musicData = null, musicSort = 'artist', tracksOpen = false;
+const activeEl = () => document.getElementById(tab === 'music' ? 'music' : 'list');
 
 function applyView() {
-  listEl.className = view === 'list' ? '' : view;
+  activeEl().className = view === 'list' ? '' : view;
   viewBtn.textContent = view === 'list' ? '\u2630' : view === 'grid' ? '\u25a6' : '\u25c8';
   try { localStorage.setItem('ra:view', view); } catch (e) {}
   if (view !== 'flow') {
@@ -1302,8 +1535,123 @@ function cycleView() {
 viewBtn.onclick = cycleView;
 
 let sel = 0;
-const rows = () => [...document.querySelectorAll('#list a, #list .st, #list .series')]
-  .filter(el => el.offsetParent !== null);
+const rows = () => {
+  if (tracksOpen) {
+    return [...document.querySelectorAll('#tracks .trow')].filter(el => el.offsetParent !== null);
+  }
+  return [...activeEl().querySelectorAll('a, .st, .series')]
+    .filter(el => el.offsetParent !== null);
+};
+
+// ---- tabs: books / music ------------------------------------------------
+function setTab(t) {
+  tab = t === 'music' ? 'music' : 'books';
+  document.getElementById('list').style.display = tab === 'books' ? '' : 'none';
+  document.getElementById('music').style.display = tab === 'music' ? '' : 'none';
+  document.getElementById('tabbooks').classList.toggle('on', tab === 'books');
+  document.getElementById('tabmusic').classList.toggle('on', tab === 'music');
+  document.getElementById('sortbtn').style.display = tab === 'music' ? '' : 'none';
+  document.getElementById('shufbtn').style.display = tab === 'music' ? '' : 'none';
+  sel = 0;
+  applyView();
+  if (tab === 'music') loadMusic(); else focusRow(0);
+}
+document.getElementById('tabbooks').onclick = () => setTab('books');
+document.getElementById('tabmusic').onclick = () => setTab('music');
+
+function fmtDur(s) {
+  s = Math.max(0, Math.round(s || 0));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+function loadMusic() {
+  if (musicData) { renderMusic(); return; }
+  const el = document.getElementById('music');
+  el.textContent = 'loading music\u2026';
+  fetch('/api/music').then(r => r.json()).then(d => {
+    musicData = d.albums || [];
+    renderMusic();
+  }).catch(() => { el.textContent = 'could not read the music folder'; });
+}
+function renderMusic() {
+  const el = document.getElementById('music');
+  el.textContent = '';
+  if (!musicData || !musicData.length) {
+    el.innerHTML = '<div id="empty">No music in this folder.<br>' +
+      'Put .mp3/.m4a/.flac/.ogg files here and reload.</div>';
+    return;
+  }
+  const albums = [...musicData];
+  if (musicSort === 'album') albums.sort((a, b) => a.album.localeCompare(b.album));
+  else if (musicSort === 'year') albums.sort((a, b) => (b.year || '').localeCompare(a.year || '') ||
+                                                        a.album.localeCompare(b.album));
+  else albums.sort((a, b) => a.artist.localeCompare(b.artist) || a.album.localeCompare(b.album));
+  for (const a of albums) {
+    const row = document.createElement('div');
+    row.className = 'st album';
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    const cover = document.createElement('div');
+    cover.className = 'cover';
+    const img = document.createElement('img');
+    if (a.cover) img.src = '/cover/' + encodeURIComponent(a.cover);
+    img.alt = '';
+    img.width = 40; img.height = 58;
+    img.onerror = () => { img.style.visibility = 'hidden'; };
+    cover.appendChild(img);
+    const info = document.createElement('div');
+    info.className = 'info';
+    const t = document.createElement('div'); t.className = 't'; t.textContent = a.album;
+    const by = document.createElement('div'); by.className = 'a';
+    by.textContent = a.artist + (a.year ? ' \u00b7 ' + a.year : '');
+    const m = document.createElement('div'); m.className = 'm';
+    m.textContent = a.tracks.length + (a.tracks.length === 1 ? ' track' : ' tracks') +
+      ' \u00b7 ' + fmtDur(a.duration);
+    info.append(t, by, m);
+    row.append(cover, info);
+    row.onclick = () => openTracks(a);
+    el.appendChild(row);
+  }
+  applyView();
+  focusRow(0);
+}
+function openTracks(a) {
+  tracksOpen = true;
+  const body = document.getElementById('tracksbody');
+  body.textContent = '';
+  document.getElementById('trackstitle').textContent = a.album + '  \u00b7  ' + a.artist;
+  const add = (text, num, dur, cls, action) => {
+    const r = document.createElement('div');
+    r.className = 'trow ' + (cls || '');
+    r.tabIndex = 0;
+    const n = document.createElement('span'); n.className = 'n'; n.textContent = num;
+    const l = document.createElement('span'); l.className = 'l'; l.textContent = text;
+    const d = document.createElement('span'); d.className = 'd'; d.textContent = dur || '';
+    r.append(n, l, d);
+    r.onclick = action;
+    body.appendChild(r);
+  };
+  add('Shuffle album', '\u21c4', '', 'shuf',
+      () => { location.href = '/play?album=' + encodeURIComponent(a.id) + '&shuffle=1'; });
+  a.tracks.forEach((t, i) => add(t.title, t.track || (i + 1), fmtDur(t.duration), '',
+      () => { location.href = '/play?album=' + encodeURIComponent(a.id) +
+              '&track=' + encodeURIComponent(t.file); }));
+  document.getElementById('tracks').classList.add('open');
+  sel = 0;
+  focusRow(0);
+}
+function closeTracks() {
+  tracksOpen = false;
+  document.getElementById('tracks').classList.remove('open');
+  focusRow(sel);
+}
+document.getElementById('tracksx').onclick = closeTracks;
+document.getElementById('sortbtn').onclick = () => {
+  musicSort = musicSort === 'artist' ? 'album' : musicSort === 'album' ? 'year' : 'artist';
+  document.getElementById('sortbtn').textContent =
+    musicSort === 'artist' ? 'Artist' : musicSort === 'album' ? 'Album' : 'Year';
+  renderMusic();
+};
+document.getElementById('shufbtn').onclick = () => { location.href = '/play?shuffle=1'; };
 // Download a readaloud epub from Storyteller, with a live byte bar.
 function startDownload(row, book) {
   if (row.dataset.dl) return;
@@ -1587,8 +1935,9 @@ function centerFlow() {
   const r = rows()[sel];
   if (!r) return;
   // Measure after the transform is applied so the *visible* cover is centred.
-  const rb = r.getBoundingClientRect(), cb = listEl.getBoundingClientRect();
-  listEl.scrollLeft += (rb.left + rb.width / 2) - (cb.left + cb.width / 2);
+  const el = activeEl();
+  const rb = r.getBoundingClientRect(), cb = el.getBoundingClientRect();
+  el.scrollLeft += (rb.left + rb.width / 2) - (cb.left + cb.width / 2);
 }
 
 function styleFlow() {
@@ -1615,10 +1964,12 @@ function moveSel(i) {
   styleFlow();
 }
 applyView();
-document.getElementById('list').addEventListener('focusin', e => {
-  const i = rows().indexOf(e.target);
-  if (i >= 0) sel = i;
-});
+for (const id of ['list', 'music']) {
+  document.getElementById(id).addEventListener('focusin', e => {
+    const i = rows().indexOf(e.target);
+    if (i >= 0) sel = i;
+  });
+}
 const held = {};
 function padTick() {
   for (const gp of (navigator.getGamepads ? navigator.getGamepads() : [])) {
@@ -1626,6 +1977,14 @@ function padTick() {
     gp.buttons.forEach((b, i) => {
       const k = gp.index + ':' + i;
       if (b.pressed && !held[k]) {
+        if (tracksOpen) {
+          if (i === 0) { const r = rows()[sel]; if (r) r.click(); }
+          else if (i === 1 || i === 8) closeTracks();
+          else if (i === 12) moveFocus(-1);
+          else if (i === 13) moveFocus(1);
+          held[k] = b.pressed;
+          return;
+        }
         if (i === 12) moveFocus(-1);
         else if (i === 13) moveFocus(1);
         else if (i === 14) focusRow(sel - 1);
@@ -1770,6 +2129,8 @@ fetch('/api/storyteller').then(r => r.json()).then(st => {
   }
 });
 </script></body></html>"""
+
+SKIN_SHEET = '<div id="skins"><header><b>Skins</b><span id="skinnow"></span><button id="skinsx" title="close">&#10005;</button></header><div id="skingrid"></div></div>'
 
 CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E")}
  #tape{position:absolute;left:50%;top:12px;width:624px;height:396px;margin-left:-312px;
@@ -2014,6 +2375,70 @@ CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://w
  #tape[data-skin="slim"] .s1{left:12px;top:12px}#tape[data-skin="slim"] .s2{right:12px;top:12px}
  #tape[data-skin="slim"] .s3{left:12px;bottom:12px}#tape[data-skin="slim"] .s4{right:12px;bottom:12px} /* ---------- shared decorations (only some skins show these) ---------- */
  .deco{display:none;position:absolute;z-index:4}
+ /* ---------- material detail shared by every skin ---------- */
+ .win::before{content:'';position:absolute;inset:0;border-radius:50%;z-index:6;pointer-events:none;
+   background:linear-gradient(148deg,rgba(255,255,255,.38) 0,rgba(255,255,255,.10) 17%,
+     transparent 40%,transparent 100%)}
+ .win::after{content:'';position:absolute;inset:0;border-radius:50%;z-index:5;pointer-events:none;
+   box-shadow:inset 0 -7px 14px rgba(0,0,0,.55),inset 0 2px 2px rgba(255,255,255,.10)}
+ .hub::before{content:'';position:absolute;inset:-2px;border-radius:50%;pointer-events:none;
+   background:radial-gradient(circle at 34% 28%,rgba(255,255,255,.7),transparent 36%);
+   box-shadow:inset 0 0 0 1px rgba(255,255,255,.42),0 0 0 1px rgba(0,0,0,.22)}
+ .pack::after{content:'';position:absolute;inset:0;border-radius:50%;pointer-events:none;
+   background:radial-gradient(circle at 36% 28%,rgba(255,255,255,.13),transparent 56%)}
+ .label::before{content:'';position:absolute;inset:0;border-radius:inherit;z-index:3;pointer-events:none;
+   background:linear-gradient(180deg,rgba(255,255,255,.26),transparent 5%,
+     transparent 94%,rgba(0,0,0,.14))}
+ .side,.dur{box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 1px 2px rgba(0,0,0,.28)}
+ .screw{box-shadow:inset 0 -1px 2px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.55),
+   0 0 0 1px rgba(0,0,0,.28),0 1px 2px rgba(0,0,0,.45)}
+ .deck{box-shadow:inset 0 1px 0 rgba(255,255,255,.16)}
+ .head{background-image:linear-gradient(180deg,rgba(255,255,255,.08),transparent 35%),
+   linear-gradient(180deg,#0d0a08,#1c1510)}
+ /* ---------- per-skin detail ---------- */
+ #tape[data-skin="studio"] .shell::before{
+   background:linear-gradient(118deg,rgba(255,255,255,.3) 0 10%,transparent 26% 70%,
+     rgba(255,255,255,.1) 88%),radial-gradient(circle at 50% 4%,rgba(255,255,255,.14),transparent 58%);
+   opacity:.85}
+ #tape[data-skin="chrome"] .shell{
+   background:repeating-linear-gradient(90deg,rgba(255,255,255,.04) 0 1px,transparent 1px 3px),
+     linear-gradient(168deg,#5b6066 0%,#2a2d31 16%,#43484e 34%,#191c20 58%,#34383d 80%,#22252a 100%)}
+ #tape[data-skin="chrome"] .label{
+   background:repeating-linear-gradient(90deg,rgba(0,0,0,.035) 0 1px,transparent 1px 4px),
+     linear-gradient(180deg,#f8fafb 0%,#d8dde1 28%,#aab2b8 52%,#ced3d7 57%,#f0f2f4 100%)}
+ #tape[data-skin="wood"] .shell{
+   background:radial-gradient(ellipse 34px 18px at 12% 72%,#36220f 0 26%,transparent 62%),
+     radial-gradient(ellipse 22px 13px at 83% 20%,#36220f 0 26%,transparent 62%),
+     repeating-linear-gradient(92deg,#5b3d25 0 6px,#6e4a2c 6px 13px,#4d3420 13px 18px,#7a5232 18px 25px),
+     linear-gradient(180deg,#8a5f3b,#4a3020)}
+ #tape[data-skin="vinyl"] .win.a{
+   background:conic-gradient(from 205deg,rgba(255,255,255,.13),transparent 18%,
+     transparent 68%,rgba(255,255,255,.08) 84%,transparent 100%),
+     repeating-radial-gradient(circle,#101012 0 1px,#17171a 1px 3px,#0b0b0d 3px 4px)}
+ #tape[data-skin="minidisc"] .shell::after{content:'';position:absolute;left:38px;top:136px;width:18px;
+   height:162px;border-radius:3px;z-index:3;pointer-events:none;
+   background:linear-gradient(90deg,#9fb2b4,#e9f2f2 42%,#7d9294);opacity:.62;
+   box-shadow:0 1px 3px rgba(0,0,0,.35),inset 0 0 0 1px rgba(255,255,255,.4)}
+ #tape[data-skin="walkman"] .keys i{position:relative}
+ #tape[data-skin="walkman"] .keys i::before{position:absolute;inset:0;display:flex;align-items:center;
+   justify-content:center;font:600 13px/1 system-ui,sans-serif;color:#cfe6f2;
+   text-shadow:0 1px 0 rgba(0,0,0,.6)}
+ #tape[data-skin="walkman"] .keys i:nth-child(1)::before{content:'\25C0\25C0'}
+ #tape[data-skin="walkman"] .keys i:nth-child(2)::before{content:'\25C0'}
+ #tape[data-skin="walkman"] .keys i:nth-child(3)::before{content:'\25B6'}
+ #tape[data-skin="walkman"] .keys i:nth-child(4)::before{content:'\25B6\25B6'}
+ #tape[data-skin="walkman"] .keys i:nth-child(5)::before{content:'\25A0'}
+ #tape[data-skin="cart"] .shell{
+   background:repeating-linear-gradient(0deg,rgba(255,255,255,.03) 0 1px,transparent 1px 4px),
+     linear-gradient(180deg,#2e2e31,#18181b 55%,#0c0c0e)}
+ #tape[data-skin="cart"] .label{box-shadow:inset 0 0 0 2px #0a0a0c,inset 0 0 0 3px #4a4a4e,0 2px 6px #000}
+ #tape[data-skin="slim"] .slimhead{background-image:repeating-linear-gradient(180deg,
+   transparent 0 27px,rgba(150,146,132,.45) 27px 28px),linear-gradient(#fdfcf7,#f0ece0)}
+ #tape[data-skin="slim"] .slimsnap::after{content:'';position:absolute;inset:0;border-radius:5px;
+   pointer-events:none;background:linear-gradient(104deg,rgba(255,255,255,.45),transparent 28% 72%,
+     rgba(0,0,0,.07))}
+ #tape[data-skin="clear"] .bigart{box-shadow:inset 0 0 0 1px rgba(255,255,255,.45),0 1px 4px rgba(0,0,0,.25)}
+
  /* ---------- chrome: metal Type IV blank ---------- */
  #tape[data-skin="chrome"] .shell{border-radius:22px;
    background:linear-gradient(168deg,#5b6066 0%,#2a2d31 16%,#43484e 34%,#191c20 58%,#34383d 80%,#22252a 100%);
@@ -2259,6 +2684,85 @@ CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://w
 
  #tape[data-skin="cart"] .counter{right:8px;background:#0c0c0e;color:#e8c86a}
 
+ /* ---------- skin picker: a filmstrip of real thumbnails ---------- */
+ #skins{position:fixed;left:0;right:0;bottom:0;height:212px;z-index:12;display:none;
+   flex-direction:column;background:color-mix(in srgb,var(--panel) 94%,#000);
+   border-top:1px solid var(--line);box-shadow:0 -14px 30px rgba(0,0,0,.55)}
+ #skins.open{display:flex}
+ #skins header{display:flex;align-items:center;gap:8px;padding:7px 10px 5px;flex:0 0 auto;
+   font:600 12px/1.2 system-ui,sans-serif;color:var(--text)}
+ #skins header b{flex:0 0 auto;letter-spacing:.06em}
+ #skins header span{flex:1;font-weight:400;font-size:11px;color:var(--dim);white-space:nowrap;
+   overflow:hidden;text-overflow:ellipsis}
+ #skins header button{width:28px;height:24px;min-width:28px;height:24px;font-size:13px}
+ #skingrid{display:flex;gap:8px;overflow-x:auto;overflow-y:hidden;padding:2px 10px 10px;
+   scrollbar-width:none;flex:1 1 auto}
+ #skingrid::-webkit-scrollbar{display:none}
+ .skcard{flex:0 0 auto;width:96px;border-radius:8px;padding:4px;background:var(--card);
+   border:1px solid var(--line);cursor:pointer;outline:none}
+ .skcard.sel,.skcard:focus{box-shadow:0 0 0 2px var(--accent)}
+ .skthumb{position:relative;width:86px;height:62px;border-radius:4px;overflow:hidden;
+   background:#1a1a1a;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)}
+ .skthumb img{position:absolute;left:4px;top:5px;width:34px;height:34px;object-fit:cover;
+   border-radius:2px;z-index:2}
+ .skthumb b{position:absolute;width:18px;height:18px;border-radius:50%;z-index:2;
+   background:repeating-conic-gradient(from 0deg,#efe7d4 0 30deg,#9a8f78 30deg 60deg);
+   box-shadow:0 0 0 2px rgba(0,0,0,.35)}
+ .skthumb b.a{left:40px;top:32px}
+ .skthumb b.b{right:8px;top:32px}
+ .skname{display:block;margin-top:2px;text-align:center;font:600 10px/1.5 system-ui,sans-serif;
+   color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ /* mini versions of each skin */
+ .skcard[data-skin="label"] .skthumb{background:linear-gradient(180deg,#e9dcc0,#c9b894)}
+ .skcard[data-skin="label"] .skthumb img{left:0;top:0;width:100%;height:100%;border-radius:0;opacity:.85}
+ .skcard[data-skin="label"] .skthumb::after{content:'';position:absolute;left:0;right:0;bottom:0;
+   height:16px;background:linear-gradient(180deg,#0000,#000a)}
+ .skcard[data-skin="studio"] .skthumb{background:linear-gradient(160deg,#55585d,#232428)}
+ .skcard[data-skin="studio"] .skthumb img{left:50%;top:12px;width:30px;height:30px;margin-left:-15px;
+   border:2px solid #f4efe2;transform:rotate(-4deg)}
+ .skcard[data-skin="studio"] .skthumb::before{content:'';position:absolute;left:4px;top:14px;width:16px;
+   height:22px;background:#c9241c;border-radius:1px}
+ .skcard[data-skin="studio"] .skthumb::after{content:'';position:absolute;right:4px;top:14px;width:16px;
+   height:22px;background:#c9241c;border-radius:1px}
+ .skcard[data-skin="slim"] .skthumb{background:#e9e5d9}
+ .skcard[data-skin="slim"] .skthumb::before{content:'';position:absolute;left:4px;right:4px;top:4px;
+   height:20px;background:#fdfcf7;border:1px solid #4b4a46;border-radius:2px}
+ .skcard[data-skin="slim"] .skthumb::after{content:'';position:absolute;left:6px;right:6px;top:27px;
+   height:24px;border-radius:3px;background:#26241f}
+ .skcard[data-skin="slim"] .skthumb img{left:5px;top:30px;width:16px;height:16px;border-radius:2px}
+ .skcard[data-skin="chrome"] .skthumb{background:linear-gradient(165deg,#5b6066,#1a1d21)}
+ .skcard[data-skin="chrome"] .skthumb::before{content:'';position:absolute;left:2px;right:2px;top:4px;
+   height:20px;border-radius:2px;background:linear-gradient(180deg,#f4f6f7,#9aa2a8)}
+ .skcard[data-skin="chrome"] .skthumb img{left:5px;top:6px;width:16px;height:16px;border-radius:1px}
+ .skcard[data-skin="clear"] .skthumb{background:linear-gradient(160deg,#cddbe2,#7d919c)}
+ .skcard[data-skin="clear"] .skthumb img{left:0;top:0;width:100%;height:100%;border-radius:0;opacity:.45}
+ .skcard[data-skin="clear"] .skthumb::after{content:'';position:absolute;left:4px;right:4px;bottom:4px;
+   height:12px;border-radius:2px;background:#f3f6f7d0}
+ .skcard[data-skin="wood"] .skthumb{background:repeating-linear-gradient(92deg,#5b3d25 0 4px,#7a5232 4px 8px)}
+ .skcard[data-skin="wood"] .skthumb::before{content:'';position:absolute;left:3px;right:3px;top:4px;
+   height:22px;border-radius:2px;background:linear-gradient(180deg,#f3e6c9,#d5c08f)}
+ .skcard[data-skin="wood"] .skthumb img{right:6px;left:auto;top:7px;width:15px;height:15px}
+ .skcard[data-skin="vinyl"] .skthumb{background:#111}
+ .skcard[data-skin="vinyl"] .skthumb img{left:2px;top:2px;width:58px;height:58px;border-radius:1px}
+ .skcard[data-skin="vinyl"] .skthumb::after{content:'';position:absolute;right:-12px;top:15px;width:44px;
+   height:44px;border-radius:50%;background:repeating-radial-gradient(circle,#0c0c0e 0 1px,#19191c 1px 2px);
+   box-shadow:0 0 0 1px #000}
+ .skcard[data-skin="minidisc"] .skthumb{background:linear-gradient(160deg,#79b8c8,#2a5a6a)}
+ .skcard[data-skin="minidisc"] .skthumb::before{content:'';position:absolute;left:4px;right:4px;top:3px;
+   height:14px;background:#f3f1e7;border-radius:2px}
+ .skcard[data-skin="minidisc"] .skthumb img{left:50%;top:20px;width:34px;height:34px;margin-left:-17px;
+   border-radius:50%;border:2px solid #eef2f2}
+ .skcard[data-skin="walkman"] .skthumb{background:linear-gradient(160deg,#33424f,#0e1318)}
+ .skcard[data-skin="walkman"] .skthumb::before{content:'';position:absolute;left:4px;top:4px;width:52px;
+   height:30px;border-radius:3px;background:#0a0d10;border:1px solid #4a5a68}
+ .skcard[data-skin="walkman"] .skthumb img{left:7px;top:7px;width:24px;height:24px}
+ .skcard[data-skin="walkman"] .skthumb::after{content:'';position:absolute;left:4px;right:4px;bottom:4px;
+   height:14px;border-radius:2px;background:repeating-linear-gradient(90deg,#5a6b7a 0 12px,#0e1318 12px 14px)}
+ .skcard[data-skin="cart"] .skthumb{background:#141416}
+ .skcard[data-skin="cart"] .skthumb img{left:3px;top:3px;width:44px;height:36px;border-radius:1px}
+ .skcard[data-skin="cart"] .skthumb::after{content:'';position:absolute;left:50%;bottom:4px;width:30px;
+   height:14px;margin-left:-15px;border-radius:3px;background:#09090a;box-shadow:inset 0 2px 5px #000}
+
 """
 
 CASSETTE_HTML = r"""<div id="tape" data-skin="label">
@@ -2364,6 +2868,7 @@ __CASSETTE_CSS__
 __CASSETTE__
 </div>
 <div id="scrub"><div id="scrubfill"></div><div id="scrubgrab"></div></div>
+__SKINS__
 <div id="toc"><div id="tocbody"></div></div>
 <div id="bar">
  <button id="tocbtn" title="chapters">&#9776;</button>
@@ -2592,6 +3097,17 @@ async function runUITests() {
     cycleSkin();
     assert(tapeSkin !== before, 'skin unchanged');
     applySkin(before);
+  });
+  await check('skin sheet previews and cancels', async () => {
+    setTape(true);
+    openSkins();
+    assert(skOpen, 'sheet did not open');
+    assert(skCards.length === SKINS.length, 'missing tiles');
+    skCards[3].focus();
+    assert(document.getElementById('tape').dataset.skin === 'chrome', 'no live preview');
+    closeSkins(false);
+    assert(tapeSkin === 'label', 'cancel did not restore');
+    setTape(false);
   });
   await check('chapter row click jumps', async () => {
     openToc();
@@ -2897,6 +3413,68 @@ function cycleSkin() {
   if (tocOpen) renderToc();
 }
 
+// ---- skin picker: a filmstrip with the real cover in every skin ----
+let skOpen = false, skCards = [], skSel = 0, skBefore = 'label';
+function renderSkins() {
+  const g = document.getElementById('skingrid');
+  if (!g) return;
+  g.textContent = '';
+  skCards = [];
+  for (const id of SKINS) {
+    const c = document.createElement('div');
+    c.className = 'skcard';
+    c.dataset.skin = id;
+    c.tabIndex = 0;
+    const t = document.createElement('div');
+    t.className = 'skthumb';
+    const im = document.createElement('img');
+    im.alt = '';
+    im.src = '/cover/' + encodeURIComponent(BOOK);
+    im.onerror = () => { im.style.display = 'none'; };
+    t.appendChild(im);
+    for (const k of ['a', 'b']) {
+      const b = document.createElement('b');
+      b.className = k;
+      t.appendChild(b);
+    }
+    const n = document.createElement('span');
+    n.className = 'skname';
+    n.textContent = SKIN_NAMES[id];
+    c.append(t, n);
+    c.onfocus = () => {
+      skSel = skCards.indexOf(c);
+      applySkin(id, false);
+      document.getElementById('skinnow').textContent = SKIN_NAMES[id];
+      c.scrollIntoView({inline: 'center', block: 'nearest'});
+    };
+    c.onclick = () => { applySkin(id, true); closeSkins(true); };
+    g.appendChild(c);
+    skCards.push(c);
+  }
+}
+function openSkins() {
+  const cur = document.getElementById('tape').dataset.skin || 'label';
+  skBefore = cur;
+  renderSkins();
+  skOpen = true;
+  document.getElementById('skins').classList.add('open');
+  document.getElementById('skinnow').textContent = SKIN_NAMES[cur] || '';
+  const i = Math.max(0, SKINS.indexOf(cur));
+  if (skCards[i]) skCards[i].focus();
+}
+function closeSkins(commit) {
+  if (!skOpen) return;
+  skOpen = false;
+  document.getElementById('skins').classList.remove('open');
+  if (!commit) applySkin(skBefore, false);
+}
+function skinStep(d) {
+  if (!skCards.length) return;
+  skinStep.at = ((skSel + d) % skCards.length + skCards.length) % skCards.length;
+  skCards[skinStep.at].focus();
+}
+document.getElementById('skinsx').onclick = () => closeSkins(false);
+
 const fmtT = t => {
   t = Math.max(0, Math.floor(t || 0));
   const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60;
@@ -3028,8 +3606,8 @@ function renderToc() {
   if (narrated) {
     add('Tape view: ' + (tapeMode ? 'on' : 'off'), '\u25a4', 'tog',
         () => { setTape(!tapeMode); renderToc(); });
-    add('Tape skin: ' + SKIN_NAMES[tapeSkin] + '  \u25b8', '\u25a3', 'tog',
-        () => cycleSkin());
+    add('Tape skins: ' + SKIN_NAMES[tapeSkin] + '  \u25b8', '\u25a3', 'tog',
+        () => { closeToc(); if (!tapeMode) setTape(true); openSkins(); });
   }
   add('Spritz view: ' + (spritz ? 'on' : 'off'), '\u25cf', 'tog',
       () => { setSpritz(!spritz); renderToc(); });
@@ -3394,6 +3972,13 @@ document.getElementById('quit').onclick = back;
 
 function onKey(e) {
   showUI();
+  if (skOpen) {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { skinStep(1); e.preventDefault(); return; }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { skinStep(-1); e.preventDefault(); return; }
+    if (e.key === 'Enter' || e.key === ' ') { closeSkins(true); e.preventDefault(); return; }
+    if (e.key === 'Escape' || e.key === 'k') { closeSkins(false); return; }
+  }
+  if (e.key === 'K') { openSkins(); return; }
   if (e.key === 'Escape') { if (tocOpen) { closeToc(); return; } back(); return; }
   if (tocOpen) {
     if (e.key === 'ArrowDown' || e.key === 'j') { tocSel = Math.min(tocRows.length - 1, tocSel + 1); markToc(); }
@@ -3446,6 +4031,17 @@ function padTick() {
     if (!gp) continue;
     gp.buttons.forEach((b, i) => {
       const key = gp.index + ':' + i;
+      if (skOpen) {
+        const sk = {0: 'ok', 1: 'close', 12: 'prev', 13: 'next', 14: 'prev', 15: 'next'}[i];
+        if (sk && b.pressed && !padHeld[key]) {
+          if (sk === 'prev') skinStep(-1);
+          else if (sk === 'next') skinStep(1);
+          else if (sk === 'ok') closeSkins(true);
+          else closeSkins(false);
+        }
+        padHeld[key] = b.pressed;
+        return;
+      }
       const act = tocOpen ? MENU_PAD[i] : PAD[i];
       if (act && b.pressed && !padHeld[key]) {
         showUI();
@@ -3574,6 +4170,7 @@ __CASSETTE_CSS__
 </style></head><body>
 <div id="load"><div class="spin"></div><div id="loadtxt">spooling tape&hellip;</div></div>
 __CASSETTE__
+__SKINS__
 <div id="toc"><div id="tocbody"></div></div>
 <div id="scrub"><div id="scrubfill"></div><div id="scrubgrab"></div></div>
 <div id="bar">
@@ -3591,6 +4188,8 @@ __CASSETTE__
 <audio id="a" preload="metadata"></audio>
 <script>
 const BOOK = __BOOK__;
+const ALBUM = __ALBUM__;
+const SHUFFLE = __SHUFFLE__;
 const audio = document.getElementById('a'), tape = document.getElementById('tape');
 const pp = document.getElementById('pp'), rateEl = document.getElementById('rate');
 const titleEl = document.getElementById('title');
@@ -3627,6 +4226,13 @@ function paint() {
   document.getElementById('pct').textContent = pct + '%';
   document.getElementById('slimtime').textContent = fmt(t);
   document.getElementById('slimpct').textContent = 'read along \u00b7 ' + pct + '%';
+  if (music) {
+    document.getElementById('stkcap').textContent =
+      'TR ' + String(sec + 1).padStart(2, '0') + ' \u00b7 ' + pct + '%';
+    document.getElementById('slimpct').textContent =
+      'track ' + (sec + 1) + '/' + chapters.length + ' \u00b7 ' + pct + '%';
+    return;
+  }
   document.getElementById('stkcap').textContent =
     'CH ' + String(Math.max(0, sec) + 1).padStart(2, '0') + ' \u00b7 ' + pct + '%';
   if (!chapters.length) return;
@@ -3669,8 +4275,171 @@ function cycleSkin() {
   applySkin(SKINS[(SKINS.indexOf(skin) + 1) % SKINS.length]);
   if (tocOpen) renderToc();
 }
+
+// ---- skin picker: a filmstrip with the real cover in every skin ----
+let skOpen = false, skCards = [], skSel = 0, skBefore = 'label';
+function renderSkins() {
+  const g = document.getElementById('skingrid');
+  if (!g) return;
+  g.textContent = '';
+  skCards = [];
+  for (const id of SKINS) {
+    const c = document.createElement('div');
+    c.className = 'skcard';
+    c.dataset.skin = id;
+    c.tabIndex = 0;
+    const t = document.createElement('div');
+    t.className = 'skthumb';
+    const im = document.createElement('img');
+    im.alt = '';
+    im.src = '/cover/' + encodeURIComponent(BOOK);
+    im.onerror = () => { im.style.display = 'none'; };
+    t.appendChild(im);
+    for (const k of ['a', 'b']) {
+      const b = document.createElement('b');
+      b.className = k;
+      t.appendChild(b);
+    }
+    const n = document.createElement('span');
+    n.className = 'skname';
+    n.textContent = SKIN_NAMES[id];
+    c.append(t, n);
+    c.onfocus = () => {
+      skSel = skCards.indexOf(c);
+      applySkin(id, false);
+      document.getElementById('skinnow').textContent = SKIN_NAMES[id];
+      c.scrollIntoView({inline: 'center', block: 'nearest'});
+    };
+    c.onclick = () => { applySkin(id, true); closeSkins(true); };
+    g.appendChild(c);
+    skCards.push(c);
+  }
+}
+function openSkins() {
+  const cur = document.getElementById('tape').dataset.skin || 'label';
+  skBefore = cur;
+  renderSkins();
+  skOpen = true;
+  document.getElementById('skins').classList.add('open');
+  document.getElementById('skinnow').textContent = SKIN_NAMES[cur] || '';
+  const i = Math.max(0, SKINS.indexOf(cur));
+  if (skCards[i]) skCards[i].focus();
+}
+function closeSkins(commit) {
+  if (!skOpen) return;
+  skOpen = false;
+  document.getElementById('skins').classList.remove('open');
+  if (!commit) applySkin(skBefore, false);
+}
+function skinStep(d) {
+  if (!skCards.length) return;
+  skinStep.at = ((skSel + d) % skCards.length + skCards.length) % skCards.length;
+  skCards[skinStep.at].focus();
+}
+document.getElementById('skinsx').onclick = () => closeSkins(false);
+
 applySkin(skin, false);
 
+
+let music = false, queue = [];
+function setImg(id, src) {
+  const im = document.getElementById(id);
+  if (!im) return;
+  im.src = src;
+  im.onerror = () => { im.style.visibility = 'hidden'; };
+}
+function applyMusicTrack(i, play) {
+  if (!queue.length) return;
+  sec = Math.max(0, Math.min(queue.length - 1, i));
+  const t = queue[sec], total = queue.length, n = sec + 1;
+  music = true;
+  data = {title: t.title, author: t.artist, album: t.album};
+  const f = encodeURIComponent(t.file);
+  setImg('cov', '/label/' + f);
+  setImg('stk', '/art/' + f);
+  setImg('big', '/art/' + f);
+  setImg('slimcov', '/art/' + f);
+  fetch('/colors/' + f).then(r => r.json()).then(c => {
+    const st = document.documentElement.style;
+    if (c.top) st.setProperty('--amb-top', 'rgb(' + c.top.join(',') + ')');
+    if (c.bottom) st.setProperty('--amb-bot', 'rgb(' + c.bottom.join(',') + ')');
+    if (c.left) st.setProperty('--amb-left', 'rgb(' + c.left.join(',') + ')');
+    if (c.right) st.setProperty('--amb-right', 'rgb(' + c.right.join(',') + ')');
+  }).catch(() => {});
+  document.getElementById('ttl').textContent = t.title;
+  document.getElementById('aut').textContent = t.artist;
+  document.getElementById('tagline').textContent = t.album || t.title;
+  document.getElementById('topaut').textContent = t.artist;
+  document.getElementById('slimaut').textContent = t.artist;
+  document.getElementById('slimline').textContent = (t.album || '') + '  \u00b7  ' + n + '/' + total;
+  document.getElementById('slimpct').textContent = 'track ' + n + '/' + total;
+  document.getElementById('chp').textContent =
+    (t.album ? t.album + '  \u00b7  ' : '') + 'Track ' + n + '/' + total;
+  document.getElementById('rednum').textContent = String(n).padStart(2, '0');
+  document.getElementById('side').textContent = 'Album';
+  document.getElementById('stkcap').textContent = 'TR ' + String(n).padStart(2, '0') + ' \u00b7 0%';
+  document.getElementById('pct').textContent = '0%';
+  document.getElementById('counter').textContent = '0:00';
+  titleEl.textContent = t.title;
+  document.title = t.title;
+  duration = t.duration || 0;
+  document.getElementById('dur').textContent = fmt(duration);
+  audio.src = '/audio/' + f;
+  applyRate();
+  audio.onloadedmetadata = () => {
+    if (isFinite(audio.duration) && audio.duration > 0) duration = audio.duration;
+    document.getElementById('dur').textContent = fmt(duration);
+    let pos = null;
+    try { pos = JSON.parse(localStorage.getItem('ra:m:' + t.file)); } catch (e) {}
+    if (pos && pos.t) audio.currentTime = Math.min(pos.t, Math.max(0, duration - 1));
+    paint();
+    save();
+    if (play) audio.play().catch(() => {});
+  };
+  audio.onended = () => {
+    if (music && sec + 1 < queue.length) applyMusicTrack(sec + 1, true);
+    else setPlaying(false);
+  };
+  paint();
+}
+function loadMusic() {
+  fetch('/api/music/queue?album=' + encodeURIComponent(ALBUM || '') +
+        '&shuffle=' + (SHUFFLE ? 1 : 0))
+  .then(r => r.json()).then(q => {
+    queue = q.tracks || [];
+    if (!queue.length) {
+      document.getElementById('loadtxt').textContent = 'no music tracks found';
+      return;
+    }
+    music = true;
+    chapters = queue.map(t => ({title: t.title, start: 0,
+                                duration: t.duration || 0, file: t.file}));
+    let idx = queue.findIndex(t => t.file === BOOK);
+    if (idx < 0) idx = 0;
+    applyMusicTrack(idx, false);
+    document.getElementById('load').style.display = 'none';
+    if (new URLSearchParams(location.search).get('check') === '1') {
+      document.title = 'CHECK OK music';
+    }
+    if (new URLSearchParams(location.search).get('check') === 'ui') {
+      runUITests().catch(e => { document.title = 'UITESTS ERROR ' + e.message; });
+    }
+    if (new URLSearchParams(location.search).get('perf') === 'idle') {
+      setPlaying(true);
+      setTimeout(() => {
+        let frames = 0; const t0 = performance.now();
+        const step = () => {
+          frames++;
+          if (performance.now() - t0 < 3000) requestAnimationFrame(step);
+          else console.log('TAPEFPS', Math.round(frames / 3));
+        };
+        requestAnimationFrame(step);
+      }, 3500);
+    }
+  }).catch(() => {
+    document.getElementById('loadtxt').textContent = 'could not open this album';
+  });
+}
 
 function setPlaying(on) {
   document.body.classList.toggle('playing', !!on);
@@ -3695,12 +4464,14 @@ function seek(t, play) {
 }
 
 function gotoChapter(i, play) {
+  if (music) { applyMusicTrack(i, play); return; }
   if (!chapters.length) return;
   i = Math.max(0, Math.min(chapters.length - 1, i));
   seek(chapters[i].start, play);
 }
 
 function stepChapter(d) {
+  if (music) { applyMusicTrack(sec + d, !audio.paused); return; }
   if (!chapters.length) return;
   let i = 0;
   while (i + 1 < chapters.length && chapters[i + 1].start <= audio.currentTime + 0.4) i++;
@@ -3716,6 +4487,11 @@ function setRate(r) {
 
 function save() {
   try {
+    if (music) {
+      if (queue[sec]) localStorage.setItem('ra:m:' + queue[sec].file,
+        JSON.stringify({t: audio.currentTime || 0, rate}));
+      return;
+    }
     if (!data) return;
     const d = duration || audio.duration || 0;
     localStorage.setItem('ra:' + BOOK, JSON.stringify({
@@ -3788,11 +4564,13 @@ function renderToc() {
   };
   add('Theme: ' + themeById(currentThemeId()).name + '  \u25b8', '\u25d1', 'tog',
       () => cycleTheme());
-  add('Skin: ' + SKIN_NAMES[skin] + '  \u25b8', '\u25a3', 'tog', () => cycleSkin());
+  add('Skins: ' + SKIN_NAMES[skin] + '  \u25b8', '\u25a3', 'tog',
+      () => { closeToc(); openSkins(); });
   add('Controls auto-hide: ' + (zen ? 'on' : 'off'), '\u25cc', 'tog',
       () => { zen = !zen; try { localStorage.setItem('ra:zen', zen ? '1' : '0'); } catch (e) {}
               renderToc(); showUI(); });
-  chapters.forEach((c, i) => add(chapterName(i), fmt(c.start), i === sec ? 'cur' : '',
+  chapters.forEach((c, i) => add(chapterName(i), fmt(music ? c.duration : c.start),
+      i === sec ? 'cur' : '',
       () => { closeToc(); gotoChapter(i, !audio.paused); }));
   tocSel = 0;
   markToc();
@@ -3848,6 +4626,13 @@ addEventListener('pagehide', save);
 
 function onKey(e) {
   showUI();
+  if (skOpen) {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { skinStep(1); e.preventDefault(); return; }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { skinStep(-1); e.preventDefault(); return; }
+    if (e.key === 'Enter' || e.key === ' ') { closeSkins(true); e.preventDefault(); return; }
+    if (e.key === 'Escape' || e.key === 'k') { closeSkins(false); return; }
+  }
+  if (e.key === 'K') { openSkins(); return; }
   if (e.key === 'Escape') { if (tocOpen) { closeToc(); return; } back(); return; }
   if (tocOpen) {
     if (e.key === 'ArrowDown' || e.key === 'j') { tocSel = Math.min(tocRows.length - 1, tocSel + 1); markToc(); }
@@ -3893,6 +4678,17 @@ function padTick() {
     if (!gp) continue;
     gp.buttons.forEach((b, i) => {
       const key = gp.index + ':' + i;
+      if (skOpen) {
+        const sk = {0: 'ok', 1: 'close', 12: 'prev', 13: 'next', 14: 'prev', 15: 'next'}[i];
+        if (sk && b.pressed && !padHeld[key]) {
+          if (sk === 'prev') skinStep(-1);
+          else if (sk === 'next') skinStep(1);
+          else if (sk === 'ok') closeSkins(true);
+          else closeSkins(false);
+        }
+        padHeld[key] = b.pressed;
+        return;
+      }
       const act = tocOpen ? MENU_PAD[i] : PAD[i];
       if (act && b.pressed && !padHeld[key]) {
         showUI();
@@ -3988,6 +4784,9 @@ setInterval(() => {
 applyTheme(currentThemeId());
 applyRate();
 
+if (ALBUM || SHUFFLE) {
+  loadMusic();
+} else {
 fetch('/api/book/' + encodeURIComponent(BOOK))
 .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
 .then(d => {
@@ -4062,6 +4861,7 @@ fetch('/api/book/' + encodeURIComponent(BOOK))
 }).catch(() => {
   document.getElementById('loadtxt').textContent = 'could not open this tape';
 });
+}
 
 // ---- UI self-tests (?check=ui) -----------------------------------------
 async function runUITests() {
@@ -4129,6 +4929,17 @@ async function runUITests() {
     assert(document.getElementById('tape').dataset.skin === skin, 'skin not applied');
     applySkin(before);
   });
+  await check('skin sheet previews and commits', async () => {
+    openSkins();
+    assert(skOpen, 'sheet did not open');
+    assert(skCards.length === SKINS.length, 'missing tiles');
+    skCards[1].focus();
+    assert(document.getElementById('tape').dataset.skin === 'studio', 'no live preview');
+    closeSkins(true);
+    assert(!skOpen, 'sheet stayed open');
+    assert(skin === 'studio', 'choice not kept');
+    applySkin('label');
+  });
   await check('speed buttons click', async () => {
     const before = rate;
     document.getElementById('fast').click();
@@ -4152,8 +4963,10 @@ async function runUITests() {
 }
 </script></body></html>"""
 
-PLAYER_HTML = PLAYER_HTML.replace("__CASSETTE_CSS__", CASSETTE_CSS).replace("__CASSETTE__", CASSETTE_HTML)
-TAPE_HTML = TAPE_HTML.replace("__CASSETTE_CSS__", CASSETTE_CSS).replace("__CASSETTE__", CASSETTE_HTML)
+PLAYER_HTML = (PLAYER_HTML.replace("__CASSETTE_CSS__", CASSETTE_CSS)
+               .replace("__CASSETTE__", CASSETTE_HTML).replace("__SKINS__", SKIN_SHEET))
+TAPE_HTML = (TAPE_HTML.replace("__CASSETTE_CSS__", CASSETTE_CSS)
+             .replace("__CASSETTE__", CASSETTE_HTML).replace("__SKINS__", SKIN_SHEET))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -4167,7 +4980,7 @@ class Handler(BaseHTTPRequestHandler):
         out = []
         for n in sorted(os.listdir(root)):
             low = n.lower()
-            if not (low.endswith('.epub') or low.endswith(AUDIO_EXTS)):
+            if not (low.endswith('.epub') or low.endswith('.m4b')):
                 continue
             i = media_info(os.path.join(root, n))
             out.append({
@@ -4180,7 +4993,10 @@ class Handler(BaseHTTPRequestHandler):
         return out
 
     def _book_path(self, name):
-        p = os.path.join(self.server.root, os.path.basename(name))
+        root = os.path.abspath(self.server.root)
+        p = os.path.abspath(os.path.join(root, name))
+        if p != root and not p.startswith(root + os.sep):
+            return None
         return p if os.path.isfile(p) else None
 
     def _send(self, code, body, ctype='text/html; charset=utf-8', extra=None):
@@ -4323,6 +5139,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_gz(json.dumps({'configured': True, 'online': online,
                                              'books': books}).encode(), 'application/json')
 
+        if path == '/api/music':
+            return self._send_gz(json.dumps({'albums': music_data(self.server.root)}).encode(),
+                                 'application/json')
+
+        if path == '/api/music/queue':
+            q = parse_qs(url.query)
+            album = q.get('album', [''])[0]
+            shuffle = q.get('shuffle', ['0'])[0] in ('1', 'true')
+            tracks = music_queue(self.server.root, album, shuffle)
+            return self._send_gz(json.dumps({'tracks': tracks}).encode(), 'application/json')
+
         if path == '/api/status':
             return self._send(200, json.dumps(battery_state()).encode(), 'application/json')
 
@@ -4361,12 +5188,21 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == '/play':
-            book = parse_qs(url.query).get('book', [''])[0]
-            if not self._book_path(book):
+            q = parse_qs(url.query)
+            book = q.get('book', [''])[0] or q.get('track', [''])[0]
+            album = q.get('album', [''])[0]
+            shuffle = q.get('shuffle', ['0'])[0] in ('1', 'true')
+            if not book and (album or shuffle):
+                tracks = music_queue(self.server.root, album, shuffle)
+                if tracks:
+                    book = tracks[0]['file']
+            if not book or not self._book_path(book):
                 return self._send(404, b'no such book')
             page = (TAPE_HTML if is_audio(book) else PLAYER_HTML)
-            page = page.replace('__BOOK__', json.dumps(book)).encode()
-            return self._send(200, page)
+            page = (page.replace('__BOOK__', json.dumps(book))
+                        .replace('__ALBUM__', json.dumps(album))
+                        .replace('__SHUFFLE__', 'true' if shuffle else 'false'))
+            return self._send(200, page.encode())
 
         if path.startswith('/api/book/'):
             p = self._book_path(path[len('/api/book/'):])

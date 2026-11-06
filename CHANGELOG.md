@@ -56,6 +56,14 @@
   parsers, the HTTP surface, range requests and a headless player load, with a
   `?check=1` hook that exercises the string/node word-timing path.
 
+- New: the library has **Books** and **Music** tabs. The Music tab groups
+  tracks into albums by tag (or folder), with a track sheet, album shuffle, a
+  global random queue, Artist/Album/Year sorting and the same list/grid/cover
+  flow views. Tracks play through the cassette player with the album as its
+  queue and per-track positions. Tags come from the MP4 boxes or a cached
+  ffprobe; embedded art or `cover.jpg` is the cover. The Music scan loads only
+  when the tab opens, so the book list stays instant.
+
 - New: a read-aloud epub can be listened to on the cassette too. The tape
   button, `l`, the picker row or the cassette icon in the library switches to
   it; the switch is seamless because it reuses the same audio element, so
@@ -68,6 +76,14 @@
   right border; the same palette tints the room around the cassette. Every
   skin is CSS-only on one shared markup and only the reels (or the MD hub /
   record label) animate.
+
+- New: the cassette has a **skin picker**: `K` or the picker row opens a
+  filmstrip of all ten skins as thumbnails built with the current cover,
+  live-previews on focus, and commits with Enter/click (Esc restores). The
+  skins also gained material detail: glass on the reel windows, bevels and
+  specular highlights on hubs and screws, brushed chrome, wood knots, vinyl
+  grooves and sheen, MD shutter, labelled transport keys, 8-track ridges and
+  ruled paper labels.
 
 - New: read aloud plays `.m4b`/`.m4a` audiobooks when there is no epub, drawing
   an old compact cassette that fills the panel instead of the book view. The

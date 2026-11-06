@@ -103,6 +103,28 @@ def make_m4b(folder, name='Test Tape.m4b', chapters=True):
     return path
 
 
+def make_music_m4a(folder, name, title, artist, album, track):
+    def item(typ, kind, payload):
+        return _box(typ, _box(b'data', struct.pack('>I', kind) + b'\x00' * 4 + payload))
+    trk = struct.pack('>HH', track, 2)
+    items = b''.join([
+        item(b'\xa9nam', 1, title.encode()),
+        item(b'\xa9ART', 1, artist.encode()),
+        item(b'\xa9alb', 1, album.encode()),
+        item(b'\xa9day', 1, b'2024'),
+        item(b'trkn', 0, trk),
+        item(b'covr', 14, PNG_1PX),
+    ])
+    meta = _box(b'meta', b'\x00' * 4 + _box(b'ilst', items))
+    mvhd = _box(b'mvhd', b'\x00' * 12 + struct.pack('>II', 1000, 8000) + b'\x00' * 72)
+    moov = _box(b'moov', mvhd + _box(b'udta', meta))
+    path = pathlib.Path(folder) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_box(b'ftyp', b'M4A \x00\x00\x00\x00M4A isomiso2') +
+                     moov + _box(b'mdat', b'\x00' * 4096))
+    return path
+
+
 def make_epub(folder, narrated=True, name='Test Book.epub'):
     path = pathlib.Path(folder) / name
     opf = OPF if narrated else OPF.replace(' media-overlay="ch1-overlay"', '')
@@ -362,6 +384,60 @@ class AudioServerTests(unittest.TestCase):
         self.assertIn(b'id="spritz"', body)
 
 
+class MusicTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.cache = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.cache)
+        ra.CACHE_DIR = self.cache
+        ra._CACHE.clear(); ra._INFO.clear(); ra._AINFO.clear()
+        ra._MUSIC.update(at=0.0, root='', data=None)
+        make_music_m4a(self.tmp, 'music/01 One.m4a', 'One', 'The Band', 'First Record', 1)
+        make_music_m4a(self.tmp, 'music/02 Two.m4a', 'Two', 'The Band', 'First Record', 2)
+        self.srv = ra.ThreadingHTTPServer(('127.0.0.1', 0), ra.Handler)
+        self.srv.root = self.tmp
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.addCleanup(self.srv.server_close)
+        self.addCleanup(self.srv.shutdown)
+
+    def get(self, path):
+        with urllib.request.urlopen('http://127.0.0.1:%d%s' % (self.port, path), timeout=10) as r:
+            return r.status, r.read(), dict(r.headers)
+
+    def test_albums_group_and_sort_tracks(self):
+        _, body, _ = self.get('/api/music')
+        albums = json.loads(body)['albums']
+        self.assertEqual(len(albums), 1)
+        self.assertEqual(albums[0]['album'], 'First Record')
+        self.assertEqual([t['title'] for t in albums[0]['tracks']], ['One', 'Two'])
+        self.assertAlmostEqual(albums[0]['duration'], 16.0)
+        self.assertTrue(albums[0]['cover'])
+
+    def test_queue_and_shuffle(self):
+        _, body, _ = self.get('/api/music')
+        aid = json.loads(body)['albums'][0]['id']
+        _, body, _ = self.get('/api/music/queue?album=' + aid)
+        self.assertEqual(len(json.loads(body)['tracks']), 2)
+        _, body, _ = self.get('/api/music/queue?shuffle=1')
+        tracks = json.loads(body)['tracks']
+        self.assertEqual(sorted(t['title'] for t in tracks), ['One', 'Two'])
+
+    def test_music_player_page(self):
+        _, body, _ = self.get('/api/music')
+        aid = json.loads(body)['albums'][0]['id']
+        _, body, _ = self.get('/play?album=%s&track=music%%2F01%%20One.m4a' % aid)
+        page = body.decode()
+        self.assertIn('const ALBUM = "%s"' % aid, page)
+        self.assertIn('const SHUFFLE = false', page)
+        self.assertIn('const BOOK = "music/01 One.m4a"', page)
+
+    def test_music_is_not_in_the_book_list(self):
+        _, body, _ = self.get('/api/books')
+        self.assertEqual(json.loads(body), [])
+
+
 CHROMIUM = shutil.which('chromium') or shutil.which('chromium-browser')
 
 @unittest.skipUnless(CHROMIUM, 'chromium not installed')
@@ -379,6 +455,7 @@ class BrowserTests(unittest.TestCase):
         ra._AINFO.clear()
         make_epub(self.tmp)
         make_m4b(self.tmp)
+        make_music_m4a(self.tmp, 'music/01 One.m4a', 'One', 'The Band', 'First Record', 1)
         self.srv = ra.ThreadingHTTPServer(('127.0.0.1', 0), ra.Handler)
         self.srv.root = self.tmp
         self.port = self.srv.server_address[1]
@@ -417,6 +494,18 @@ class BrowserTests(unittest.TestCase):
         passed, total, rest = self.ui_results(log)
         self.assertEqual(passed, total, rest)
         self.assertGreaterEqual(total, 10)
+
+    def test_music_player_ui(self):
+        log = self.load('play?shuffle=1&check=ui')
+        self.assertNotIn('Uncaught', log)
+        passed, total, rest = self.ui_results(log)
+        self.assertEqual(passed, total, rest)
+
+    def test_music_library_renders(self):
+        log = self.load('?tab=music')
+        self.assertNotIn('Uncaught', log)
+        self.assertIn('First Record', log)
+        self.assertIn('The Band', log)
 
     def test_library_ui_clicks_and_pad(self):
         log = self.load('?check=ui')

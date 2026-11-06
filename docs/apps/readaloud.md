@@ -4,9 +4,10 @@ EPUB 3 read-along player. It draws the book's own XHTML in Chromium and drives
 the narration from the SMIL media overlays, so the text highlights in time with
 the audio; books without narration are read on a words-per-minute timer instead.
 
-It also plays `.m4b` / `.m4a` audiobooks, which have no text: those open as a
-cassette instead (see below). A book that does have narration can switch to
-that same listen-only cassette at any time (see "Listening without the page").
+It also plays `.m4b` audiobooks and **music albums/tracks** (mp3, m4a, aac,
+flac, ogg, opus, wav), which have no text: those open as a cassette instead
+(see below). A book that does have narration can switch to that same
+listen-only cassette at any time (see "Listening without the page").
 
 ## Where it lives
 
@@ -63,10 +64,35 @@ pause work as before. EPUB durations are estimated by summing each section's
 SMIL span, so the time readout is a label, not a seek target; seeking stays on
 the exact section/paragraph fraction.
 
+## Music
+
+The header has two tabs, **Books** and **Music** (`1`, `2` or `m`; the pad
+reaches the tab buttons too). The Music tab lists albums, grouped by their
+tags or by folder when untagged:
+
+* click an album (or pad A) to open its track sheet: **Shuffle album**, then
+  every track with its number and duration; a track opens the cassette player
+  with the whole album as its queue, so prev/next walk the album;
+* the header **Sort** button cycles Artist → Album → Year, the **Shuffle**
+  button starts a random queue across every album, and the view button still
+  cycles list / grid / cover flow;
+* the player is the same cassette: the label carries the track title, artist,
+  album and track number, the picker lists the queue and prev/next switch
+  tracks. Positions are remembered per track (`ra:m:<file>`).
+
+Tags come from the MP4 boxes for `.m4a`/`.m4b` and from `ffprobe` for the other
+formats (one cached probe per file); embedded cover art is extracted once, with
+`cover.jpg`/`folder.jpg` as the fallback. Albums are cached for 30 s in the
+server, and the Music tab is loaded only when it is first opened, so a large
+book list never waits for a music scan.
+
 ## Skins
 
-Ten skins ship, changed with `k` or the "Tape skin" row in the picker
-(stored as `ra:skin`, forced with `?skin=`):
+Ten skins ship. Press `K`, or open the picker's **Skins** row, for a
+filmstrip of thumbnails built with the current cover: focusing a tile changes
+the live cassette, click/Enter commits, `B`/Esc cancels (the previous skin is
+restored). `k` cycles them directly; the choice is stored as `ra:skin` and can
+be forced with `?skin=`.
 
 | Skin | Look | Where the info goes |
 |---|---|---|
@@ -104,6 +130,8 @@ of staying black. It is a static gradient: no extra work per frame.
 | `l` / tape button | listen-only tape for a read-aloud book (seamless switch) |
 | `k` | cycle the cassette skin: Mixtape, Studio, Slim |
 | `-` / `=` | text size |
+| `K` | skin preview filmstrip (focus previews, Enter commits, Esc cancels) |
+| `1` / `2` / `m` | library tabs: Books, Music, switch |
 | Esc / ✕ | back to the library |
 
 ## Themes
