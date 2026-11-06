@@ -78,11 +78,11 @@
   record label) animate.
 
 - New: the player can turn the display off after an idle timeout: 1, 3, 5 or
-  10 minutes, or never (default 3), from the picker. It is DPMS only, so music
-  keeps playing; any key, pointer movement or pad input wakes it and restarts
-  the timer. While audio plays it holds a flag autosleep honours (and the
-  existing screen-off flag while the panel is off), so the device no longer
-  suspends and cuts the music after the idle timeout. The transport bar no
+  10 minutes, or never (default 3), from the picker. It is a backlight blank, so music keeps playing; any key, pointer movement or pad input wakes it and restarts
+  the timer. While audio plays it holds a flag autosleep honours, so the
+  device does not suspend and cut the music after the idle timeout. The blank
+  is the panel backlight at 0 with the Wayland output still enabled, which is
+  what lets pointer motion (not just a click) wake it. The transport bar no
   longer auto-hides in the cassette/music
   player, and the pages are fixed to the 640x480 panel without scrollbars.
 

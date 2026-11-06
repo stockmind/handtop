@@ -182,23 +182,52 @@ JACK = {'inserted': None}
 SCREEN = {'on': True}
 
 
+def _backlight():
+    import glob
+    for p in glob.glob('/sys/class/backlight/*/brightness'):
+        return p
+    return ''
+
+
+def _bright_state():
+    d = os.environ.get('XDG_RUNTIME_DIR') or '/run/user/%d' % os.getuid()
+    return os.path.join(d, 'rg35xxh-readaloud-bright')
+
+
 def screen_set(on):
-    """Display DPMS only: audio keeps decoding, the page handles the wake."""
+    """Panel off by backlight, not DPMS: the Wayland output stays enabled, so
+    pointer motion still reaches the page and can wake it. Audio never stops."""
+    bl = _backlight()
+    if not bl:
+        SCREEN['on'] = bool(on)
+        return False
+    state = _bright_state()
     import subprocess
     env = dict(os.environ)
     env.setdefault('XDG_RUNTIME_DIR', '/run/user/%d' % os.getuid())
     env.setdefault('WAYLAND_DISPLAY', 'wayland-0')
     try:
-        subprocess.run(['wlopm', '--on' if on else '--off', '*'], env=env,
-                       timeout=5, capture_output=True)
-        flag = os.path.join(env['XDG_RUNTIME_DIR'], 'rg35xxh-screen-off')
+        # The output must stay enabled: a DPMS-off output stops delivering
+        # pointer motion, and that is what made a mouse move unable to wake it.
+        subprocess.run(['wlopm', '--on', '*'], env=env, timeout=5, capture_output=True)
         if on:
             try:
-                os.unlink(flag)
+                with open(state) as f:
+                    val = f.read().strip()
             except OSError:
-                pass
+                val = ''
+            if val:
+                with open(bl, 'w') as f:
+                    f.write(val)
+                os.unlink(state)
         else:
-            open(flag, 'a').close()
+            if not os.path.exists(state):
+                with open(bl) as f:
+                    cur = f.read().strip()
+                with open(state, 'w') as f:
+                    f.write(cur or '255')
+            with open(bl, 'w') as f:
+                f.write('0')
     except Exception:
         return False
     SCREEN['on'] = bool(on)
@@ -5872,6 +5901,17 @@ def main():
         subprocess.Popen(chromium_args(a.port)).wait()
         return
 
+    # If a previous run left the panel black, put the backlight back.
+    st = _bright_state()
+    if os.path.exists(st) and _backlight():
+        try:
+            with open(st) as f:
+                val = f.read().strip()
+            with open(_backlight(), 'w') as f:
+                f.write(val or '255')
+            os.unlink(st)
+        except OSError:
+            pass
     srv = ThreadingHTTPServer(('127.0.0.1', a.port), Handler)
     srv.root = root
     print("library: %s -> http://127.0.0.1:%d/" % (root, a.port), flush=True)
