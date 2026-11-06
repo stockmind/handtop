@@ -66,8 +66,8 @@ the exact section/paragraph fraction.
 
 ## Music
 
-The header has two tabs, **Books** and **Music** (`1`, `2` or `m`; the pad
-reaches the tab buttons too). The Music tab lists albums, grouped by their
+The header has two tabs, **Books** and **Music** (`1`, `2` or `m`; the pad uses
+LB/RB for Books and Music). The Music tab lists albums, grouped by their
 tags or by folder when untagged:
 
 * click an album (or pad A) to open its track sheet: **Shuffle album**, then
