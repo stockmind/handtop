@@ -28,8 +28,9 @@ new one; `--serve` is the server itself; `--stop` shuts it down.
 Files ending in `.m4b` or `.m4a` are listed next to the epubs, with their
 embedded cover and a cassette badge. Opening one plays the file itself and
 draws an old compact cassette that fills the panel: the cover is printed on the
-label (composed once at 576x262: the whole cover centred, the spare area filled
-from its sampled edge colours, then warm-paper tint, grain and a gloss
+label (composed once at 576x262: the whole cover sharp on a blurred enlarged
+copy of itself, so a portrait cover leaves no blank strip, then warm-paper tint,
+grain and a gloss
 layer), the two reel windows are cut through it, and the reels turn while the
 tape plays. One revolution takes 3.4 s at 1.0x, so the reels answer the speed
 setting; pausing freezes them where they are. The tape pack on the supply reel
@@ -96,7 +97,7 @@ be forced with `?skin=`.
 
 | Skin | Look | Where the info goes |
 |---|---|---|
-| **Mixtape** | cream shell, the cover printed across the label (whole cover, side bars filled from the cover edge colours), reel windows punched through | title, author and chapter on the printed band; duration top right |
+| **Mixtape** | cream shell, the cover printed across the label (whole cover on a blurred copy of itself, like a social-post fill), reel windows punched through | title, author and chapter on the printed band; duration top right |
 | **Studio** | smoky shell, big reels, **the whole cover as the inner label**, top strip with a red rule, red SIDE/chapter blocks, a taped-on photo | title/artist on the strip, chapter in the right block, sticker caption with chapter and progress |
 | **Slim** | white dictaphone tape: header window, ribbed deck, hand-written bottom sticker | title/chapter/time in the header, author/progress on the sticker with the cover |
 | **Paper** | cream shell with the **cover printed on a ruled J-card** and a printed title band | title/author/chapter on the band, duration top right |
@@ -133,6 +134,7 @@ of staying black. It is a static gradient: no extra work per frame.
 | `k` | cycle the cassette skin: Mixtape, Studio, Slim |
 | `-` / `=` | text size |
 | `K` | skin preview filmstrip (focus previews, Enter commits, Esc cancels) |
+| picker → Screen off | display timeout: 1, 3, 5, 10 min or never (default 3; any key, pointer or pad press wakes it and restarts the timer) |
 | `1` / `2` / `m` | library tabs: Books, Music, switch |
 | Esc / ✕ | back to the library |
 
@@ -147,8 +149,9 @@ white text. The highlight follows the theme accent (tinted background plus an
 accent underline) instead of a fixed yellow. Stored as `ra:theme`; `?theme=<id>`
 forces one for a screenshot.
 
-While playing, the transport fades out after ~3 s and any input brings it back;
-the picker turns that off. Speed, text size, view style and per-book position are
+In the reader, while playing, the transport fades out after ~3 s and any input
+brings it back; the picker turns that off. In the cassette player (m4b and
+music) the transport always stays on screen. Speed, text size, view style and per-book position are
 remembered. Pulling the headphones out pauses the narration.
 
 ## Library

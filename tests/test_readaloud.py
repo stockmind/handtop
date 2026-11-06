@@ -223,7 +223,7 @@ class ParseTests(unittest.TestCase):
         tape = make_m4b(self.tmp)
         label = ra.label_file(str(tape))
         self.assertTrue(label and pathlib.Path(label).stat().st_size > 512)
-        self.assertTrue(label.endswith('.label2.jpg'))
+        self.assertTrue(label.endswith('.label3.jpg'))
         pal = ra.palette_file(str(tape))
         self.assertEqual(len(pal['left']), 3)
         self.assertEqual(len(pal['right']), 3)
@@ -375,6 +375,15 @@ class AudioServerTests(unittest.TestCase):
         pal = json.loads(body)
         self.assertEqual(len(pal['top']), 3)
         self.assertTrue(all(0 <= c <= 255 for c in pal['top'] + pal['bottom']))
+
+    def test_screen_endpoints(self):
+        status, body, _ = self.get('/screen/off')
+        self.assertEqual(status, 200)
+        self.assertIn('ok', json.loads(body))
+        status, body, _ = self.get('/screen/on')
+        self.assertEqual(status, 200)
+        _, body, _ = self.get('/api/status')
+        self.assertIn('screen', json.loads(body))
 
     def test_tape_page_is_served(self):
         _, body, _ = self.get('/play?book=Test%20Tape.m4b')
