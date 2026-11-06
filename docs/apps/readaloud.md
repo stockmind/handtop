@@ -97,7 +97,7 @@ be forced with `?skin=`.
 | Skin | Look | Where the info goes |
 |---|---|---|
 | **Mixtape** | cream shell, the cover printed across the label (whole cover, side bars filled from the cover edge colours), reel windows punched through | title, author and chapter on the printed band; duration top right |
-| **Studio** | smoky translucent shell, big reels, top strip with a red rule, red SIDE/chapter blocks, a blended cover print between and under the reels plus a taped-on photo | title/author on the top strip, chapter in the right block, sticker caption with chapter and progress |
+| **Studio** | smoky shell, big reels, **the whole cover as the inner label**, top strip with a red rule, red SIDE/chapter blocks, a taped-on photo | title/artist on the strip, chapter in the right block, sticker caption with chapter and progress |
 | **Slim** | white dictaphone tape: header window, ribbed deck, hand-written bottom sticker | title/chapter/time in the header, author/progress on the sticker with the cover |
 | **Chrome** | glossy metal Type IV shell, brushed silver label plate, chrome reels | title/author/chapter on the plate, cover photo inset, duration chip |
 | **Clear** | transparent shell with a paper cover insert behind the mechanism, white caption strip | title and chapter on the strip; cover faded behind the reels |

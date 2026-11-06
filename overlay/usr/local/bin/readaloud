@@ -1085,6 +1085,40 @@ def music_queue(root, album='', shuffle=False):
     return tracks
 
 
+def bg_file(book):
+    """A 640x480 blurred, darkened cover for the room behind the cassette.
+    Made once (ffmpeg) so the page never runs a full-screen blur per frame."""
+    info = media_info(book)
+    key = info.get('key')
+    src = os.path.join(CACHE_DIR, key + '.cover') if key else ''
+    if not info.get('cover') or not src or not os.path.exists(src):
+        return None
+    out = os.path.join(CACHE_DIR, key + '.bg.jpg')
+    if os.path.exists(out) and os.path.getsize(out) > 512:
+        return out
+    with _LABEL_LOCK:
+        if os.path.exists(out) and os.path.getsize(out) > 512:
+            return out
+        import subprocess
+        tmp = out + '.tmp.jpg'
+        try:
+            subprocess.run(['ffmpeg', '-y', '-nostdin', '-threads', '1', '-v', 'error',
+                            '-i', src, '-vf',
+                            'scale=640:480:force_original_aspect_ratio=increase,'
+                            'crop=640:480,gblur=sigma=24,eq=brightness=-0.06:saturation=1.12',
+                            '-q:v', '5', tmp], timeout=30, capture_output=True)
+        except Exception:
+            pass
+        if os.path.exists(tmp) and os.path.getsize(tmp) > 512:
+            os.replace(tmp, out)
+            return out
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return None
+
+
 def palette_file(book):
     """Average colours from the cover border, for the room around the cassette.
     Decoded to 8x8 once with ffmpeg and cached next to the cover; the page uses
@@ -2135,6 +2169,12 @@ fetch('/api/storyteller').then(r => r.json()).then(st => {
 SKIN_SHEET = '<div id="skins"><header><b>Skins</b><span id="skinnow"></span><button id="skinsx" title="close">&#10005;</button></header><div id="skingrid"></div></div>'
 
 CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E")}
+ /* the room: the cover enlarged and blurred, like a now-playing backdrop */
+ #blur{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;background:var(--bg)}
+ #blur img{width:100%;height:100%;object-fit:cover;opacity:.9}
+ #blur::after{content:'';position:absolute;inset:0;
+   background:linear-gradient(180deg,rgba(0,0,0,.22),rgba(0,0,0,.58)),
+     radial-gradient(ellipse at 50% 45%,transparent 34%,rgba(0,0,0,.55) 100%)}
  #tape{position:absolute;left:50%;top:12px;width:624px;height:396px;margin-left:-312px;
    cursor:pointer;z-index:1}
  body.bare #tape{display:none}
@@ -2242,7 +2282,15 @@ CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://w
    background:linear-gradient(180deg,rgba(48,50,55,.35),rgba(18,19,22,.7) 60%,rgba(12,13,15,.94)),
      radial-gradient(ellipse at 50% 50%,transparent 30%,rgba(10,11,13,.9) 100%);
    box-shadow:inset 0 0 50px rgba(0,0,0,.7)}
- #tape[data-skin="studio"] .label{display:none}
+ /* Studio: the cover is the label, not a sticker on a metal shell. It fills
+    the whole inner panel (the spare area was empty before); the printed strip,
+    red blocks, reels and the taped photo sit on top of it. */
+ #tape[data-skin="studio"] .label{display:block;left:12px;right:12px;top:12px;height:282px;
+   border-radius:10px;overflow:hidden;z-index:1;background:#111;
+   box-shadow:inset 0 0 0 2px rgba(255,255,255,.18),inset 0 4px 16px rgba(0,0,0,.6)}
+ #tape[data-skin="studio"] .label img#cov{display:block;width:100%;height:100%;object-fit:cover;
+   opacity:.94;filter:saturate(.88) contrast(1.04) sepia(.08)}
+ #tape[data-skin="studio"] .label .cap{display:none}
  #tape[data-skin="studio"] .shell{border-radius:24px;
    background:linear-gradient(158deg,#73767b 0%,#55585d 22%,#3d3f44 52%,#2a2b2f 78%,#212226 100%);
    box-shadow:0 22px 42px rgba(0,0,0,.68),0 3px 8px rgba(0,0,0,.45),
@@ -2257,8 +2305,9 @@ CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://w
      transparent 52%),linear-gradient(180deg,rgba(88,90,94,.34),rgba(30,31,34,.62) 60%,rgba(18,19,21,.78));
    box-shadow:inset 0 0 0 2px rgba(255,255,255,.13),inset 0 2px 16px rgba(0,0,0,.6),
      0 1px 0 rgba(255,255,255,.16)}
- #tape[data-skin="studio"] .topline{display:block;position:absolute;left:92px;right:92px;top:42px;
-   text-align:center;z-index:2}
+ #tape[data-skin="studio"] .topline{display:block;position:absolute;left:92px;right:92px;top:34px;
+   text-align:center;z-index:2;padding:8px 0 10px;border-radius:8px;
+   background:linear-gradient(180deg,rgba(0,0,0,.55),rgba(0,0,0,.18) 72%,transparent)}
  #tape[data-skin="studio"] .topline #tagline{display:block;font:600 14px/1.35 system-ui,sans-serif;
    letter-spacing:.3em;text-transform:uppercase;color:#f4f1e9;white-space:nowrap;overflow:hidden;
    text-overflow:ellipsis;text-shadow:0 1px 3px rgba(0,0,0,.9)}
@@ -2285,17 +2334,12 @@ CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://w
  #tape[data-skin="studio"] .win.a{left:126px}
  #tape[data-skin="studio"] .win.b{right:126px}
  #tape[data-skin="studio"] .hub{width:64px;height:64px;margin:-32px 0 0 -32px;
-   background:
-     radial-gradient(circle at 50% 8px,#2a2b2e 0 3px,transparent 3.5px),
-     radial-gradient(circle at 81% 28px,#2a2b2e 0 3px,transparent 3.5px),
-     radial-gradient(circle at 81% 72%,#2a2b2e 0 3px,transparent 3.5px),
-     radial-gradient(circle at 50% 100%,#2a2b2e 0 3px,transparent 3.5px),
-     radial-gradient(circle at 19% 72%,#2a2b2e 0 3px,transparent 3.5px),
-     radial-gradient(circle at 19% 28px,#2a2b2e 0 3px,transparent 3.5px),
-     radial-gradient(circle,#e9e5da 0 42%,#a9a69d 44% 56%,#dfdbd1 58% 100%);
-   box-shadow:inset 0 0 0 1px rgba(20,20,22,.5),0 2px 6px rgba(0,0,0,.7)}
- #tape[data-skin="studio"] .hub::after{inset:20px;background:
-   radial-gradient(circle at 40% 35%,#3a3b3f,#0a0a0c 70%);box-shadow:inset 0 2px 5px #000}
+   background:repeating-conic-gradient(from 0deg,#f3eee1 0 34deg,#414246 34deg 60deg);
+   box-shadow:inset 0 0 0 2px rgba(255,255,255,.55),inset 0 0 0 4px rgba(20,21,23,.5),
+     0 2px 6px rgba(0,0,0,.75)}
+ #tape[data-skin="studio"] .hub::after{inset:18px;background:
+   radial-gradient(circle at 40% 35%,#3a3b3f,#0a0a0c 70%);
+   box-shadow:inset 0 2px 5px #000,0 0 0 5px #f3eee1}
  #tape[data-skin="studio"] .stk{display:block;position:absolute;left:50%;top:186px;width:104px;
    padding:4px 4px 0;margin-left:-52px;background:#f7f3e8;z-index:4;transform:rotate(-2.6deg);
    box-shadow:0 5px 12px rgba(0,0,0,.55),0 1px 0 rgba(255,255,255,.6)}
@@ -2856,13 +2900,13 @@ PLAYER_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>readal
  .tocrow.sel{background:var(--panel);box-shadow:inset 0 0 0 2px var(--accent)}
  .tocrow.tog .l{color:var(--accent2)}
  #cassette{position:absolute;left:0;right:0;top:0;bottom:58px;display:none;overflow:hidden;z-index:3;
-   background:radial-gradient(95% 78% at 50% 0%,color-mix(in srgb,var(--amb-top,#000) 46%,var(--bg) 54%) 0%,
-     color-mix(in srgb,var(--amb-bot,#000) 26%,var(--bg) 74%) 42%,var(--bg) 76%,#000 130%)}
+   background:linear-gradient(180deg,rgba(0,0,0,.05),rgba(0,0,0,.32))}
  body.tape #cassette{display:block}
  body.tape #f,body.tape #spritz{display:none!important}
  body.zen #cassette{bottom:0}
 __CASSETTE_CSS__
 </style></head><body>
+<div id="blur"><img id="blurimg" alt=""></div>
 <div id="load"><div class="spin"></div><div id="loadtxt">opening book&hellip;</div></div>
 <iframe id="f"></iframe>
 <div id="spritz"><div id="g1"></div><div id="g2"></div><div id="spz"></div></div>
@@ -3524,6 +3568,8 @@ function tapeInit() {
     im.src = art;
     im.onerror = () => { im.style.visibility = 'hidden'; };
   }
+  const bl = document.getElementById('blurimg');
+  if (bl) { bl.src = '/bg/' + encodeURIComponent(BOOK); }
   if (!tapeInit.palette) {
     tapeInit.palette = true;
     fetch('/colors/' + encodeURIComponent(BOOK)).then(r => r.json()).then(c => {
@@ -4170,6 +4216,7 @@ __CASSETTE_CSS__
  .tocrow.sel{background:var(--panel);box-shadow:inset 0 0 0 2px var(--accent)}
  .tocrow.tog .l{color:var(--accent2)}
 </style></head><body>
+<div id="blur"><img id="blurimg" alt=""></div>
 <div id="load"><div class="spin"></div><div id="loadtxt">spooling tape&hellip;</div></div>
 __CASSETTE__
 __SKINS__
@@ -4361,6 +4408,7 @@ function applyMusicTrack(i, play) {
   setImg('stk', '/art/' + f);
   setImg('big', '/art/' + f);
   setImg('slimcov', '/art/' + f);
+  setImg('blurimg', '/bg/' + f);
   fetch('/colors/' + f).then(r => r.json()).then(c => {
     const st = document.documentElement.style;
     if (c.top) st.setProperty('--amb-top', 'rgb(' + c.top.join(',') + ')');
@@ -4812,6 +4860,7 @@ fetch('/api/book/' + encodeURIComponent(BOOK))
     document.getElementById('stk').src = art;
     document.getElementById('slimcov').src = art;
     document.getElementById('big').src = art;
+    document.getElementById('blurimg').src = '/bg/' + encodeURIComponent(BOOK);
     fetch('/colors/' + encodeURIComponent(BOOK)).then(r => r.json()).then(c => {
       const st = document.documentElement.style;
       if (c.top) st.setProperty('--amb-top', 'rgb(' + c.top.join(',') + ')');
@@ -5099,6 +5148,17 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             with open(fname, 'rb') as f:
                 return self._send(200, f.read(), ctype, {'Cache-Control': 'no-cache'})
+
+        if path.startswith('/bg/'):
+            p = self._book_path(path[len('/bg/'):])
+            if not p:
+                return self._send(404, b'no cover')
+            fname = bg_file(p)
+            if not fname:
+                return self._send(404, b'no cover')
+            with open(fname, 'rb') as f:
+                return self._send(200, f.read(), 'image/jpeg',
+                                  {'Cache-Control': 'max-age=86400'})
 
         if path.startswith('/colors/'):
             p = self._book_path(path[len('/colors/'):])

@@ -77,6 +77,11 @@
   skin is CSS-only on one shared markup and only the reels (or the MD hub /
   record label) animate.
 
+- Change: Studio now prints the whole cover across the inner panel instead of
+  a small print in the middle, the reel hubs are gear-toothed sprockets rather
+  than dots, and the room behind every skin is the cover enlarged and blurred
+  once (`/bg`), so the corners are filled like a modern now-playing screen.
+
 - New: the cassette has a **skin picker**: `K` or the picker row opens a
   filmstrip of all ten skins as thumbnails built with the current cover,
   live-previews on focus, and commits with Enter/click (Esc restores). The
