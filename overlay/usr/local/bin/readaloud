@@ -2730,6 +2730,99 @@ CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://w
 
  #tape[data-skin="cart"] .counter{right:8px;background:#0c0c0e;color:#e8c86a}
 
+ /* ---------- paper: a J-card with a taped square photo ---------- */
+ #tape[data-skin="paper"] .shell{border-radius:18px;
+   background:linear-gradient(176deg,#f2e9d5,#e4d7bc 30%,#d2c3a4 65%,#bda98a);
+   box-shadow:0 20px 38px rgba(0,0,0,.6),inset 0 2px 0 rgba(255,255,255,.8),
+     inset 0 -4px 10px rgba(80,60,35,.28),inset 0 0 0 1px rgba(255,255,255,.35)}
+ #tape[data-skin="paper"] .label{left:22px;right:22px;top:16px;height:258px;border-radius:5px;
+   background:linear-gradient(180deg,#f7f0dd,#eadfc6 70%,#e2d4b8);
+   box-shadow:inset 0 0 0 1px #b9a77f,inset 0 2px 8px rgba(255,255,255,.6),
+     0 3px 8px rgba(0,0,0,.3);isolation:isolate}
+ #tape[data-skin="paper"] .label img#cov{display:block;width:100%;height:100%;object-fit:cover;
+   opacity:.94;filter:saturate(.86) contrast(1.03) sepia(.12)}
+ #tape[data-skin="paper"] .label .tint{background:linear-gradient(120deg,rgba(255,250,235,.3),transparent 40%)}
+ #tape[data-skin="paper"] .label .grain{opacity:.12}
+ #tape[data-skin="paper"] .label .gloss{opacity:.16}
+ #tape[data-skin="paper"] .label::before{background:linear-gradient(180deg,rgba(255,255,255,.4),transparent 6%,
+   transparent 94%,rgba(0,0,0,.08)),repeating-linear-gradient(180deg,transparent 0 17px,
+   rgba(120,100,70,.12) 17px 18px)}
+ #tape[data-skin="paper"] .label .cap{bottom:0;height:78px;padding:8px 14px;
+   background:linear-gradient(180deg,#0000,rgba(16,12,8,.62) 32%,rgba(12,9,6,.88));color:#f5e9cc}
+ #tape[data-skin="paper"] .ttl{font:600 19px/1.2 Georgia,'DejaVu Serif',serif;color:#f5e9cc}
+ #tape[data-skin="paper"] .aut{color:#dccba6}
+ #tape[data-skin="paper"] .chp{color:#bfa87f;letter-spacing:.13em}
+ #tape[data-skin="paper"] .side{display:none}
+ #tape[data-skin="paper"] .dur{background:#3a2d1a;color:#f0e2c4}
+ #tape[data-skin="paper"] .stk{display:none}
+ #tape[data-skin="paper"] .win{top:96px;width:100px;height:100px}
+ #tape[data-skin="paper"] .win.a{left:154px}
+ #tape[data-skin="paper"] .win.b{right:154px}
+ #tape[data-skin="paper"] .deck .head{background:linear-gradient(180deg,#17110b,#2a2015)}
+ #tape[data-skin="paper"] .brand::before{content:'J-CARD \00b7 TYPE I';font-size:8px;letter-spacing:.18em}
+ #tape[data-skin="paper"] .brand{font-size:0;color:#8a7a5c}
+ #tape[data-skin="paper"] .brand span{display:none}
+ /* ---------- boombox: cassette window between two speaker grilles ---------- */
+ #tape[data-skin="boombox"] .shell{left:50%;margin-left:-304px;top:6px;width:608px;height:384px;
+   border-radius:22px;background:linear-gradient(168deg,#3a3e44,#22252a 40%,#16181c 75%,#0e1013);
+   box-shadow:0 22px 42px rgba(0,0,0,.75),inset 0 2px 0 rgba(255,255,255,.22),
+     inset 0 -5px 12px rgba(0,0,0,.7),inset 0 0 0 1px rgba(255,255,255,.1)}
+ #tape[data-skin="boombox"] .shell::before{content:'';position:absolute;left:16px;top:46px;width:126px;
+   height:286px;border-radius:14px;z-index:0;opacity:.95;
+   background:repeating-radial-gradient(circle at 50% 50%,#0a0b0d 0 2px,#30343a 2px 4px);
+   box-shadow:inset 0 0 18px #000,0 0 0 3px #4a4f56}
+ #tape[data-skin="boombox"] .shell::after{content:'';position:absolute;right:16px;top:46px;width:126px;
+   height:286px;border-radius:14px;z-index:0;opacity:.95;
+   background:repeating-radial-gradient(circle at 50% 50%,#0a0b0d 0 2px,#30343a 2px 4px);
+   box-shadow:inset 0 0 18px #000,0 0 0 3px #4a4f56}
+ #tape[data-skin="boombox"] .label{left:164px;right:164px;top:40px;height:200px;border-radius:8px;
+   background:#0b0c0e;box-shadow:inset 0 0 0 3px #4a4f56,inset 0 5px 16px #000,0 2px 6px #0007}
+ #tape[data-skin="boombox"] .label .cap{height:64px;padding:6px 10px;background:linear-gradient(180deg,#0000,#000c)}
+ #tape[data-skin="boombox"] .side{background:#0a0c10cc;color:#e8dfc8}
+ #tape[data-skin="boombox"] .dur{background:#0a0c10cc;color:#9fd8ff}
+ #tape[data-skin="boombox"] .win{top:58px;width:86px;height:86px}
+ #tape[data-skin="boombox"] .win.a{left:176px}
+ #tape[data-skin="boombox"] .win.b{right:176px}
+ #tape[data-skin="boombox"] .hub{width:42px;height:42px;margin:-21px 0 0 -21px;
+   background:repeating-conic-gradient(from 0deg,#f0e8d4 0 34deg,#3a3d42 34deg 60deg)}
+ #tape[data-skin="boombox"] .hub::after{inset:13px}
+ #tape[data-skin="boombox"] .deck{left:164px;right:164px;bottom:14px;height:84px}
+ #tape[data-skin="boombox"] .head{top:2px;height:70px}
+ #tape[data-skin="boombox"] .pin{display:none}
+ #tape[data-skin="boombox"] .brand{left:0;bottom:0;color:#9aa0a8;font-size:0}
+ #tape[data-skin="boombox"] .brand::before{content:'BOOMBOX \00b7 STEREO';font-size:8px;letter-spacing:.2em}
+ #tape[data-skin="boombox"] .brand span{display:none}
+ #tape[data-skin="boombox"] .counter{right:0;background:#0a0c10;color:#9fd8ff}
+ #tape[data-skin="boombox"] .keys{display:flex;left:170px;right:170px;bottom:106px;height:30px;gap:6px;z-index:5}
+ #tape[data-skin="boombox"] .keys i{flex:1;border-radius:3px;background:linear-gradient(180deg,#6b717a,#2a2e34);
+   box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 2px 4px rgba(0,0,0,.6)}
+ #tape[data-skin="boombox"] .keys i:nth-child(3){background:linear-gradient(180deg,#8fd8f5,#2f6f8c)}
+ #tape[data-skin="boombox"] .meter{display:flex;right:44px;top:20px;height:20px;gap:2px;align-items:flex-end;z-index:5}
+ #tape[data-skin="boombox"] .meter i{display:block;width:4px;border-radius:1px;
+   background:linear-gradient(180deg,#ff5a3c,#ffd35a 55%,#7ad48a)}
+ #tape[data-skin="boombox"] .meter i:nth-child(1){height:24%}
+ #tape[data-skin="boombox"] .meter i:nth-child(2){height:40%}
+ #tape[data-skin="boombox"] .meter i:nth-child(3){height:32%}
+ #tape[data-skin="boombox"] .meter i:nth-child(4){height:54%}
+ #tape[data-skin="boombox"] .meter i:nth-child(5){height:46%}
+ #tape[data-skin="boombox"] .meter i:nth-child(6){height:64%}
+ #tape[data-skin="boombox"] .meter i:nth-child(7){height:38%}
+ #tape[data-skin="boombox"] .meter i:nth-child(8){height:50%}
+ #tape[data-skin="boombox"] .screw{background:radial-gradient(circle at 35% 30%,#c9cbd0,#5a5c62 60%,#2b2c30)}
+ #tape[data-skin="boombox"] .screw::before,#tape[data-skin="boombox"] .screw::after{background:#1c1d20}
+ /* picker minis */
+ .skcard[data-skin="paper"] .skthumb{background:linear-gradient(180deg,#f5edda,#dfd1b4)}
+ .skcard[data-skin="paper"] .skthumb::before{content:'';position:absolute;left:4px;right:4px;bottom:4px;
+   height:12px;background:repeating-linear-gradient(180deg,#0000 0 4px,#b9a77f66 4px 5px)}
+ .skcard[data-skin="paper"] .skthumb img{left:5px;top:6px;width:30px;height:30px;transform:rotate(-3deg);
+   border:2px solid #fffdf6}
+ .skcard[data-skin="boombox"] .skthumb{background:linear-gradient(160deg,#3a3e44,#14161a)}
+ .skcard[data-skin="boombox"] .skthumb::before{content:'';position:absolute;left:3px;top:10px;width:16px;
+   height:42px;border-radius:4px;background:repeating-radial-gradient(#0a0b0d 0 1px,#30343a 1px 2px)}
+ .skcard[data-skin="boombox"] .skthumb::after{content:'';position:absolute;right:3px;top:10px;width:16px;
+   height:42px;border-radius:4px;background:repeating-radial-gradient(#0a0b0d 0 1px,#30343a 1px 2px)}
+ .skcard[data-skin="boombox"] .skthumb img{left:34px;top:10px;width:20px;height:28px;border-radius:2px}
+
  /* ---------- skin picker: a filmstrip of real thumbnails ---------- */
  #skins{position:fixed;left:0;right:0;bottom:0;height:212px;z-index:12;display:none;
    flex-direction:column;background:color-mix(in srgb,var(--panel) 94%,#000);
@@ -3149,7 +3242,7 @@ async function runUITests() {
     openSkins();
     assert(skOpen, 'sheet did not open');
     assert(skCards.length === SKINS.length, 'missing tiles');
-    skCards[3].focus();
+    skCards.find(c => c.dataset.skin === 'chrome').focus();
     assert(document.getElementById('tape').dataset.skin === 'chrome', 'no live preview');
     closeSkins(false);
     assert(tapeSkin === 'label', 'cancel did not restore');
@@ -3438,10 +3531,10 @@ function chapterName(i) {
 
 // ---- listen-only tape (the same audio element, so switching is seamless) ----
 let tapeMode = false, tapeDur = null, tapeSkin = 'label';
-const SKINS = ['label', 'studio', 'slim', 'chrome', 'clear', 'wood', 'vinyl', 'minidisc', 'walkman', 'cart'];
-const SKIN_NAMES = {label: 'Mixtape', studio: 'Studio', slim: 'Slim', chrome: 'Chrome',
-  clear: 'Clear', wood: 'Wood', vinyl: 'Vinyl', minidisc: 'MiniDisc',
-  walkman: 'Walkman', cart: '8-Track'};
+const SKINS = ['label', 'studio', 'slim', 'paper', 'chrome', 'clear', 'wood', 'vinyl', 'minidisc', 'walkman', 'cart', 'boombox'];
+const SKIN_NAMES = {label: 'Mixtape', studio: 'Studio', slim: 'Slim', paper: 'Paper',
+  chrome: 'Chrome', clear: 'Clear', wood: 'Wood', vinyl: 'Vinyl', minidisc: 'MiniDisc',
+  walkman: 'Walkman', cart: '8-Track', boombox: 'Boombox'};
 try { tapeSkin = localStorage.getItem('ra:skin') || 'label'; } catch (e) {}
 const forcedSkinR = new URLSearchParams(location.search).get('skin');
 if (SKINS.includes(forcedSkinR)) tapeSkin = forcedSkinR;
@@ -4306,10 +4399,10 @@ function showChapter() {
 }
 
 // ---- skins --------------------------------------------------------------
-const SKINS = ['label', 'studio', 'slim', 'chrome', 'clear', 'wood', 'vinyl', 'minidisc', 'walkman', 'cart'];
-const SKIN_NAMES = {label: 'Mixtape', studio: 'Studio', slim: 'Slim', chrome: 'Chrome',
-  clear: 'Clear', wood: 'Wood', vinyl: 'Vinyl', minidisc: 'MiniDisc',
-  walkman: 'Walkman', cart: '8-Track'};
+const SKINS = ['label', 'studio', 'slim', 'paper', 'chrome', 'clear', 'wood', 'vinyl', 'minidisc', 'walkman', 'cart', 'boombox'];
+const SKIN_NAMES = {label: 'Mixtape', studio: 'Studio', slim: 'Slim', paper: 'Paper',
+  chrome: 'Chrome', clear: 'Clear', wood: 'Wood', vinyl: 'Vinyl', minidisc: 'MiniDisc',
+  walkman: 'Walkman', cart: '8-Track', boombox: 'Boombox'};
 let skin = 'label';
 try { skin = localStorage.getItem('ra:skin') || 'label'; } catch (e) {}
 const forcedSkin = new URLSearchParams(location.search).get('skin');

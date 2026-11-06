@@ -88,7 +88,7 @@ book list never waits for a music scan.
 
 ## Skins
 
-Ten skins ship. Press `K`, or open the picker's **Skins** row, for a
+Twelve skins ship. Press `K`, or open the picker's **Skins** row, for a
 filmstrip of thumbnails built with the current cover: focusing a tile changes
 the live cassette, click/Enter commits, `B`/Esc cancels (the previous skin is
 restored). `k` cycles them directly; the choice is stored as `ra:skin` and can
@@ -99,6 +99,8 @@ be forced with `?skin=`.
 | **Mixtape** | cream shell, the cover printed across the label (whole cover, side bars filled from the cover edge colours), reel windows punched through | title, author and chapter on the printed band; duration top right |
 | **Studio** | smoky shell, big reels, **the whole cover as the inner label**, top strip with a red rule, red SIDE/chapter blocks, a taped-on photo | title/artist on the strip, chapter in the right block, sticker caption with chapter and progress |
 | **Slim** | white dictaphone tape: header window, ribbed deck, hand-written bottom sticker | title/chapter/time in the header, author/progress on the sticker with the cover |
+| **Paper** | cream shell with the **cover printed on a ruled J-card** and a printed title band | title/author/chapter on the band, duration top right |
+| **Boombox** | wide radio body, two speaker grilles, cassette window in the middle, transport keys, VU meter | title over the window, artist/chapter under it, elapsed in the LCD |
 | **Chrome** | glossy metal Type IV shell, brushed silver label plate, chrome reels | title/author/chapter on the plate, cover photo inset, duration chip |
 | **Clear** | transparent shell with a paper cover insert behind the mechanism, white caption strip | title and chapter on the strip; cover faded behind the reels |
 | **Wood** | wooden hi-fi case, brass plate and reel rims, a small VU meter | title on the brass plate, cover photo, chapter, elapsed on the counter |

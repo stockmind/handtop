@@ -69,8 +69,8 @@
   it; the switch is seamless because it reuses the same audio element, so
   position and playback carry over, and the preference is remembered. The tape
   shows the cover, book, author, chapter, elapsed/total time and percentage.
-  Ten skins ship (`k` or the picker): Mixtape, Studio, Slim, Chrome, Clear,
-  Wood, Vinyl, MiniDisc, Walkman and 8-Track, each embedding the cover, title,
+  Twelve skins ship (`k` or the picker): Mixtape, Studio, Slim, Paper, Chrome, Clear,
+  Wood, Vinyl, MiniDisc, Walkman, 8-Track and Boombox, each embedding the cover, title,
   author, chapter and progress in its own layout. The label keeps the whole
   cover with the spare area filled from the colours sampled at its left and
   right border; the same palette tints the room around the cassette. Every
@@ -83,7 +83,7 @@
   once (`/bg`), so the corners are filled like a modern now-playing screen.
 
 - New: the cassette has a **skin picker**: `K` or the picker row opens a
-  filmstrip of all ten skins as thumbnails built with the current cover,
+  filmstrip of all twelve skins as thumbnails built with the current cover,
   live-previews on focus, and commits with Enter/click (Esc restores). The
   skins also gained material detail: glass on the reel windows, bevels and
   specular highlights on hubs and screws, brushed chrome, wood knots, vinyl
