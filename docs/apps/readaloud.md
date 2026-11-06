@@ -27,7 +27,8 @@ new one; `--serve` is the server itself; `--stop` shuts it down.
 Files ending in `.m4b` or `.m4a` are listed next to the epubs, with their
 embedded cover and a cassette badge. Opening one plays the file itself and
 draws an old compact cassette that fills the panel: the cover is printed on the
-label (pre-cropped server-side to 576x262, warm-paper tint, grain and a gloss
+label (composed once at 576x262: the whole cover centred, the spare area filled
+from its sampled edge colours, then warm-paper tint, grain and a gloss
 layer), the two reel windows are cut through it, and the reels turn while the
 tape plays. One revolution takes 3.4 s at 1.0x, so the reels answer the speed
 setting; pausing freezes them where they are. The tape pack on the supply reel
@@ -40,7 +41,7 @@ and Esc returns to the library. Position and speed are remembered per file.
 Metadata is read straight from the MP4 boxes (title/artist, `mvhd` duration,
 the `covr` cover, and chapters from the Nero `chpl` list or the QuickTime
 chapter track), so a 1 GB m4b costs a few seeks, not a decode. The parse, the
-cover and the label crop are cached on disk keyed on mtime and size. The file is
+cover, its edge palette and the label are cached on disk keyed on mtime and size. The file is
 streamed over HTTP with byte ranges, 64 KB at a time, because Chromium needs
 ranges to seek and the file must never be read into memory.
 
@@ -81,7 +82,7 @@ Ten skins ship, changed with `k` or the "Tape skin" row in the picker
 | **8-Track** | black cartridge, large cover label, single loop window, PROGRAM branding | title/author/chapter on the label band, cover sticker, counter |
 
 The skins are pure CSS on the same markup; only the cover images differ (a
-576x262 label crop and a 360 px square print, both cached). Nothing animates
+576x262 edge-filled label and a 360 px square print, both cached). Nothing animates
 except the two reels, and switching a skin never touches the audio. The empty
 space around the cassette is tinted with two colours sampled from the cover's
 border (`/colors/<book>`, an 8x8 decode cached next to the cover, top and bottom

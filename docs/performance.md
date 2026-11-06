@@ -81,9 +81,9 @@ delayed", not like "the page scrolls slowly".
 
 The m4b cassette is static artwork plus two spinning reels:
 
-* the shell, label, text and deck are painted once; the cover is pre-cropped to
-  576x262 by `ffmpeg` on the play path and cached, so nothing scales or decodes
-  on a frame;
+* the shell, label, text and deck are painted once; the label is composed to
+  576x262 by `ffmpeg` on the play path (cover centred, side bars from the sampled
+  edge colours) and cached, so nothing scales or decodes on a frame;
 * the reels are two small elements animated with a CSS `rotate` whose duration
   follows the playback rate. Pausing sets `animation-play-state: paused`, so a
   paused tape costs no frames at all;
