@@ -2014,6 +2014,7 @@ const held = {};
 function padTick() {
   for (const gp of (navigator.getGamepads ? navigator.getGamepads() : [])) {
     if (!gp) continue;
+    if (gp.axes && gp.axes.some(a => Math.abs(a) > 0.25)) activity();
     gp.buttons.forEach((b, i) => {
       const k = gp.index + ':' + i;
       if (b.pressed && !held[k]) {
@@ -3771,6 +3772,7 @@ function activity() {
   if (now - lastAct > 800) { lastAct = now; scheduleXoff(); }
 }
 document.addEventListener('pointerdown', activity);
+document.addEventListener('pointermove', activity);
 function cycleXoff() {
   const vals = [1, 3, 5, 10, 0];
   const i = vals.indexOf(xoffMin);
@@ -4237,6 +4239,7 @@ const MENU_PAD = {0: 'ok', 1: 'close', 12: 'up', 13: 'down'};
 function padTick() {
   for (const gp of (navigator.getGamepads ? navigator.getGamepads() : [])) {
     if (!gp) continue;
+    if (gp.axes && gp.axes.some(a => Math.abs(a) > 0.25)) activity();
     gp.buttons.forEach((b, i) => {
       const key = gp.index + ':' + i;
       if (b.pressed && !padHeld[key]) activity();
@@ -4767,6 +4770,7 @@ function activity() {
   if (now - lastAct > 800) { lastAct = now; scheduleXoff(); }
 }
 document.addEventListener('pointerdown', activity);
+document.addEventListener('pointermove', activity);
 function cycleXoff() {
   const vals = [1, 3, 5, 10, 0];
   const i = vals.indexOf(xoffMin);
@@ -4926,6 +4930,7 @@ function doAction(a) {
 function padTick() {
   for (const gp of (navigator.getGamepads ? navigator.getGamepads() : [])) {
     if (!gp) continue;
+    if (gp.axes && gp.axes.some(a => Math.abs(a) > 0.25)) activity();
     gp.buttons.forEach((b, i) => {
       const key = gp.index + ':' + i;
       if (b.pressed && !padHeld[key]) activity();

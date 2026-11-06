@@ -79,7 +79,7 @@
 
 - New: the player can turn the display off after an idle timeout: 1, 3, 5 or
   10 minutes, or never (default 3), from the picker. It is DPMS only, so music
-  keeps playing; any key, pointer movement or pad press wakes it and restarts
+  keeps playing; any key, pointer movement or pad input wakes it and restarts
   the timer. The transport bar no longer auto-hides in the cassette/music
   player, and the pages are fixed to the 640x480 panel without scrollbars.
 

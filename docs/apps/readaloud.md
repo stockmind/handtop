@@ -134,7 +134,7 @@ of staying black. It is a static gradient: no extra work per frame.
 | `k` | cycle the cassette skin: Mixtape, Studio, Slim |
 | `-` / `=` | text size |
 | `K` | skin preview filmstrip (focus previews, Enter commits, Esc cancels) |
-| picker → Screen off | display timeout: 1, 3, 5, 10 min or never (default 3; any key, pointer or pad press wakes it and restarts the timer) |
+| picker → Screen off | display timeout: 1, 3, 5, 10 min or never (default 3; any key, pointer movement/tap or pad input wakes it and restarts the timer) |
 | `1` / `2` / `m` | library tabs: Books, Music, switch |
 | Esc / ✕ | back to the library |
 
