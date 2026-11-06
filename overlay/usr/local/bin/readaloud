@@ -1425,6 +1425,7 @@ LIBRARY_HTML = """<!doctype html><html><head><meta charset="utf-8"><title>Read a
   <div id="themegrid"></div>
 </div>
 <script>
+fetch('/screen/on').catch(() => {});
 window.onerror = (m, s, l, c) => {
   const box = document.getElementById('list');
   if (box) box.innerHTML = '<div id="empty">UI error: ' + m + ' &#64;' + l + ':' + c + '</div>';
@@ -3100,6 +3101,7 @@ __SKINS__
 </div>
 <script>
 const BOOK = __BOOK__;
+fetch('/screen/on').catch(() => {});
 const f = document.getElementById('f'), rateEl = document.getElementById('rate');
 const titleEl = document.getElementById('title'), pp = document.getElementById('pp');
 const audio = new Audio();
@@ -4467,6 +4469,7 @@ __SKINS__
 <audio id="a" preload="metadata"></audio>
 <script>
 const BOOK = __BOOK__;
+fetch('/screen/on').catch(() => {});
 const ALBUM = __ALBUM__;
 const SHUFFLE = __SHUFFLE__;
 const audio = document.getElementById('a'), tape = document.getElementById('tape');
