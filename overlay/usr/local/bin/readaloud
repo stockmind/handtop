@@ -2771,7 +2771,7 @@ CASSETTE_HTML = r"""<div id="tape" data-skin="label">
  <div class="shell">
   <div class="topline"><span id="tagline">read along</span><span id="topaut"></span></div>
   <div class="redblock lb"><b>SIDE</b><i>A</i><em>read along</em></div>
-  <div class="redblock rb"><b id="rednum">01</b><em>chapter</em></div>
+  <div class="redblock rb"><b id="rednum">01</b><em id="redlab">chapter</em></div>
   <div class="bigart"><img id="big" alt=""><i></i></div>
   <div class="label">
    <img id="cov" alt="">
@@ -4370,10 +4370,13 @@ function applyMusicTrack(i, play) {
   }).catch(() => {});
   document.getElementById('ttl').textContent = t.title;
   document.getElementById('aut').textContent = t.artist;
-  document.getElementById('tagline').textContent = t.album || t.title;
-  document.getElementById('topaut').textContent = t.artist;
+  document.getElementById('tagline').textContent = t.title;
+  document.getElementById('topaut').textContent =
+    t.artist + (t.album ? '  \u00b7  ' + t.album : '');
+  document.getElementById('redlab').textContent = 'track';
   document.getElementById('slimaut').textContent = t.artist;
-  document.getElementById('slimline').textContent = (t.album || '') + '  \u00b7  ' + n + '/' + total;
+  document.getElementById('slimline').textContent =
+    t.title + (t.album ? '  \u00b7  ' + t.album : '');
   document.getElementById('slimpct').textContent = 'track ' + n + '/' + total;
   document.getElementById('chp').textContent =
     (t.album ? t.album + '  \u00b7  ' : '') + 'Track ' + n + '/' + total;
@@ -4799,6 +4802,7 @@ fetch('/api/book/' + encodeURIComponent(BOOK))
   document.getElementById('ttl').textContent = d.title || BOOK;
   document.getElementById('aut').textContent = d.author || '';
   document.getElementById('tagline').textContent = d.title || BOOK;
+  document.getElementById('redlab').textContent = 'chapter';
   document.getElementById('topaut').textContent = d.author || '';
   document.getElementById('slimaut').textContent = d.author || '';
   document.getElementById('dur').textContent = fmt(duration);
