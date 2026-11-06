@@ -83,6 +83,11 @@
   the timer. The transport bar no longer auto-hides in the cassette/music
   player, and the pages are fixed to the 640x480 panel without scrollbars.
 
+- Fix: the reel hubs are a pre-rendered gear sprite instead of a conic
+  gradient that the GPU repainted every frame, so the rotation is smooth; the
+  centre hole and highlight are baked into the same sprite and the hub is its
+  own layer.
+
 - Change: Studio now prints the whole cover across the inner panel instead of
   a small print in the middle, the reel hubs are gear-toothed sprockets rather
   than dots, and the room behind every skin is the cover enlarged and blurred

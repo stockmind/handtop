@@ -2217,7 +2217,7 @@ CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://w
  .win{position:absolute;top:94px;width:100px;height:100px;border-radius:50%;overflow:hidden;
    background:radial-gradient(circle at 50% 45%,#241c14,#0b0806 76%);
    box-shadow:0 0 0 3px rgba(240,231,210,.9),0 0 0 4px rgba(92,72,44,.55),
-     inset 0 7px 16px rgba(0,0,0,.92),0 2px 6px rgba(0,0,0,.42);z-index:3;contain:paint}
+     inset 0 7px 16px rgba(0,0,0,.92),0 2px 6px rgba(0,0,0,.42);z-index:3}
  .win.a{left:154px}
  .win.b{right:154px}
  /* Only the hub turns: the tape pack is radially symmetric, so rotating it
@@ -2839,6 +2839,14 @@ CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://w
  .skcard[data-skin="boombox"] .skthumb::after{content:'';position:absolute;right:3px;top:10px;width:16px;
    height:42px;border-radius:4px;background:repeating-radial-gradient(#0a0b0d 0 1px,#30343a 1px 2px)}
  .skcard[data-skin="boombox"] .skthumb img{left:34px;top:10px;width:20px;height:28px;border-radius:2px}
+
+
+ /* the reel hub is a single pre-rendered gear sprite. The old conic
+    gradient (plus pseudo highlights) was re-rasterised every frame,
+    which made the rotation look steppy on the Mali GPU. */
+ .hub{background:url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%20100%20100%27%3E%3Cdefs%3E%3CradialGradient%20id%3D%27g%27%20cx%3D%2750%25%27%20cy%3D%2742%25%27%20r%3D%2762%25%27%3E%3Cstop%20offset%3D%270%27%20stop-color%3D%27%23fffdf7%27%2F%3E%3Cstop%20offset%3D%27.55%27%20stop-color%3D%27%23ece5d4%27%2F%3E%3Cstop%20offset%3D%271%27%20stop-color%3D%27%23b9ae95%27%2F%3E%3C%2FradialGradient%3E%3C%2Fdefs%3E%3Ccircle%20cx%3D%2750%27%20cy%3D%2750%27%20r%3D%2748%27%20fill%3D%27url%28%23g%29%27%2F%3E%3Cg%20fill%3D%27%2328282a%27%3E%3Crect%20x%3D%2742%27%20y%3D%272%27%20width%3D%2716%27%20height%3D%2712%27%20rx%3D%272%27%2F%3E%3Crect%20x%3D%2742%27%20y%3D%272%27%20width%3D%2716%27%20height%3D%2712%27%20rx%3D%272%27%20transform%3D%27rotate%2860%2050%2050%29%27%2F%3E%3Crect%20x%3D%2742%27%20y%3D%272%27%20width%3D%2716%27%20height%3D%2712%27%20rx%3D%272%27%20transform%3D%27rotate%28120%2050%2050%29%27%2F%3E%3Crect%20x%3D%2742%27%20y%3D%272%27%20width%3D%2716%27%20height%3D%2712%27%20rx%3D%272%27%20transform%3D%27rotate%28180%2050%2050%29%27%2F%3E%3Crect%20x%3D%2742%27%20y%3D%272%27%20width%3D%2716%27%20height%3D%2712%27%20rx%3D%272%27%20transform%3D%27rotate%28240%2050%2050%29%27%2F%3E%3Crect%20x%3D%2742%27%20y%3D%272%27%20width%3D%2716%27%20height%3D%2712%27%20rx%3D%272%27%20transform%3D%27rotate%28300%2050%2050%29%27%2F%3E%3C%2Fg%3E%3Ccircle%20cx%3D%2750%27%20cy%3D%2750%27%20r%3D%2737%27%20fill%3D%27none%27%20stroke%3D%27%23faf6ea%27%20stroke-width%3D%273%27%20opacity%3D%27.7%27%2F%3E%3Ccircle%20cx%3D%2750%27%20cy%3D%2750%27%20r%3D%2719.5%27%20fill%3D%27none%27%20stroke%3D%27%23f4efe2%27%20stroke-width%3D%273%27%2F%3E%3Ccircle%20cx%3D%2750%27%20cy%3D%2750%27%20r%3D%2717%27%20fill%3D%27%230a0907%27%2F%3E%3Ccircle%20cx%3D%2750%27%20cy%3D%2750%27%20r%3D%2747.2%27%20fill%3D%27none%27%20stroke%3D%27%236e6553%27%20stroke-width%3D%271.2%27%20opacity%3D%27.5%27%2F%3E%3C%2Fsvg%3E") center/100% 100% no-repeat !important;
+   transform-origin:50% 50%;backface-visibility:hidden;
+   will-change:transform}
 
  /* ---------- skin picker: a filmstrip of real thumbnails ---------- */
  #skins{position:fixed;left:0;right:0;bottom:0;height:212px;z-index:12;display:none;
