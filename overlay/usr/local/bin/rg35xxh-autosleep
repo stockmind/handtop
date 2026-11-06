@@ -18,6 +18,11 @@ fi
 if [ -e "$XDG_RUNTIME_DIR/rg35xxh-screen-off" ]; then
   skip "Screen off, not sleeping"
 fi
+# The read aloud / music player holds this while audio is playing: it has no
+# video window to inhibit idle itself, and suspending would cut the music.
+if [ -e "$XDG_RUNTIME_DIR/rg35xxh-player" ]; then
+  skip "Player active, not sleeping"
+fi
 if [ -e "$XDG_RUNTIME_DIR/rg35xxh-gamepad-mode" ] || [ -e "$XDG_RUNTIME_DIR/rg35xxh-bt-mode" ] ||
    [ -e "$XDG_RUNTIME_DIR/rg35xxh-wired-mode" ]; then
   skip "gamepad or external controller mode, not sleeping"

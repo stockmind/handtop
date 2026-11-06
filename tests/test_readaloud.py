@@ -382,6 +382,10 @@ class AudioServerTests(unittest.TestCase):
         self.assertIn('ok', json.loads(body))
         status, body, _ = self.get('/screen/on')
         self.assertEqual(status, 200)
+        status, body, _ = self.get('/player/on')
+        self.assertEqual(status, 200)
+        status, body, _ = self.get('/player/off')
+        self.assertEqual(status, 200)
         _, body, _ = self.get('/api/status')
         self.assertIn('screen', json.loads(body))
 

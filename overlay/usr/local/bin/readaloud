@@ -191,9 +191,31 @@ def screen_set(on):
     try:
         subprocess.run(['wlopm', '--on' if on else '--off', '*'], env=env,
                        timeout=5, capture_output=True)
+        flag = os.path.join(env['XDG_RUNTIME_DIR'], 'rg35xxh-screen-off')
+        if on:
+            try:
+                os.unlink(flag)
+            except OSError:
+                pass
+        else:
+            open(flag, 'a').close()
     except Exception:
         return False
     SCREEN['on'] = bool(on)
+    return True
+
+
+def player_active(on):
+    """A flag autosleep checks: listening with the panel on must not suspend."""
+    d = os.environ.get('XDG_RUNTIME_DIR') or '/run/user/%d' % os.getuid()
+    p = os.path.join(d, 'rg35xxh-player')
+    try:
+        if on:
+            open(p, 'a').close()
+        else:
+            os.unlink(p)
+    except OSError:
+        pass
     return True
 _CACHE = {}
 _INFO = {}
@@ -4161,8 +4183,10 @@ audio.ontimeupdate = () => {
          && ps[par + 1].begin <= t + 0.05) { par++; hl(); }
   if (t >= ps[par].end - 0.05) advance();
 };
-audio.onplay = () => { applyRate(); pp.innerHTML = '&#10074;&#10074;'; document.body.classList.add('playing'); karaoke(); showUI(); };
-audio.onpause = () => { pp.innerHTML = '&#9654;'; document.body.classList.remove('playing'); karaoke(); showUI(0); };
+audio.onplay = () => { applyRate(); pp.innerHTML = '&#10074;&#10074;'; document.body.classList.add('playing');
+  fetch('/player/on').catch(() => {}); karaoke(); showUI(); };
+audio.onpause = () => { pp.innerHTML = '&#9654;'; document.body.classList.remove('playing');
+  fetch('/player/off').catch(() => {}); karaoke(); showUI(0); };
 audio.onerror = () => { titleEl.textContent = 'audio error: ' + audio.error.code; };
 
 pp.onclick = toggle;
@@ -4186,6 +4210,8 @@ setInterval(pollStatus, 60000);
 function back() {
   audio.pause();
   save();
+  fetch('/screen/on').catch(() => {});
+  fetch('/player/off').catch(() => {});
   location.href = '/';
 }
 document.getElementById('quit').onclick = back;
@@ -4876,13 +4902,15 @@ document.getElementById('quit').onclick = back;
 function back() {
   audio.pause();
   save();
+  fetch('/screen/on').catch(() => {});
+  fetch('/player/off').catch(() => {});
   location.href = '/';
 }
 
 audio.ontimeupdate = () => { if (!dragging) paint(); };
 audio.ondurationchange = () => { if (isFinite(audio.duration)) duration = audio.duration; paint(); };
-audio.onplay = () => { applyRate(); setPlaying(true); showUI(); };
-audio.onpause = () => { setPlaying(false); showUI(0); };
+audio.onplay = () => { applyRate(); setPlaying(true); fetch('/player/on').catch(() => {}); showUI(); };
+audio.onpause = () => { setPlaying(false); fetch('/player/off').catch(() => {}); showUI(0); };
 audio.onended = () => { setPlaying(false); save(); };
 audio.onerror = () => {
   setPlaying(false);
@@ -5433,6 +5461,10 @@ class Handler(BaseHTTPRequestHandler):
             shuffle = q.get('shuffle', ['0'])[0] in ('1', 'true')
             tracks = music_queue(self.server.root, album, shuffle)
             return self._send_gz(json.dumps({'tracks': tracks}).encode(), 'application/json')
+
+        if path == '/player/on' or path == '/player/off':
+            player_active(path.endswith('/on'))
+            return self._send(200, b'{"ok":true}', 'application/json')
 
         if path == '/screen/off' or path == '/screen/on':
             return self._send(200, json.dumps({'ok': screen_set(path.endswith('on'))}).encode(),
