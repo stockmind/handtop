@@ -2132,7 +2132,7 @@ CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://w
    background:#0f0f12;box-shadow:0 22px 40px rgba(0,0,0,.72),inset 0 0 0 1px rgba(255,255,255,.08)}
  #tape[data-skin="vinyl"] .shell::before{display:none}
  #tape[data-skin="vinyl"] .label{left:0;right:0;top:0;height:392px;border-radius:3px;background:transparent;
-   box-shadow:none;overflow:visible;isolation:auto;z-index:2}
+   box-shadow:none;overflow:visible;isolation:auto;z-index:4}
  #tape[data-skin="vinyl"] .label img#cov{display:none}
  #tape[data-skin="vinyl"] .label .tint,#tape[data-skin="vinyl"] .label .grain,
  #tape[data-skin="vinyl"] .label .gloss,#tape[data-skin="vinyl"] .label::after{display:none}
