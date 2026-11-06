@@ -93,6 +93,8 @@ of staying black. It is a static gradient: no extra work per frame.
 | pad X/Y | text size |
 | pad Back, ☰ button, `c` | chapter picker (real chapter titles, Spritz toggle, auto-hide toggle) |
 | `s` / S button | Spritz view: one word at a time, recognition letter on the centre line |
+| `l` / tape button | listen-only tape for a read-aloud book (seamless switch) |
+| `k` | cycle the cassette skin: Mixtape, Studio, Slim |
 | `-` / `=` | text size |
 | Esc / ✕ | back to the library |
 
