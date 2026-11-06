@@ -56,6 +56,18 @@
   parsers, the HTTP surface, range requests and a headless player load, with a
   `?check=1` hook that exercises the string/node word-timing path.
 
+- New: a read-aloud epub can be listened to on the cassette too. The tape
+  button, `l`, the picker row or the cassette icon in the library switches to
+  it; the switch is seamless because it reuses the same audio element, so
+  position and playback carry over, and the preference is remembered. The tape
+  shows the cover, book, author, chapter, elapsed/total time and percentage.
+  Three skins ship (`k` or the picker): Mixtape (the cover printed across the
+  label), Studio (translucent shell, big reels, red side/chapter blocks and a
+  taped-on cover print) and Slim (a dictaphone tape with a header line and a
+  hand-written bottom sticker). The cover is cropped once to a label and a
+  square print, and the border of the cover is sampled for an ambient tint
+  around the cassette; the skins are CSS-only and only the reels animate.
+
 - New: read aloud plays `.m4b`/`.m4a` audiobooks when there is no epub, drawing
   an old compact cassette that fills the panel instead of the book view. The
   cover is printed on the tape label (pre-cropped, warm paper tint, grain and

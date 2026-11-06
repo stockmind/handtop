@@ -5,7 +5,8 @@ the narration from the SMIL media overlays, so the text highlights in time with
 the audio; books without narration are read on a words-per-minute timer instead.
 
 It also plays `.m4b` / `.m4a` audiobooks, which have no text: those open as a
-cassette instead (see below).
+cassette instead (see below). A book that does have narration can switch to
+that same listen-only cassette at any time (see "Listening without the page").
 
 ## Where it lives
 
@@ -42,6 +43,43 @@ chapter track), so a 1 GB m4b costs a few seeks, not a decode. The parse, the
 cover and the label crop are cached on disk keyed on mtime and size. The file is
 streamed over HTTP with byte ranges, 64 KB at a time, because Chromium needs
 ranges to seek and the file must never be read into memory.
+
+## Listening without the page
+
+A read-aloud epub can be listened to on the cassette too. The tape button in
+the transport, `l`, or the "Tape view" row in the chapter picker switches to it;
+the library also has a small cassette icon on narrated rows that opens the book
+straight on the tape (`?view=tape`). The choice is remembered (`ra:tape`), so a
+book reopens the way you left it.
+
+The switch is seamless because it is the same document and the same `<audio>`
+element: playback, position, rate and the current sentence carry over, and
+the page stops doing its karaoke work while the tape is up. Switching back
+re-runs the highlight and scrolls to the live sentence. The tape shows the
+cover, book title, author, chapter name/number, elapsed and total time and the
+progress percentage; the scrubber, chapter picker, speed, themes and headphone
+pause work as before. EPUB durations are estimated by summing each section's
+SMIL span, so the time readout is a label, not a seek target; seeking stays on
+the exact section/paragraph fraction.
+
+## Skins
+
+Three cassette skins ship, changed with `k` or the "Tape skin" row in the
+picker (stored as `ra:skin`, forced with `?skin=label|studio|slim`):
+
+| Skin | Look | Where the info goes |
+|---|---|---|
+| **Mixtape** | cream shell, the cover printed across the whole label, reel windows punched through it | title, author and chapter on the printed band at the label bottom; duration chip top right |
+| **Studio** | smoky translucent shell, big reels, printed top strip with a red rule, red `SIDE`/chapter blocks, a taped-on photo | title and author on the top strip, chapter number in the right block, a soft print of the cover in the free space between and under the reels, plus a sharp cover sticker with chapter and progress |
+| **Slim** | white dictaphone tape: header window, ribbed tape deck, hand-written bottom label | title and chapter in the header line, elapsed time under it, author and progress on the bottom sticker next to the cover and a red tab |
+
+The skins are pure CSS on the same markup; only the cover images differ (a
+576x262 label crop and a 360 px square print, both cached). Nothing animates
+except the two reels, and switching a skin never touches the audio. The empty
+space around the cassette is tinted with two colours sampled from the cover's
+border (`/colors/<book>`, an 8x8 decode cached next to the cover, top and bottom
+edge averages), so the room around the tape takes on the book's palette instead
+of staying black. It is a static gradient: no extra work per frame.
 
 ## Controls
 

@@ -868,6 +868,81 @@ def label_file(book):
     return src
 
 
+def art_file(book):
+    """A square print of the cover for the skins that stick it on the shell."""
+    info = media_info(book)
+    key = info.get('key')
+    src = os.path.join(CACHE_DIR, key + '.cover') if key else ''
+    if not info.get('cover') or not src or not os.path.exists(src):
+        return None
+    out = os.path.join(CACHE_DIR, key + '.art.jpg')
+    if os.path.exists(out) and os.path.getsize(out) > 512:
+        return out
+    with _LABEL_LOCK:
+        if os.path.exists(out) and os.path.getsize(out) > 512:
+            return out
+        import subprocess
+        tmp = out + '.tmp.jpg'
+        try:
+            subprocess.run(['ffmpeg', '-y', '-nostdin', '-threads', '1', '-v', 'error',
+                            '-i', src, '-vf',
+                            'scale=340:340:force_original_aspect_ratio=decrease,'
+                            'pad=360:360:(ow-iw)/2:(oh-ih)/2:color=0xf4efe2',
+                            '-q:v', '3', tmp], timeout=30, capture_output=True)
+        except Exception:
+            pass
+        if os.path.exists(tmp) and os.path.getsize(tmp) > 512:
+            os.replace(tmp, out)
+            return out
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return src
+
+
+def palette_file(book):
+    """Average colours from the cover border, for the room around the cassette.
+    Decoded to 8x8 once with ffmpeg and cached next to the cover; the page uses
+    the top and bottom edge colours as a soft ambience, so the black around the
+    tape takes on the cover instead of staying black."""
+    info = media_info(book)
+    key = info.get('key')
+    src = os.path.join(CACHE_DIR, key + '.cover') if key else ''
+    if not info.get('cover') or not src or not os.path.exists(src):
+        return {}
+    out = os.path.join(CACHE_DIR, key + '.palette.json')
+    try:
+        with open(out) as f:
+            return json.load(f)
+    except Exception:
+        pass
+    import subprocess
+    try:
+        proc = subprocess.run(['ffmpeg', '-y', '-nostdin', '-threads', '1', '-v', 'error',
+                               '-i', src, '-vf', 'scale=8:8:flags=area',
+                               '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'],
+                              timeout=30, capture_output=True)
+    except Exception:
+        return {}
+    data = proc.stdout
+    if len(data) < 192:
+        return {}
+    def mean(chunk):
+        n = len(chunk) // 3
+        return [round(sum(chunk[i * 3 + c] for i in range(n)) / n) for c in range(3)]
+    rows = [data[i * 24:(i + 1) * 24] for i in range(8)]
+    pal = {'top': mean(rows[0] + rows[1]),
+           'bottom': mean(rows[6] + rows[7]),
+           'middle': mean(b''.join(rows[2:6]))}
+    try:
+        with open(out, 'w') as f:
+            json.dump(pal, f)
+    except Exception:
+        pass
+    return pal
+
+
 LIBRARY_HTML = """<!doctype html><html><head><meta charset="utf-8"><title>Read aloud</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
@@ -922,6 +997,10 @@ LIBRARY_HTML = """<!doctype html><html><head><meta charset="utf-8"><title>Read a
  .st.dl .m{color:var(--accent2)}
  .st .act{flex:0 0 auto;width:22px;display:flex;align-items:center;justify-content:center;
           color:#8a8a8a;opacity:.40}
+ .listen{flex:0 0 auto;width:26px;height:30px;display:flex;align-items:center;justify-content:center;
+         border-radius:6px;color:var(--dim);opacity:.45}
+ .listen:hover,.listen:focus{opacity:1;color:var(--accent2);outline:none}
+ a:hover .listen,a:focus .listen{opacity:.85}
  .st.remote:hover .act,.st.remote:focus .act,.st.dl .act{opacity:1;color:var(--accent2)}
  .spinner{width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);
           border-radius:50%;animation:spin .8s linear infinite}
@@ -1117,6 +1196,23 @@ fetch('/api/books').then(r => r.json()).then(books => {
       a.appendChild(bar);
     }
     a.appendChild(info);
+    if (b.readaloud) {
+      const listen = document.createElement('span');
+      listen.className = 'listen';
+      listen.tabIndex = 0;
+      listen.setAttribute('role', 'button');
+      listen.title = 'listen on the tape';
+      listen.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">' +
+        '<path d="M3 5h18a1 1 0 011 1v12a1 1 0 01-1 1h-4l-2-3H9l-2 3H3a1 1 0 01-1-1V6a1 1 0 011-1zm2 3a2 2 0 100 4 2 2 0 000-4zm14 0a2 2 0 100 4 2 2 0 000-4zM7 17h10v1H7z"/></svg>';
+      const goTape = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        location.href = '/play?book=' + encodeURIComponent(b.name) + '&view=tape';
+      };
+      listen.onclick = goTape;
+      listen.onkeydown = e => { if (e.key === 'Enter') goTape(e); };
+      a.appendChild(listen);
+    }
     list.appendChild(a);
     if (p && contNames.has(b.name) && b.name === cont[cont.length - 1].b.name
         && rest.length) {
@@ -1652,6 +1748,281 @@ fetch('/api/storyteller').then(r => r.json()).then(st => {
 });
 </script></body></html>"""
 
+CASSETTE_CSS = r""" :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E")}
+ #tape{position:absolute;left:50%;top:12px;width:624px;height:396px;margin-left:-312px;
+   cursor:pointer;z-index:1}
+ body.bare #tape{display:none}
+ body.bare{background:#141414}
+ body.bare::after{display:none}
+ .shell{position:absolute;inset:0;border-radius:30px;
+   background:linear-gradient(176deg,#f3e9d3 0%,#e6d9bd 26%,#d8caab 58%,#c3b28f 100%);
+   box-shadow:0 22px 42px rgba(0,0,0,.62),0 4px 9px rgba(0,0,0,.4),
+     inset 0 2px 1px rgba(255,255,255,.85),inset 0 -5px 12px rgba(84,62,34,.3),
+     inset 0 0 0 1px rgba(255,255,255,.4)}
+ .shell::before{content:'';position:absolute;inset:6px;border-radius:25px;pointer-events:none;
+   background:linear-gradient(120deg,rgba(255,255,255,.34),transparent 24% 74%,rgba(255,255,255,.14));
+   opacity:.5;z-index:2}
+ .label{position:absolute;left:24px;right:24px;top:18px;height:252px;border-radius:9px;
+   overflow:hidden;background:#e8dcc2;isolation:isolate;z-index:1;
+   box-shadow:inset 0 0 0 1px rgba(70,55,35,.35),inset 0 4px 14px rgba(0,0,0,.3),
+     0 1px 0 rgba(255,255,255,.55)}
+ .label img#cov{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+   filter:saturate(.82) contrast(1.04) sepia(.14) brightness(1.04)}
+ .tint,.grain,.gloss{position:absolute;inset:0;pointer-events:none}
+ .tint{background:linear-gradient(118deg,rgba(255,245,216,.5) 0%,rgba(255,245,216,.1) 32%,
+        rgba(96,68,32,.16) 76%,rgba(255,245,216,.3) 100%);opacity:.72}
+ .grain{background-image:var(--grain);background-size:140px 140px;opacity:.16}
+ .gloss{background:linear-gradient(100deg,rgba(255,255,255,.34) 0 15%,transparent 33% 68%,
+        rgba(255,255,255,.12) 86%);opacity:.35}
+ .label::after{content:'';position:absolute;inset:0;pointer-events:none;
+   box-shadow:inset 0 0 46px rgba(40,28,14,.52)}
+ .side,.dur{position:absolute;top:9px;padding:2px 7px 1px;border-radius:2px;
+   background:rgba(20,15,10,.62);color:#f2e4c4;font:700 9px/1.5 system-ui,sans-serif;
+   letter-spacing:.22em;text-transform:uppercase;z-index:2}
+ .side{left:10px}
+ .dur{right:10px;letter-spacing:.1em}
+ .win{position:absolute;top:94px;width:100px;height:100px;border-radius:50%;overflow:hidden;
+   background:radial-gradient(circle at 50% 45%,#241c14,#0b0806 76%);
+   box-shadow:0 0 0 3px rgba(240,231,210,.9),0 0 0 4px rgba(92,72,44,.55),
+     inset 0 7px 16px rgba(0,0,0,.92),0 2px 6px rgba(0,0,0,.42);z-index:3;contain:paint}
+ .win.a{left:154px}
+ .win.b{right:154px}
+ /* Only the hub turns: the tape pack is radially symmetric, so rotating it
+    was invisible work that re-rastered the whole reel every frame. */
+ .reel{position:absolute;inset:0}
+ @keyframes reelspin{to{transform:rotate(360deg)}}
+ .pack{position:absolute;inset:0;border-radius:50%;transform:scale(1);
+   background:repeating-radial-gradient(circle at 50% 50%,#2b2118 0 2px,#35291d 2px 3px,#221a12 3px 4px);
+   box-shadow:inset 0 0 16px #000}
+ #ra .pack{transform:scale(var(--pa,1))}
+ #rb .pack{transform:scale(var(--pb,.7))}
+ .hub{position:absolute;left:50%;top:50%;width:46px;height:46px;margin:-23px 0 0 -23px;
+   border-radius:50%;background:repeating-conic-gradient(from 0deg,#f1e7d0 0 34deg,#b3a482 34deg 60deg);
+   box-shadow:inset 0 0 0 1px rgba(80,60,35,.55),0 1px 4px rgba(0,0,0,.65);
+   animation:reelspin var(--spin,3.4s) linear infinite;animation-play-state:paused;
+   will-change:transform}
+ body.playing .hub{animation-play-state:running}
+ .hub::after{content:'';position:absolute;inset:15px;border-radius:50%;
+   background:radial-gradient(circle at 40% 35%,#1b1510,#070504 70%);
+   box-shadow:inset 0 2px 4px #000}
+ .cap{position:absolute;left:0;right:0;bottom:0;height:78px;padding:8px 14px 8px;z-index:2;
+   display:flex;flex-direction:column;justify-content:flex-end;gap:1px;color:#f5e9cc;
+   background:linear-gradient(180deg,rgba(18,13,9,0),rgba(18,13,9,.58) 28%,rgba(13,9,6,.86))}
+ .ttl{font:600 17px/1.22 Georgia,'DejaVu Serif',serif;white-space:nowrap;overflow:hidden;
+   text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,.5)}
+ .aut{font:11px/1.3 system-ui,sans-serif;color:#dccba6;white-space:nowrap;overflow:hidden;
+   text-overflow:ellipsis}
+ .chp{font:10px/1.4 system-ui,sans-serif;letter-spacing:.15em;text-transform:uppercase;
+   color:#bfa87f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .deck{position:absolute;left:24px;right:24px;bottom:12px;height:104px;z-index:1}
+ .head{position:absolute;left:50%;top:14px;width:204px;height:64px;margin-left:-102px;
+   border-radius:6px;background:linear-gradient(180deg,#0d0a08,#1c1510);
+   box-shadow:inset 0 3px 10px #000,0 0 0 1px rgba(90,70,40,.45)}
+ .head::before{content:'';position:absolute;left:8%;right:8%;top:50%;height:5px;margin-top:-2px;
+   border-radius:2px;background:linear-gradient(180deg,#2b2118,#4c3b28 58%,#231a12);
+   box-shadow:0 1px 0 rgba(255,255,255,.12)}
+ .head::after{content:'';position:absolute;left:41%;right:41%;top:7px;bottom:7px;border-radius:3px;
+   background:linear-gradient(180deg,#c2bcac,#6f695e 55%,#3a3730);opacity:.5}
+ .pin{position:absolute;top:32px;width:26px;height:26px;border-radius:50%;
+   background:radial-gradient(circle at 45% 40%,#231c14,#000 72%);
+   box-shadow:inset 0 2px 5px #000,0 0 0 1px rgba(255,255,255,.3)}
+ .pin.p1{left:64px}
+ .pin.p2{right:64px}
+ .brand{position:absolute;left:0;bottom:2px;font:700 9px/1.5 system-ui,sans-serif;
+   letter-spacing:.18em;text-transform:uppercase;color:#8a7a5c}
+ .brand span{display:block;font-weight:400;letter-spacing:.1em;color:#a3936f;font-size:8px}
+ .counter{position:absolute;right:0;bottom:0;padding:4px 8px 3px;border-radius:4px;
+   background:#15110c;color:#f2d79b;font:600 13px/1.3 ui-monospace,'DejaVu Sans Mono',monospace;
+   letter-spacing:.12em;font-variant-numeric:tabular-nums;
+   box-shadow:inset 0 2px 7px #000,0 1px 0 rgba(255,255,255,.45)}
+ .counter em{font-style:normal;font-size:9px;letter-spacing:.06em;color:#b99f6b;margin-left:5px}
+ .screw{position:absolute;width:12px;height:12px;border-radius:50%;z-index:5;
+   background:radial-gradient(circle at 35% 30%,#fdf8ec,#ab9c7e 62%,#6e6250);
+   box-shadow:inset 0 -1px 2px rgba(0,0,0,.5),0 1px 1px rgba(0,0,0,.4)}
+ .screw::after{content:'';position:absolute;left:1px;right:1px;top:5px;height:1.5px;
+   background:#6d6150;transform:rotate(28deg)}
+ .screw::before{content:'';position:absolute;top:1px;bottom:1px;left:5px;width:1.5px;
+   background:#6d6150;transform:rotate(28deg)}
+ .s1{left:14px;top:14px}.s2{right:14px;top:14px}.s3{left:14px;bottom:14px}.s4{right:14px;bottom:14px}
+ /* ---------- studio: smoky shell, big reels, printed top strip, red blocks ------- */
+ .topline{display:none}
+ .redblock{display:none}
+ .stk{display:none}
+ .bigart{display:none}
+ #tape[data-skin="studio"] .bigart{display:block;position:absolute;left:50%;top:34px;width:328px;
+   height:268px;margin-left:-164px;z-index:1;border-radius:16px;overflow:hidden;opacity:.5}
+ #tape[data-skin="studio"] .bigart img{width:100%;height:100%;object-fit:cover}
+ #tape[data-skin="studio"] .bigart i{position:absolute;inset:0;
+   background:linear-gradient(180deg,rgba(48,50,55,.35),rgba(18,19,22,.7) 60%,rgba(12,13,15,.94)),
+     radial-gradient(ellipse at 50% 50%,transparent 30%,rgba(10,11,13,.9) 100%);
+   box-shadow:inset 0 0 50px rgba(0,0,0,.7)}
+ #tape[data-skin="studio"] .label{display:none}
+ #tape[data-skin="studio"] .shell{border-radius:24px;
+   background:linear-gradient(158deg,#73767b 0%,#55585d 22%,#3d3f44 52%,#2a2b2f 78%,#212226 100%);
+   box-shadow:0 22px 42px rgba(0,0,0,.68),0 3px 8px rgba(0,0,0,.45),
+     inset 0 2px 1px rgba(255,255,255,.45),inset 0 -6px 14px rgba(0,0,0,.55),
+     inset 0 0 0 1px rgba(255,255,255,.14)}
+ #tape[data-skin="studio"] .shell::before{opacity:.22}
+ #tape[data-skin="studio"] .shell::after{content:'';position:absolute;left:12px;right:12px;top:12px;
+   bottom:102px;border-radius:18px;z-index:0;
+   background:linear-gradient(180deg,color-mix(in srgb,var(--amb-top,#000) 22%,transparent),
+     transparent 52%),linear-gradient(180deg,rgba(88,90,94,.34),rgba(30,31,34,.62) 60%,rgba(18,19,21,.78));
+   box-shadow:inset 0 0 0 2px rgba(255,255,255,.13),inset 0 2px 16px rgba(0,0,0,.6),
+     0 1px 0 rgba(255,255,255,.16)}
+ #tape[data-skin="studio"] .topline{display:block;position:absolute;left:92px;right:92px;top:42px;
+   text-align:center;z-index:2}
+ #tape[data-skin="studio"] .topline #tagline{display:block;font:600 14px/1.35 system-ui,sans-serif;
+   letter-spacing:.3em;text-transform:uppercase;color:#f4f1e9;white-space:nowrap;overflow:hidden;
+   text-overflow:ellipsis;text-shadow:0 1px 3px rgba(0,0,0,.9)}
+ #tape[data-skin="studio"] .topline #topaut{display:block;font:400 9px/1.5 system-ui,sans-serif;
+   letter-spacing:.2em;text-transform:uppercase;color:#c6c2b7;white-space:nowrap;overflow:hidden;
+   text-overflow:ellipsis;margin-top:3px;text-shadow:0 1px 2px rgba(0,0,0,.8)}
+ #tape[data-skin="studio"] .topline::after{content:'';position:absolute;left:-20px;right:-20px;
+   top:23px;height:2px;background:#d8231b;box-shadow:0 1px 0 rgba(0,0,0,.5)}
+ #tape[data-skin="studio"] .redblock{display:block;position:absolute;top:92px;width:96px;height:62px;
+   border-radius:2px;z-index:2;text-align:center;color:#fff;overflow:hidden;
+   background:linear-gradient(180deg,#d5251c,#b5110e 70%,#970d0b);
+   box-shadow:0 6px 14px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.28),
+     inset 0 -2px 6px rgba(0,0,0,.35)}
+ #tape[data-skin="studio"] .redblock b{display:block;font:700 27px/1 Georgia,'DejaVu Serif',serif;
+   margin-top:8px;text-shadow:0 1px 2px rgba(0,0,0,.35)}
+ #tape[data-skin="studio"] .redblock i{display:block;font:700 15px/1 Georgia,serif;margin-top:-2px}
+ #tape[data-skin="studio"] .redblock em{display:block;font:600 7px/1.6 system-ui,sans-serif;
+   letter-spacing:.13em;text-transform:uppercase;color:#f6d9d3;font-style:normal}
+ #tape[data-skin="studio"] .redblock.lb{left:18px}
+ #tape[data-skin="studio"] .redblock.rb{right:18px}
+ #tape[data-skin="studio"] .win{top:78px;width:124px;height:124px;
+   box-shadow:0 0 0 4px rgba(28,29,32,.85),0 0 0 6px rgba(220,216,206,.55),
+     0 0 0 7px rgba(20,21,23,.8),inset 0 8px 18px rgba(0,0,0,.95),0 3px 8px rgba(0,0,0,.55)}
+ #tape[data-skin="studio"] .win.a{left:126px}
+ #tape[data-skin="studio"] .win.b{right:126px}
+ #tape[data-skin="studio"] .hub{width:64px;height:64px;margin:-32px 0 0 -32px;
+   background:
+     radial-gradient(circle at 50% 8px,#2a2b2e 0 3px,transparent 3.5px),
+     radial-gradient(circle at 81% 28px,#2a2b2e 0 3px,transparent 3.5px),
+     radial-gradient(circle at 81% 72%,#2a2b2e 0 3px,transparent 3.5px),
+     radial-gradient(circle at 50% 100%,#2a2b2e 0 3px,transparent 3.5px),
+     radial-gradient(circle at 19% 72%,#2a2b2e 0 3px,transparent 3.5px),
+     radial-gradient(circle at 19% 28px,#2a2b2e 0 3px,transparent 3.5px),
+     radial-gradient(circle,#e9e5da 0 42%,#a9a69d 44% 56%,#dfdbd1 58% 100%);
+   box-shadow:inset 0 0 0 1px rgba(20,20,22,.5),0 2px 6px rgba(0,0,0,.7)}
+ #tape[data-skin="studio"] .hub::after{inset:20px;background:
+   radial-gradient(circle at 40% 35%,#3a3b3f,#0a0a0c 70%);box-shadow:inset 0 2px 5px #000}
+ #tape[data-skin="studio"] .stk{display:block;position:absolute;left:50%;top:186px;width:104px;
+   padding:4px 4px 0;margin-left:-52px;background:#f7f3e8;z-index:4;transform:rotate(-2.6deg);
+   box-shadow:0 5px 12px rgba(0,0,0,.55),0 1px 0 rgba(255,255,255,.6)}
+ #tape[data-skin="studio"] .stk img{display:block;width:96px;height:96px;object-fit:cover;
+   background:#ddd6c4}
+ #tape[data-skin="studio"] .stk #stkcap{display:block;padding:2px 1px 3px;text-align:center;
+   font:700 7px/1.5 ui-monospace,'DejaVu Sans Mono',monospace;letter-spacing:.04em;color:#413a2c;
+   white-space:nowrap;overflow:hidden}
+ #tape[data-skin="studio"] .deck{bottom:8px;height:86px}
+ #tape[data-skin="studio"] .head{top:6px;height:70px;background:linear-gradient(180deg,#101114,#24262b);
+   box-shadow:inset 0 4px 12px #000,0 0 0 1px rgba(200,198,188,.16)}
+ #tape[data-skin="studio"] .head::before{background:linear-gradient(180deg,#15161a,#383b41 60%,#111216)}
+ #tape[data-skin="studio"] .head::after{background:linear-gradient(180deg,#b9b8b2,#62646a 55%,#2c2e33);opacity:.45}
+ #tape[data-skin="studio"] .pin{width:32px;height:32px;top:24px;background:
+   radial-gradient(circle at 50% 50%,#8d8f94 0 4px,#2a2c30 5px 55%,#d4d2ca 57% 72%,#6f7176 74%);
+   box-shadow:0 1px 4px #000,0 0 0 1px rgba(255,255,255,.18)}
+ #tape[data-skin="studio"] .pin.p1{left:52px}
+ #tape[data-skin="studio"] .pin.p2{right:52px}
+ #tape[data-skin="studio"] .brand{color:#9fa1a6;bottom:0}
+ #tape[data-skin="studio"] .brand span{color:#7f8186}
+ #tape[data-skin="studio"] .counter{background:#0c0d10;color:#e8dfc6;box-shadow:inset 0 2px 8px #000,0 1px 0 rgba(255,255,255,.22)}
+ #tape[data-skin="studio"] .screw{background:radial-gradient(circle at 35% 30%,#c9cbd0,#5a5c62 60%,#2b2c30);
+   box-shadow:inset 0 -1px 2px rgba(0,0,0,.6),0 1px 1px rgba(0,0,0,.5)}
+ #tape[data-skin="studio"] .screw::before,#tape[data-skin="studio"] .screw::after{background:#1c1d20}
+ /* ---------- slim: the dictaphone tape, header line and hand-written bottom label --- */
+ .slimhead,.slimsnap{display:none}
+ #tape[data-skin="slim"] .label{display:none}
+ #tape[data-skin="slim"] .shell{border-radius:16px;background:
+   linear-gradient(180deg,#fbfaf4 0%,#eeebe0 22%,#d9d6ca 62%,#c3bfb2 100%);
+   box-shadow:0 16px 32px rgba(0,0,0,.6),0 3px 7px rgba(0,0,0,.4),
+     inset 0 2px 1px rgba(255,255,255,.95),inset 0 -4px 10px rgba(90,86,72,.35),
+     inset 0 0 0 1px rgba(255,255,255,.6)}
+ #tape[data-skin="slim"] .shell::before{opacity:.35;border-radius:13px}
+ #tape[data-skin="slim"] .slimhead{display:block;position:absolute;left:34px;right:34px;top:16px;
+   height:74px;border-radius:7px;background:#fdfcf7;z-index:2;
+   box-shadow:inset 0 0 0 2px #4b4a46,inset 0 2px 6px rgba(0,0,0,.18),0 1px 0 rgba(255,255,255,.8)}
+ #tape[data-skin="slim"] .slimhead b{position:absolute;left:10px;top:8px;width:24px;height:22px;
+   background:#232323;color:#fff;font:700 14px/22px sans-serif;text-align:center;border-radius:2px}
+ #tape[data-skin="slim"] .slimhead #slimline{position:absolute;left:46px;right:16px;top:9px;
+   font:400 15px/1.3 system-ui,sans-serif;color:#26251f;white-space:nowrap;overflow:hidden;
+   text-overflow:ellipsis}
+ #tape[data-skin="slim"] .slimhead #slimline::after{content:'';position:absolute;left:0;right:0;top:20px;
+   height:0;border-bottom:2px solid #55534b}
+ #tape[data-skin="slim"] .slimhead #slimtime{position:absolute;left:0;right:0;top:36px;text-align:center;
+   font:600 16px/1.2 ui-monospace,'DejaVu Sans Mono',monospace;letter-spacing:.08em;color:#22211c}
+ #tape[data-skin="slim"] .deck{left:34px;right:34px;top:128px;height:160px;border-radius:7px;z-index:1;
+   background:linear-gradient(180deg,#3a3833,#262420 55%,#1b1a17);
+   box-shadow:inset 0 2px 8px #000,0 1px 0 rgba(255,255,255,.65)}
+ #tape[data-skin="slim"] .deck::before{content:'';position:absolute;inset:3px;border-radius:5px;
+   background:repeating-linear-gradient(180deg,rgba(255,255,255,.05) 0 2px,transparent 2px 4px);
+   opacity:.5}
+ #tape[data-skin="slim"] .head{display:none}
+ #tape[data-skin="slim"] .pin{display:none}
+ #tape[data-skin="slim"] .brand{display:none}
+ #tape[data-skin="slim"] .counter{display:none}
+ #tape[data-skin="slim"] .win{top:156px;width:94px;height:94px;
+   box-shadow:0 0 0 3px #22211e,0 0 0 5px rgba(240,238,228,.5),
+     inset 0 6px 14px #000,0 2px 6px rgba(0,0,0,.5)}
+ #tape[data-skin="slim"] .win.a{left:196px}
+ #tape[data-skin="slim"] .win.b{right:196px}
+ #tape[data-skin="slim"] .hub{width:40px;height:40px;margin:-20px 0 0 -20px;
+   background:radial-gradient(circle,#f2efe6 0 30%,#b7b3a7 32% 44%,#f1eee4 46% 100%);
+   box-shadow:inset 0 0 0 1px rgba(20,20,18,.45),0 1px 4px rgba(0,0,0,.7)}
+ #tape[data-skin="slim"] .hub::after{inset:12px;background:#141311;box-shadow:inset 0 1px 3px #000}
+ #tape[data-skin="slim"] .slimsnap{display:block;position:absolute;left:96px;right:96px;bottom:12px;
+   height:62px;border-radius:5px;background:linear-gradient(180deg,#fffdf6,#efe9d8);z-index:4;
+   transform:rotate(-.7deg);box-shadow:0 4px 10px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.9)}
+ #tape[data-skin="slim"] .slimsnap img{position:absolute;left:7px;top:7px;width:48px;height:48px;
+   object-fit:cover;border-radius:3px;background:#d8d2c2;box-shadow:0 1px 3px rgba(0,0,0,.35)}
+ #tape[data-skin="slim"] .slimsnap div{position:absolute;left:64px;right:44px;top:11px}
+ #tape[data-skin="slim"] .slimsnap b{display:block;font:600 13px/1.4 Georgia,'DejaVu Serif',serif;
+   color:#3a3429;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ #tape[data-skin="slim"] .slimsnap span{display:block;font:400 9px/1.6 system-ui,sans-serif;
+   letter-spacing:.13em;text-transform:uppercase;color:#8a7f68;white-space:nowrap;overflow:hidden}
+ #tape[data-skin="slim"] .slimsnap i{position:absolute;right:0;top:0;bottom:0;width:34px;
+   background:linear-gradient(180deg,#c9241c,#a30f0c);border-radius:0 5px 5px 0;color:#fff;
+   font:700 16px/62px Georgia,serif;text-align:center;font-style:normal}
+ #tape[data-skin="slim"] .screw{width:9px;height:9px;background:radial-gradient(circle at 35% 30%,#f7f4ea,#a09a88 62%,#6d6758)}
+ #tape[data-skin="slim"] .s1{left:12px;top:12px}#tape[data-skin="slim"] .s2{right:12px;top:12px}
+ #tape[data-skin="slim"] .s3{left:12px;bottom:12px}#tape[data-skin="slim"] .s4{right:12px;bottom:12px}"""
+
+CASSETTE_HTML = r"""<div id="tape" data-skin="label">
+ <div class="shell">
+  <div class="topline"><span id="tagline">read along</span><span id="topaut"></span></div>
+  <div class="redblock lb"><b>SIDE</b><i>A</i><em>read along</em></div>
+  <div class="redblock rb"><b id="rednum">01</b><em>chapter</em></div>
+  <div class="bigart"><img id="big" alt=""><i></i></div>
+  <div class="label">
+   <img id="cov" alt="">
+   <div class="tint"></div><div class="grain"></div><div class="gloss"></div>
+   <div class="side" id="side">Side A</div>
+   <div class="dur" id="dur">--:--</div>
+   <div class="cap">
+    <div class="ttl" id="ttl">&nbsp;</div>
+    <div class="aut" id="aut"></div>
+    <div class="chp" id="chp"></div>
+   </div>
+  </div>
+  <div class="stk"><img id="stk" alt=""><span id="stkcap"></span></div>
+  <div class="win a"><div class="reel" id="ra"><div class="pack"></div><div class="hub"></div></div></div>
+  <div class="win b"><div class="reel" id="rb"><div class="pack"></div><div class="hub"></div></div></div>
+  <div class="slimhead"><b>A</b><span id="slimline"></span><em id="slimtime">00:00</em></div>
+  <div class="slimsnap"><img id="slimcov" alt=""><div><b id="slimaut"></b><span id="slimpct"></span></div><i>RA</i></div>
+  <div class="deck">
+   <div class="head"></div>
+   <div class="pin p1"></div><div class="pin p2"></div>
+   <div class="brand">compact cassette<span>type IV &middot; metal &middot; 60</span></div>
+   <div class="counter"><span id="counter">00:00</span><em id="pct">0%</em></div>
+  </div>
+  <div class="screw s1"></div><div class="screw s2"></div>
+  <div class="screw s3"></div><div class="screw s4"></div>
+ </div>
+</div>"""
+
+
 PLAYER_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>readaloud</title>
 <style>
  html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;font:14px system-ui,sans-serif}
@@ -1686,7 +2057,7 @@ PLAYER_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>readal
  #g2{top:calc(50% + 30px);bottom:16%}
  #spz{position:relative;font:600 42px/1.15 Georgia,serif;color:var(--text);white-space:nowrap}
  #spz .orp{color:var(--accent)}
- #spzbtn.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+ #spzbtn.on,#tapebtn.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
  #batt{font-size:11px;color:var(--dim);padding:0 4px;font-variant-numeric:tabular-nums}
  #batt.low{color:#ff8a65}
  #toc{position:absolute;top:0;left:0;width:100%;height:calc(100% - 58px);display:none;
@@ -1703,10 +2074,20 @@ PLAYER_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>readal
  .tocrow.cur{background:var(--card);box-shadow:inset 3px 0 0 var(--accent)}
  .tocrow.sel{background:var(--panel);box-shadow:inset 0 0 0 2px var(--accent)}
  .tocrow.tog .l{color:var(--accent2)}
+ #cassette{position:absolute;left:0;right:0;top:0;bottom:58px;display:none;overflow:hidden;z-index:3;
+   background:radial-gradient(95% 78% at 50% 0%,color-mix(in srgb,var(--amb-top,#000) 46%,var(--bg) 54%) 0%,
+     color-mix(in srgb,var(--amb-bot,#000) 26%,var(--bg) 74%) 42%,var(--bg) 76%,#000 130%)}
+ body.tape #cassette{display:block}
+ body.tape #f,body.tape #spritz{display:none!important}
+ body.zen #cassette{bottom:0}
+__CASSETTE_CSS__
 </style></head><body>
 <div id="load"><div class="spin"></div><div id="loadtxt">opening book&hellip;</div></div>
 <iframe id="f"></iframe>
 <div id="spritz"><div id="g1"></div><div id="g2"></div><div id="spz"></div></div>
+<div id="cassette">
+__CASSETTE__
+</div>
 <div id="scrub"><div id="scrubfill"></div><div id="scrubgrab"></div></div>
 <div id="toc"><div id="tocbody"></div></div>
 <div id="bar">
@@ -1718,6 +2099,7 @@ PLAYER_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>readal
  <span id="title"></span>
  <span id="batt"></span>
  <button id="spzbtn" title="spritz mode">S</button>
+ <button id="tapebtn" title="listen on the tape"><svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M3 5h18a1 1 0 011 1v12a1 1 0 01-1 1h-4l-2-3H9l-2 3H3a1 1 0 01-1-1V6a1 1 0 011-1zm2 3a2 2 0 100 4 2 2 0 000-4zm14 0a2 2 0 100 4 2 2 0 000-4zM7 17h10v1H7z"/></svg></button>
  <button id="quit" title="back to library">&times;</button>
 </div>
 <script>
@@ -1736,6 +2118,8 @@ rateEl.textContent = rate.toFixed(2) + 'x';
 function applyRate() {
   audio.defaultPlaybackRate = rate;
   audio.playbackRate = rate;
+  const t = document.getElementById('tape');
+  if (t) t.style.setProperty('--spin', (3.4 / Math.max(0.25, rate)).toFixed(2) + 's');
 }
 let fontPct = 135;
 try { fontPct = +(localStorage.getItem('ra:fs') || 135) || 135; } catch (e) {}
@@ -1916,9 +2300,23 @@ async function runUITests() {
     assert(tocOpen, 'picker did not open');
   });
   await check('spritz row reacts to click', async () => {
-    tocRows[0].click();
+    const row = tocRows.find(r => /Spritz view/.test(r.textContent));
+    assert(row, 'no spritz row');
+    row.click();
     assert(spritz === true, 'spritz did not toggle');
     setSpritz(false);
+  });
+  await check('tape view toggles', async () => {
+    setTape(true);
+    assert(document.body.classList.contains('tape'), 'tape did not open');
+    setTape(false);
+    assert(!document.body.classList.contains('tape'), 'tape did not close');
+  });
+  await check('skins cycle', async () => {
+    const before = tapeSkin;
+    cycleSkin();
+    assert(tapeSkin !== before, 'skin unchanged');
+    applySkin(before);
   });
   await check('chapter row click jumps', async () => {
     openToc();
@@ -2079,6 +2477,7 @@ function cycleTheme() {
 }
 
 function karaoke() {
+  if (tapeMode) return;
   const d = ensureStyle();
   const p = cur();
   if (!d || !p) return;
@@ -2116,6 +2515,7 @@ function karaoke() {
 }
 
 function hl() {
+  if (tapeMode) { updateTape(); return; }
   const d = ensureStyle();
   if (!d) return;
   d.querySelectorAll('.ra-hl').forEach(e => e.classList.remove('ra-hl'));
@@ -2199,6 +2599,127 @@ function chapterName(i) {
   return s.label || s.title || ('Section ' + (i + 1));
 }
 
+// ---- listen-only tape (the same audio element, so switching is seamless) ----
+let tapeMode = false, tapeDur = null, tapeSkin = 'label';
+const SKINS = ['label', 'studio', 'slim'];
+const SKIN_NAMES = {label: 'Mixtape', studio: 'Studio', slim: 'Slim'};
+try { tapeSkin = localStorage.getItem('ra:skin') || 'label'; } catch (e) {}
+const forcedSkinR = new URLSearchParams(location.search).get('skin');
+if (SKINS.includes(forcedSkinR)) tapeSkin = forcedSkinR;
+if (!SKINS.includes(tapeSkin)) tapeSkin = 'label';
+
+function applySkin(id, savePref) {
+  if (!SKINS.includes(id)) id = 'label';
+  tapeSkin = id;
+  const t = document.getElementById('tape');
+  if (t) t.dataset.skin = id;
+  if (savePref !== false) { try { localStorage.setItem('ra:skin', id); } catch (e) {} }
+}
+function cycleSkin() {
+  applySkin(SKINS[(SKINS.indexOf(tapeSkin) + 1) % SKINS.length]);
+  if (tocOpen) renderToc();
+}
+
+const fmtT = t => {
+  t = Math.max(0, Math.floor(t || 0));
+  const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) +
+    ':' + String(s).padStart(2, '0');
+};
+
+// Total audio time is not in the epub: each section's SMIL gives its own clock.
+// Sum the section spans for the label and the elapsed estimate; seeking stays
+// on the parser's section/par fraction, which is exact.
+function tapeTotals() {
+  if (!tapeDur) {
+    const durs = data.sections.map(s => {
+      if (!s.pars || !s.pars.length) return 0;
+      let a = Infinity, b = 0;
+      for (const p of s.pars) { a = Math.min(a, p.begin); b = Math.max(b, p.end); }
+      return Math.max(0, b - a);
+    });
+    tapeDur = {durs, total: durs.reduce((x, y) => x + y, 0)};
+  }
+  let done = 0;
+  for (let i = 0; i < sec; i++) done += tapeDur.durs[i] || 0;
+  const ps = pars();
+  if (ps.length) {
+    done += Math.min(tapeDur.durs[sec] || 0,
+                     Math.max(0, audio.currentTime - ps[0].begin));
+  }
+  return {done, total: tapeDur.total};
+}
+
+function tapeInit() {
+  if (!data) return;
+  const ttl = (data.title || '') + (data.subtitle ? ': ' + data.subtitle : '');
+  document.getElementById('ttl').textContent = ttl;
+  document.getElementById('aut').textContent = data.author || '';
+  document.getElementById('tagline').textContent = data.title || '';
+  document.getElementById('topaut').textContent = data.author || '';
+  document.getElementById('slimaut').textContent = data.author || '';
+  const art = '/art/' + encodeURIComponent(BOOK);
+  const cov = document.getElementById('cov');
+  cov.src = '/label/' + encodeURIComponent(BOOK);
+  cov.onerror = () => { cov.style.visibility = 'hidden'; };
+  for (const id of ['stk', 'slimcov', 'big']) {
+    const im = document.getElementById(id);
+    im.src = art;
+    im.onerror = () => { im.style.visibility = 'hidden'; };
+  }
+  if (!tapeInit.palette) {
+    tapeInit.palette = true;
+    fetch('/colors/' + encodeURIComponent(BOOK)).then(r => r.json()).then(c => {
+      const st = document.documentElement.style;
+      if (c.top) st.setProperty('--amb-top', 'rgb(' + c.top.join(',') + ')');
+      if (c.bottom) st.setProperty('--amb-bot', 'rgb(' + c.bottom.join(',') + ')');
+    }).catch(() => {});
+  }
+  const tt = tapeTotals();
+  document.getElementById('dur').textContent = fmtT(tt.total);
+}
+
+function updateTape() {
+  if (!tapeMode || !data) return;
+  const f = scrubFrac(), pct = Math.round(f * 100);
+  const t = document.getElementById('tape');
+  t.style.setProperty('--pa', (0.62 + 0.38 * (1 - f)).toFixed(3));
+  t.style.setProperty('--pb', (0.62 + 0.38 * f).toFixed(3));
+  const tt = tapeTotals();
+  document.getElementById('counter').textContent = fmtT(tt.done);
+  document.getElementById('pct').textContent = pct + '%';
+  document.getElementById('slimtime').textContent = fmtT(tt.done);
+  document.getElementById('slimpct').textContent = 'read along \u00b7 ' + pct + '%';
+  document.getElementById('stkcap').textContent =
+    'CH ' + String(sec + 1).padStart(2, '0') + ' \u00b7 ' + pct + '%';
+  document.getElementById('rednum').textContent = String(sec + 1).padStart(2, '0');
+  const total = data.sections.length;
+  document.getElementById('chp').textContent =
+    'Ch ' + (sec + 1) + '/' + total + ' \u00b7 ' + chapterName(sec);
+  document.getElementById('slimline').textContent =
+    (data.title || '') + '  \u00b7  Ch ' + (sec + 1) + '/' + total;
+  document.body.classList.toggle('playing', isPlaying());
+}
+
+function setTape(on, savePref) {
+  tapeMode = !!on && narrated;
+  document.body.classList.toggle('tape', tapeMode);
+  if (tapeMode) {
+    if (spritz) setSpritz(false);
+    tapeInit();
+    updateTape();
+  } else {
+    hl();
+  }
+  if (savePref !== false) {
+    try { localStorage.setItem('ra:tape', tapeMode ? '1' : '0'); } catch (e) {}
+  }
+  const tb = document.getElementById('tapebtn');
+  if (tb) tb.classList.toggle('on', tapeMode);
+  showUI();
+}
+applySkin(tapeSkin, false);
+
 let tocActions = [];
 
 function renderToc() {
@@ -2225,6 +2746,12 @@ function renderToc() {
     tocRows.push(d);
     tocActions.push(action);
   };
+  if (narrated) {
+    add('Tape view: ' + (tapeMode ? 'on' : 'off'), '\u25a4', 'tog',
+        () => { setTape(!tapeMode); renderToc(); });
+    add('Tape skin: ' + SKIN_NAMES[tapeSkin] + '  \u25b8', '\u25a3', 'tog',
+        () => cycleSkin());
+  }
   add('Spritz view: ' + (spritz ? 'on' : 'off'), '\u25cf', 'tog',
       () => { setSpritz(!spritz); renderToc(); });
   add('Theme: ' + themeById(currentThemeId()).name + '  \u25b8', '\u25d1', 'tog',
@@ -2301,6 +2828,7 @@ let spritz = false, spzKey = '';
 let narrated = true, wpm = 300, wpmTimer = null, wpIdx = 0, pendingWpm = false;
 try { wpm = Math.min(900, Math.max(60, +(localStorage.getItem('ra:wpm') || 300) || 300)); } catch (e) {}
 function setSpritz(on) {
+  if (on && tapeMode) setTape(false);
   spritz = on;
   showUI();
   spzKey = '';
@@ -2550,19 +3078,21 @@ function advance() {
 
 audio.ontimeupdate = () => {
   if (!dragging) paintScrub(scrubFrac());
+  if (tapeMode) updateTape();
   const ps = pars(), t = audio.currentTime;
   while (par + 1 < ps.length && ps[par + 1].audio === ps[par].audio
          && ps[par + 1].begin <= t + 0.05) { par++; hl(); }
   if (t >= ps[par].end - 0.05) advance();
 };
-audio.onplay = () => { applyRate(); pp.innerHTML = '&#10074;&#10074;'; karaoke(); showUI(); };
-audio.onpause = () => { pp.innerHTML = '&#9654;'; karaoke(); showUI(0); };
+audio.onplay = () => { applyRate(); pp.innerHTML = '&#10074;&#10074;'; document.body.classList.add('playing'); karaoke(); showUI(); };
+audio.onpause = () => { pp.innerHTML = '&#9654;'; document.body.classList.remove('playing'); karaoke(); showUI(0); };
 audio.onerror = () => { titleEl.textContent = 'audio error: ' + audio.error.code; };
 
 pp.onclick = toggle;
 document.getElementById('slow').onclick = () => setRate(rate - 0.1);
 document.getElementById('fast').onclick = () => setRate(rate + 0.1);
 document.getElementById('spzbtn').onclick = () => setSpritz(!spritz);
+document.getElementById('tapebtn').onclick = () => setTape(!tapeMode);
 
 function pollStatus() {
   fetch('/api/status').then(r => r.json()).then(s => {
@@ -2602,6 +3132,8 @@ function onKey(e) {
   else if (e.key === '-' || e.key === '_') setFont(fontPct - 10);
   else if (e.key === '=' || e.key === '+') setFont(fontPct + 10);
   else if (e.key === 's' || e.key === 'S') setSpritz(!spritz);
+  else if (e.key === 'l' || e.key === 'L') setTape(!tapeMode);
+  else if (e.key === 'k' || e.key === 'K') cycleSkin();
 }
 addEventListener('keydown', onKey);
 
@@ -2685,6 +3217,13 @@ fetch('/api/book/' + encodeURIComponent(BOOK))
   applyTheme(currentThemeId());
   seekPar();
   paintScrub(scrubFrac());
+  document.getElementById('tapebtn').style.display = narrated ? '' : 'none';
+  const forcedView = new URLSearchParams(location.search).get('view');
+  let wantTape = false;
+  try { wantTape = localStorage.getItem('ra:tape') === '1'; } catch (e) {}
+  if (narrated && (wantTape || forcedView === 'tape')) {
+    setTape(true, forcedView !== 'tape');
+  }
   save();
   if (new URLSearchParams(location.search).get('check') === 'ui') {
     runUITests().catch(e => { document.title = 'UITESTS ERROR ' + e.message; });
@@ -2692,7 +3231,9 @@ fetch('/api/book/' + encodeURIComponent(BOOK))
   if (new URLSearchParams(location.search).get('check') === '1') {
     try {
       openToc();
-      tocRows[0].click();                 // must toggle Spritz, i.e. be clickable
+      const srow = tocRows.find(r => /Spritz view/.test(r.textContent));
+      if (!srow) throw new Error('no spritz row');
+      srow.click();                       // must toggle Spritz, i.e. be clickable
       const clicked = spritz === true;
       closeToc();
       setSpritz(false);
@@ -2712,101 +3253,7 @@ fetch('/api/book/' + encodeURIComponent(BOOK))
 TAPE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>tape</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
- :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E")}
- *{box-sizing:border-box}
- html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--text);
-           font:14px system-ui,-apple-system,sans-serif;user-select:none;
-           -webkit-tap-highlight-color:transparent}
- body{background:
-   radial-gradient(110% 80% at 50% 4%,color-mix(in srgb,var(--bg) 74%,#fff 12%),var(--bg) 58%,#000 130%)}
- body::after{content:'';position:fixed;inset:0;pointer-events:none;
-   box-shadow:inset 0 0 120px rgba(0,0,0,.72)}
- #tape{position:absolute;left:50%;top:12px;width:624px;height:396px;margin-left:-312px;
-       transform:rotate(-.35deg);cursor:pointer}
- .shell{position:absolute;inset:0;border-radius:30px;
-   background:linear-gradient(176deg,#f3e9d3 0%,#e6d9bd 26%,#d8caab 58%,#c3b28f 100%);
-   box-shadow:0 22px 42px rgba(0,0,0,.62),0 4px 9px rgba(0,0,0,.4),
-     inset 0 2px 1px rgba(255,255,255,.85),inset 0 -5px 12px rgba(84,62,34,.3),
-     inset 0 0 0 1px rgba(255,255,255,.4)}
- .shell::before{content:'';position:absolute;inset:6px;border-radius:25px;pointer-events:none;
-   background:linear-gradient(120deg,rgba(255,255,255,.34),transparent 24% 74%,rgba(255,255,255,.14));
-   mix-blend-mode:screen;opacity:.5}
- .label{position:absolute;left:24px;right:24px;top:18px;height:252px;border-radius:9px;
-   overflow:hidden;background:#e8dcc2;isolation:isolate;
-   box-shadow:inset 0 0 0 1px rgba(70,55,35,.35),inset 0 4px 14px rgba(0,0,0,.3),
-     0 1px 0 rgba(255,255,255,.55)}
- .label img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
-   filter:saturate(.82) contrast(1.04) sepia(.14) brightness(1.04)}
- .tint,.grain,.gloss{position:absolute;inset:0;pointer-events:none}
- .tint{background:linear-gradient(118deg,rgba(255,245,216,.5) 0%,rgba(255,245,216,.1) 32%,
-        rgba(96,68,32,.16) 76%,rgba(255,245,216,.3) 100%);mix-blend-mode:soft-light}
- .grain{background-image:var(--grain);background-size:140px 140px;mix-blend-mode:overlay;opacity:.42}
- .gloss{background:linear-gradient(100deg,rgba(255,255,255,.34) 0 15%,transparent 33% 68%,
-        rgba(255,255,255,.12) 86%);mix-blend-mode:screen;opacity:.5}
- .label::after{content:'';position:absolute;inset:0;pointer-events:none;
-   box-shadow:inset 0 0 46px rgba(40,28,14,.52)}
- .side,.dur{position:absolute;top:9px;padding:2px 7px 1px;border-radius:2px;
-   background:rgba(20,15,10,.62);color:#f2e4c4;font:700 9px/1.5 system-ui,sans-serif;
-   letter-spacing:.22em;text-transform:uppercase;z-index:2}
- .side{left:10px}
- .dur{right:10px;letter-spacing:.1em}
- .win{position:absolute;top:76px;width:100px;height:100px;border-radius:50%;overflow:hidden;
-   background:radial-gradient(circle at 50% 45%,#241c14,#0b0806 76%);
-   box-shadow:0 0 0 3px rgba(240,231,210,.9),0 0 0 4px rgba(92,72,44,.55),
-     inset 0 7px 16px rgba(0,0,0,.92),0 2px 6px rgba(0,0,0,.42);z-index:2}
- .win.a{left:130px}
- .win.b{right:130px}
- .reel{position:absolute;inset:0;animation:reelspin var(--spin,3.4s) linear infinite;
-   animation-play-state:paused;will-change:transform}
- body.playing .reel{animation-play-state:running}
- @keyframes reelspin{to{transform:rotate(360deg)}}
- .pack{position:absolute;inset:0;border-radius:50%;transform:scale(1);
-   background:repeating-radial-gradient(circle at 50% 50%,#2b2118 0 2px,#35291d 2px 3px,#221a12 3px 4px);
-   box-shadow:inset 0 0 16px #000}
- #ra .pack{transform:scale(var(--pa,1))}
- #rb .pack{transform:scale(var(--pb,.7))}
- .hub{position:absolute;left:50%;top:50%;width:46px;height:46px;margin:-23px 0 0 -23px;
-   border-radius:50%;background:repeating-conic-gradient(from 0deg,#f1e7d0 0 34deg,#b3a482 34deg 60deg);
-   box-shadow:inset 0 0 0 1px rgba(80,60,35,.55),0 1px 4px rgba(0,0,0,.65)}
- .hub::after{content:'';position:absolute;inset:15px;border-radius:50%;
-   background:radial-gradient(circle at 40% 35%,#1b1510,#070504 70%);
-   box-shadow:inset 0 2px 4px #000}
- .cap{position:absolute;left:0;right:0;bottom:0;height:78px;padding:8px 14px 8px;z-index:2;
-   display:flex;flex-direction:column;justify-content:flex-end;gap:1px;color:#f5e9cc;
-   background:linear-gradient(180deg,rgba(18,13,9,0),rgba(18,13,9,.58) 28%,rgba(13,9,6,.86))}
- .ttl{font:600 17px/1.22 Georgia,'DejaVu Serif',serif;white-space:nowrap;overflow:hidden;
-   text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,.5)}
- .aut{font:11px/1.3 system-ui,sans-serif;color:#dccba6;white-space:nowrap;overflow:hidden;
-   text-overflow:ellipsis}
- .chp{font:10px/1.4 system-ui,sans-serif;letter-spacing:.15em;text-transform:uppercase;
-   color:#bfa87f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
- .deck{position:absolute;left:24px;right:24px;bottom:12px;height:104px}
- .head{position:absolute;left:50%;top:14px;width:204px;height:64px;margin-left:-102px;
-   border-radius:6px;background:linear-gradient(180deg,#0d0a08,#1c1510);
-   box-shadow:inset 0 3px 10px #000,0 0 0 1px rgba(90,70,40,.45)}
- .head::before{content:'';position:absolute;left:8%;right:8%;top:50%;height:5px;margin-top:-2px;
-   border-radius:2px;background:linear-gradient(180deg,#2b2118,#4c3b28 58%,#231a12);
-   box-shadow:0 1px 0 rgba(255,255,255,.12)}
- .head::after{content:'';position:absolute;left:41%;right:41%;top:7px;bottom:7px;border-radius:3px;
-   background:linear-gradient(180deg,#c2bcac,#6f695e 55%,#3a3730);opacity:.5}
- .pin{position:absolute;top:32px;width:26px;height:26px;border-radius:50%;
-   background:radial-gradient(circle at 45% 40%,#231c14,#000 72%);
-   box-shadow:inset 0 2px 5px #000,0 0 0 1px rgba(255,255,255,.3)}
- .pin.p1{left:64px}
- .pin.p2{right:64px}
- .brand{position:absolute;left:0;bottom:2px;font:700 9px/1.5 system-ui,sans-serif;
-   letter-spacing:.18em;text-transform:uppercase;color:#8a7a5c}
- .brand span{display:block;font-weight:400;letter-spacing:.1em;color:#a3936f;font-size:8px}
- .counter{position:absolute;right:0;bottom:0;padding:4px 8px 3px;border-radius:4px;
-   background:#15110c;color:#f2d79b;font:600 13px/1.3 ui-monospace,'DejaVu Sans Mono',monospace;
-   letter-spacing:.12em;font-variant-numeric:tabular-nums;
-   box-shadow:inset 0 2px 7px #000,0 1px 0 rgba(255,255,255,.45)}
- .screw{position:absolute;width:12px;height:12px;border-radius:50%;
-   background:radial-gradient(circle at 35% 30%,#fdf8ec,#ab9c7e 62%,#6e6250);
-   box-shadow:inset 0 -1px 2px rgba(0,0,0,.5),0 1px 1px rgba(0,0,0,.4)}
- .screw::after{content:'';position:absolute;left:1px;right:1px;top:5px;height:1.5px;
-   background:#6d6150;transform:rotate(28deg)}
- .s1{left:14px;top:14px}.s2{right:14px;top:14px}.s3{left:14px;bottom:14px}.s4{right:14px;bottom:14px}
+__CASSETTE_CSS__
  #scrub{position:absolute;left:0;right:0;bottom:52px;height:10px;background:var(--panel);
    cursor:pointer;touch-action:none;transition:transform .22s ease,opacity .22s ease}
  #scrubfill{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2))}
@@ -2847,31 +3294,7 @@ TAPE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>tape</ti
  .tocrow.tog .l{color:var(--accent2)}
 </style></head><body>
 <div id="load"><div class="spin"></div><div id="loadtxt">spooling tape&hellip;</div></div>
-<div id="tape">
- <div class="shell">
-  <div class="label">
-   <img id="cov" alt="">
-   <div class="tint"></div><div class="grain"></div><div class="gloss"></div>
-   <div class="side" id="side">Side A</div>
-   <div class="dur" id="dur">--:--</div>
-   <div class="win a"><div class="reel" id="ra"><div class="pack"></div><div class="hub"></div></div></div>
-   <div class="win b"><div class="reel" id="rb"><div class="pack"></div><div class="hub"></div></div></div>
-   <div class="cap">
-    <div class="ttl" id="ttl">&nbsp;</div>
-    <div class="aut" id="aut"></div>
-    <div class="chp" id="chp"></div>
-   </div>
-  </div>
-  <div class="deck">
-   <div class="head"></div>
-   <div class="pin p1"></div><div class="pin p2"></div>
-   <div class="brand">compact cassette<span>type IV &middot; metal &middot; 60</span></div>
-   <div class="counter" id="counter">00:00</div>
-  </div>
-  <div class="screw s1"></div><div class="screw s2"></div>
-  <div class="screw s3"></div><div class="screw s4"></div>
- </div>
-</div>
+__CASSETTE__
 <div id="toc"><div id="tocbody"></div></div>
 <div id="scrub"><div id="scrubfill"></div><div id="scrubgrab"></div></div>
 <div id="bar">
@@ -2915,12 +3338,18 @@ function paint() {
   const t = audio.currentTime || 0;
   const d = duration || audio.duration || 0;
   const f = d ? Math.min(1, Math.max(0, t / d)) : 0;
+  const pct = Math.round(f * 100);
   document.getElementById('scrubfill').style.width = (f * 100).toFixed(2) + '%';
   document.getElementById('scrubgrab').style.left = (f * 100).toFixed(2) + '%';
   // supply reel empties, take-up reel fills
   tape.style.setProperty('--pa', (0.62 + 0.38 * (1 - f)).toFixed(3));
   tape.style.setProperty('--pb', (0.62 + 0.38 * f).toFixed(3));
   document.getElementById('counter').textContent = fmt(t);
+  document.getElementById('pct').textContent = pct + '%';
+  document.getElementById('slimtime').textContent = fmt(t);
+  document.getElementById('slimpct').textContent = 'read along \u00b7 ' + pct + '%';
+  document.getElementById('stkcap').textContent =
+    'CH ' + String(Math.max(0, sec) + 1).padStart(2, '0') + ' \u00b7 ' + pct + '%';
   if (!chapters.length) return;
   let i = 0;
   while (i + 1 < chapters.length && chapters[i + 1].start <= t) i++;
@@ -2933,9 +3362,34 @@ function showChapter() {
   const total = chapters.length;
   document.getElementById('chp').textContent =
     (total > 1 ? 'Ch ' + (sec + 1) + '/' + total + ' \u00b7 ' : '') + c.title;
+  document.getElementById('rednum').textContent = String(Math.max(0, sec) + 1).padStart(2, '0');
+  document.getElementById('slimline').textContent =
+    (data && data.title ? data.title : '') +
+    (total > 1 ? '  \u00b7  Ch ' + (sec + 1) + '/' + total : '') +
+    (c.title ? '  \u00b7  ' + c.title : '');
   titleEl.textContent = (data && data.title ? data.title : '') +
     (total > 1 ? '  \u00b7  ' + (sec + 1) + '/' + total : '');
 }
+
+// ---- skins --------------------------------------------------------------
+const SKINS = ['label', 'studio', 'slim'];
+const SKIN_NAMES = {label: 'Mixtape', studio: 'Studio', slim: 'Slim'};
+let skin = 'label';
+try { skin = localStorage.getItem('ra:skin') || 'label'; } catch (e) {}
+const forcedSkin = new URLSearchParams(location.search).get('skin');
+if (SKINS.includes(forcedSkin)) skin = forcedSkin;
+function applySkin(id, savePref) {
+  if (!SKINS.includes(id)) id = 'label';
+  skin = id;
+  document.getElementById('tape').dataset.skin = id;
+  if (savePref !== false) { try { localStorage.setItem('ra:skin', id); } catch (e) {} }
+}
+function cycleSkin() {
+  applySkin(SKINS[(SKINS.indexOf(skin) + 1) % SKINS.length]);
+  if (tocOpen) renderToc();
+}
+applySkin(skin, false);
+
 
 function setPlaying(on) {
   document.body.classList.toggle('playing', !!on);
@@ -3053,6 +3507,7 @@ function renderToc() {
   };
   add('Theme: ' + themeById(currentThemeId()).name + '  \u25b8', '\u25d1', 'tog',
       () => cycleTheme());
+  add('Skin: ' + SKIN_NAMES[skin] + '  \u25b8', '\u25a3', 'tog', () => cycleSkin());
   add('Controls auto-hide: ' + (zen ? 'on' : 'off'), '\u25cc', 'tog',
       () => { zen = !zen; try { localStorage.setItem('ra:zen', zen ? '1' : '0'); } catch (e) {}
               renderToc(); showUI(); });
@@ -3127,6 +3582,7 @@ function onKey(e) {
   else if (e.key === 'ArrowUp') setRate(rate + 0.1);
   else if (e.key === 'ArrowDown') setRate(rate - 0.1);
   else if (e.key === 't' || e.key === 'T') cycleTheme();
+  else if (e.key === 'k' || e.key === 'K') cycleSkin();
 }
 addEventListener('keydown', onKey);
 
@@ -3255,12 +3711,27 @@ fetch('/api/book/' + encodeURIComponent(BOOK))
 .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
 .then(d => {
   data = d;
+  if (new URLSearchParams(location.search).get('bare')) document.body.classList.add('bare');
   chapters = d.chapters || [];
   duration = d.duration || 0;
   document.getElementById('ttl').textContent = d.title || BOOK;
   document.getElementById('aut').textContent = d.author || '';
+  document.getElementById('tagline').textContent = d.title || BOOK;
+  document.getElementById('topaut').textContent = d.author || '';
+  document.getElementById('slimaut').textContent = d.author || '';
   document.getElementById('dur').textContent = fmt(duration);
-  if (d.cover) document.getElementById('cov').src = '/label/' + encodeURIComponent(BOOK);
+  if (d.cover) {
+    document.getElementById('cov').src = '/label/' + encodeURIComponent(BOOK);
+    const art = '/art/' + encodeURIComponent(BOOK);
+    document.getElementById('stk').src = art;
+    document.getElementById('slimcov').src = art;
+    document.getElementById('big').src = art;
+    fetch('/colors/' + encodeURIComponent(BOOK)).then(r => r.json()).then(c => {
+      const st = document.documentElement.style;
+      if (c.top) st.setProperty('--amb-top', 'rgb(' + c.top.join(',') + ')');
+      if (c.bottom) st.setProperty('--amb-bot', 'rgb(' + c.bottom.join(',') + ')');
+    }).catch(() => {});
+  }
   titleEl.textContent = d.title || '';
   document.title = d.title || 'tape';
   let pos = null;
@@ -3292,14 +3763,18 @@ fetch('/api/book/' + encodeURIComponent(BOOK))
     runUITests().catch(e => { document.title = 'UITESTS ERROR ' + e.message; });
   }
   if (new URLSearchParams(location.search).get('perf') === 'idle') {
-    setPlaying(true);
-    let frames = 0; const t0 = performance.now();
-    const step = () => {
-      frames++;
-      if (performance.now() - t0 < 3000) requestAnimationFrame(step);
-      else console.log('TAPEFPS', Math.round(frames / 3));
-    };
-    requestAnimationFrame(step);
+    if (!new URLSearchParams(location.search).get('still')) setPlaying(true);
+    // Measure after the label/art encodes and the first range read settle:
+    // they otherwise land inside the sample and report the encoder, not the tape.
+    setTimeout(() => {
+      let frames = 0; const t0 = performance.now();
+      const step = () => {
+        frames++;
+        if (performance.now() - t0 < 3000) requestAnimationFrame(step);
+        else console.log('TAPEFPS', Math.round(frames / 3));
+      };
+      requestAnimationFrame(step);
+    }, 3500);
   }
 }).catch(() => {
   document.getElementById('loadtxt').textContent = 'could not open this tape';
@@ -3327,19 +3802,19 @@ async function runUITests() {
   });
   await check('reels stay still while paused', async () => {
     setPlaying(false);
-    const st = getComputedStyle(document.getElementById('ra')).animationPlayState;
+    const st = getComputedStyle(document.querySelector('#ra .hub')).animationPlayState;
     assert(st === 'paused', 'state ' + st);
   });
   await check('reels turn while playing', async () => {
     setPlaying(true);
-    const st = getComputedStyle(document.getElementById('ra')).animationPlayState;
+    const st = getComputedStyle(document.querySelector('#ra .hub')).animationPlayState;
     assert(st === 'running', 'state ' + st);
     setPlaying(false);
   });
   await check('rate changes the reel period', async () => {
-    const before = getComputedStyle(document.getElementById('ra')).animationDuration;
+    const before = getComputedStyle(document.querySelector('#ra .hub')).animationDuration;
     setRate(2);
-    const after = getComputedStyle(document.getElementById('ra')).animationDuration;
+    const after = getComputedStyle(document.querySelector('#ra .hub')).animationDuration;
     assert(before !== after, 'duration unchanged');
     setRate(1);
   });
@@ -3364,6 +3839,13 @@ async function runUITests() {
     assert(currentThemeId() !== before, 'theme unchanged');
     applyTheme(before);
   });
+  await check('skins cycle', async () => {
+    const before = skin;
+    cycleSkin();
+    assert(skin !== before, 'skin unchanged');
+    assert(document.getElementById('tape').dataset.skin === skin, 'skin not applied');
+    applySkin(before);
+  });
   await check('speed buttons click', async () => {
     const before = rate;
     document.getElementById('fast').click();
@@ -3386,6 +3868,9 @@ async function runUITests() {
   document.title = 'UITESTS ' + pass + '/' + results.length + ' ' + results.join(' | ');
 }
 </script></body></html>"""
+
+PLAYER_HTML = PLAYER_HTML.replace("__CASSETTE_CSS__", CASSETTE_CSS).replace("__CASSETTE__", CASSETTE_HTML)
+TAPE_HTML = TAPE_HTML.replace("__CASSETTE_CSS__", CASSETTE_CSS).replace("__CASSETTE__", CASSETTE_HTML)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3492,6 +3977,30 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             with open(fname, 'rb') as f:
                 return self._send(200, f.read(), ctype, {'Cache-Control': 'no-cache'})
+
+        if path.startswith('/art/'):
+            p = self._book_path(path[len('/art/'):])
+            if not p:
+                return self._send(404, b'no cover')
+            fname = art_file(p)
+            if not fname:
+                return self._send(404, b'no cover')
+            ctype = 'image/jpeg'
+            if fname.endswith('.cover'):
+                try:
+                    with open(os.path.join(CACHE_DIR, media_info(p)['key'] + '.mime')) as f:
+                        ctype = f.read().strip() or ctype
+                except Exception:
+                    pass
+            with open(fname, 'rb') as f:
+                return self._send(200, f.read(), ctype, {'Cache-Control': 'no-cache'})
+
+        if path.startswith('/colors/'):
+            p = self._book_path(path[len('/colors/'):])
+            if not p:
+                return self._send(404, b'no cover')
+            return self._send(200, json.dumps(palette_file(p)).encode(), 'application/json',
+                              {'Cache-Control': 'no-cache'})
 
         if path.startswith('/audio/'):
             p = self._book_path(path[len('/audio/'):])

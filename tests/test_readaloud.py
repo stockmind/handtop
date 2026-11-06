@@ -339,6 +339,14 @@ class AudioServerTests(unittest.TestCase):
         status, body, hdrs = self.get('/label/Test%20Tape.m4b')
         self.assertEqual(status, 200)
         self.assertEqual(hdrs['Content-Type'], 'image/jpeg')
+        status, body, hdrs = self.get('/art/Test%20Tape.m4b')
+        self.assertEqual(status, 200)
+        self.assertTrue(len(body) > 100)
+        status, body, hdrs = self.get('/colors/Test%20Tape.m4b')
+        self.assertEqual(status, 200)
+        pal = json.loads(body)
+        self.assertEqual(len(pal['top']), 3)
+        self.assertTrue(all(0 <= c <= 255 for c in pal['top'] + pal['bottom']))
 
     def test_tape_page_is_served(self):
         _, body, _ = self.get('/play?book=Test%20Tape.m4b')
@@ -418,6 +426,13 @@ class BrowserTests(unittest.TestCase):
         log = self.load('play?book=Test%20Tape.m4b&check=1')
         self.assertNotIn('Uncaught', log)
         self.assertIn('<title>CHECK OK tape</title>', log)
+
+    def test_book_opens_on_the_tape(self):
+        log = self.load('play?book=Test%20Book.epub&view=tape&check=ui')
+        self.assertNotIn('Uncaught', log)
+        passed, total, rest = self.ui_results(log)
+        self.assertEqual(passed, total, rest)
+        self.assertIn('tape view toggles PASS', rest)
 
     def test_tape_ui_clicks_and_pad(self):
         log = self.load('play?book=Test%20Tape.m4b&check=ui')
